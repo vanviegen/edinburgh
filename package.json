@@ -1,0 +1,29 @@
+{
+  "name": "edinburgh",
+  "version": "0.1.1",
+  "description": "A streaming backend framework and database, made for sharding and ease of use.",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "start": "bun src/index.ts"
+  },
+  "keywords": [
+    "orm",
+    "backend",
+    "database",
+    "streaming",
+    "sharding",
+    "lmdb",
+    "typescript",
+    "migrations"
+  ],
+  "author": "Frank van Viegen",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/bun": "^1.2.16"
+  },
+  "dependencies": {
+    "olmdb": "^0.2.0",
+    "typescript": "^5.8.3"
+  }
+}
