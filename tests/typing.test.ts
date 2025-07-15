@@ -8,7 +8,7 @@ class Person extends E.createModel({
     age: { type: E.opt(E.number), description: "Current age" },
     cars: { type: E.array(E.opt(E.string)), description: "Owned car types" },
     test: { type: E.or(E.string, E.number), description: "Test field with union type" },
-    owned_data: { type: E.reverseLink(Data, 'owner') }
+    owned_data: { type: E.multiLink(Data) }
 }) {
     toString() { return `${this.name} (${this.age} years old)` }
 }
@@ -19,7 +19,7 @@ class Data extends E.createModel({
     mode: { type: E.or("auto", "manual", E.array(E.number)), description: "Operation mode" },
     createdAt: { type: E.number, description: "Creation timestamp" },
     owner: { type: E.opt(E.link(Person)), description: "Optional data owner"},
-    subjects: { type: E.multiLink(Person, 1, 10), description: "The people this data is about"},
+    subjects: { type: E.multiLink(Person, {min: 1, max: 10, reverse: 'owner_data'}), description: "The people this data is about"},
 }, {
     tableName: "test"
 }) {

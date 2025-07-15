@@ -267,6 +267,26 @@ export class Bytes {
         return this;
     }
 
+    writeBytes(value: Bytes): Bytes {
+        let size = value.byteCount();
+        this.writeNumber(size);
+        this.padWriteBits();
+        this.ensureCapacity(size);
+        this.buffer.set(value.buffer, this.writeByte);
+        this.writeByte += size;
+        return this;
+    }
+
+    readBytes(): Bytes {
+        const size = this.readNumber();
+        if (size < 0 || size > this.buffer.length - this.readByte) {
+            throw new Error('Invalid byte size read');
+        }
+        const bytes = new Bytes(this.buffer.subarray(this.readByte, this.readByte + size));
+        this.readByte += size;
+        return bytes;
+    }
+
     readString(): string {
         this.padReadBits();
         const start = this.readByte;
