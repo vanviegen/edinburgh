@@ -12,121 +12,11 @@ class Error {
     }
 }
 
-abstract class Model<T extends Record<string, any>> {
-    static _config: ExtendedModelConfig;
-    _config: ExtendedModelConfig;
-    _originalValues?: Map<string, any>;
-
-    constructor(initial: Partial<T>) {
-        Object.assign(this, initial);
-        // Cache the config reference for better performance
-        this._config = (this.constructor as typeof Model)._config;
-    }
-
-    // Instance methods that access the cached config
-    getTableName(): string {
-        return this._config.tableName ||= this.constructor.name;
-    }
-
-    getTableId(): number {
-        if (this._config.tableId === undefined) {
-            this._config.tableId = getTableId(this.getTableName());
-        }
-        return this._config.tableId;
-    }
-
-    save() {
-        let keyBytes = new Bytes().writeNumber(this.getTableId());
-        let valBytes = new Bytes();
-
-        for (const [key, def] of Object.entries(this._config.fields)) {
-            def.type.serialize((this as any)[key], def.primary ? keyBytes : valBytes);
-        }
-
-        olmdb.put(keyBytes.getBuffer(), valBytes.getBuffer());
-    }
-
-    // Static method with proper typing
-    static load<M extends Model<any>>(this: new (init?: any) => M, ...primaryKeyValues: any[]): M | undefined {
-        const instance = new this();
-        return instance.load(...primaryKeyValues) ? instance : undefined;
-    }
-
-    // Instance method for loading
-    load(...primaryKeyValues: any[]): boolean {
-        let keyBytes = new Bytes().writeNumber(this.getTableId());
-
-        // Serialize primary key values in the same order as fields
-        let primaryKeyIndex = 0;
-        for (const [fieldKey, def] of Object.entries(this._config.fields)) {
-            if (def.primary) {
-                if (primaryKeyIndex >= primaryKeyValues.length) {
-                    throw new Error(`Missing primary key value for field ${fieldKey}`);
-                }
-                def.type.serialize(primaryKeyValues[primaryKeyIndex], keyBytes);
-                primaryKeyIndex++;
-            }
-        }
-
-        if (primaryKeyIndex !== primaryKeyValues.length) {
-            throw new Error(`Expected ${primaryKeyIndex} primary key values, got ${primaryKeyValues.length}`);
-        }
-
-        const result = olmdb.get(keyBytes.getBuffer());
-        if (!result) return false;
-        const valueBytes = new Bytes(result);
-
-        // Deserialize non-primary fields
-        primaryKeyIndex = 0;
-        for (const [fieldKey, def] of Object.entries(this._config.fields)) {
-            if (def.primary) { // Set primary key value on the instance
-                (this as any)[fieldKey] = primaryKeyValues[primaryKeyIndex];
-                primaryKeyIndex++;
-            } else { // Set non-primary key value
-                def.type.deserialize((this as any), fieldKey, valueBytes);
-            }
-        }
-
-        // Indicate that the model has been loaded
-        this._originalValues = new Map();
-        return true;
-    }
-}
-
-// Type that captures all static methods of Model
-type ModelStaticMembers = typeof Model;
-
-export function createModel<F extends Record<string, FieldConfig>>(
-    fields: F,
-    config: ModelConfig = {}
-) {
-    // Create a new type for all fields in schema
-    type FieldsType = { [K in keyof F]: WrapperToType<F[K]['type']> };
-
-    // Create a complete model instance type that includes both field properties and Model methods
-    type ModelInstanceType = FieldsType & Model<FieldsType>;
-
-    // Create a complete model class type that includes all static methods from Model
-    type ModelClassType = {
-        new(init?: Partial<FieldsType>): ModelInstanceType;
-    } & Omit<ModelStaticMembers, 'prototype' | 'name' | 'length'>;
-
-    let extConfig = config as ExtendedModelConfig;
-    extConfig.fields = fields;
-
-    class CreatedModel extends Model<FieldsType> {
-        static _config = extConfig;
-    }
-
-    return CreatedModel as ModelClassType;
-}
-
-
-const MODEL_REGISTRY: Record<string, typeof Model> = {};
-
+// Base type wrapper remains the same
 export abstract class TypeWrapper<const T> {
-    _T!: T;
+    // _T!: T;
     abstract kind: string;
+    abstract default: T | undefined;
 
     constructor() {}
     abstract serialize(value: any, bytes: Bytes): void;
@@ -138,9 +28,12 @@ export abstract class TypeWrapper<const T> {
     serializeType(bytes: Bytes) {}
 }
 
+// Type wrappers (StringType, NumberType, etc.) remain the same
+// ... keep all your existing type wrapper implementations ...
 
 export class StringType extends TypeWrapper<string> {
     kind = 'string';
+    default = '';
     serialize(value: any, bytes: Bytes) {
         bytes.writeString(value);
     }
@@ -157,6 +50,7 @@ export class StringType extends TypeWrapper<string> {
 
 export class NumberType extends TypeWrapper<number> {
     kind = 'number';
+    default = 0;
     serialize(value: any, bytes: Bytes) {
         bytes.writeNumber(value);
     }
@@ -173,6 +67,7 @@ export class NumberType extends TypeWrapper<number> {
 
 export class ArrayType<T> extends TypeWrapper<T[]> {
     kind = 'array';
+    default = [];
     constructor(public inner: TypeWrapper<T>, public opts: {min?: number, max?: number} = {}) {
         super();
     }
@@ -220,8 +115,11 @@ export class ArrayType<T> extends TypeWrapper<T[]> {
 
 export class OrType<const T> extends TypeWrapper<T> {
     kind = 'or';
-    constructor(public choices: TypeWrapper<unknown>[]) {
+    default: T | undefined;
+
+    constructor(public choices: TypeWrapper<T>[]) {
         super();
+        this.default = choices[0].default; // Default to the first choice's default
     }
     serialize(value: T, bytes: Bytes) {
         for(let i=0; i<this.choices.length; i++) {
@@ -273,6 +171,7 @@ export class OrType<const T> extends TypeWrapper<T> {
 
 class LiteralType<const T> extends TypeWrapper<T> {
     kind = 'literal';
+    default = undefined; // There doesn't need to be a default, as value is always set
     constructor(public value: T) {
         super();
     }
@@ -295,6 +194,7 @@ class LiteralType<const T> extends TypeWrapper<T> {
 
 class BooleanType extends TypeWrapper<boolean> {
     kind = 'boolean';
+    default = false;
     serialize(value: boolean, bytes: Bytes) {
         bytes.writeBits(value ? 1 : 0, 1);
     }
@@ -309,51 +209,219 @@ class BooleanType extends TypeWrapper<boolean> {
     }
 }
 
+// Field configuration interface
+export interface FieldConfig {
+    type: TypeWrapper<any>;
+    description?: string;
+    default?: any;
+    primary?: boolean;
+}
+
+// The updated field function returns the config, but is typed as the value type
+export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig> = {}): T {
+    // Return the config object, but TypeScript sees it as type T
+    options.type = type;
+    return options as any;
+}
+
+// Model registry for type deserialization
+const MODEL_REGISTRY: Record<string, typeof Model> = {};
+
+// Base Model class
+export class Model {
+    static tableName: string = this.name;
+    static indexes?: Array<string|string[]>;
+
+    private static fields?: Record<string, FieldConfig>;
+    private static tableId?: number;
+    
+    // Track original values for change detection
+    private _originalValues?: Map<string, any>;
+    
+    constructor(initial: Partial<any> = {}) {
+        // Initialize the class if not already done
+        if (!("fields" in this.constructor)) (this.constructor as typeof Model).initializeClass();
+
+        // Apply initial values from constructor
+        Object.assign(this, initial);
+    }
+    
+    // Initialize class fields from metadata
+    private static initializeClass(this: typeof Model) {
+        // Look for field definitions in the prototype
+        const proto: any = this.prototype;
+        const fields: Record<string, FieldConfig> = {};
+        
+        for (const key in proto) {
+            const value = proto[key] as FieldConfig;
+            // Check if this property contains field metadata
+            if (value && value.type instanceof TypeWrapper) {
+                fields[key] = value;
+                
+                // Set default value on the prototype
+                proto[key] = 'default' in value ? value.default : value.type.default;
+            }
+        }
+        // Store field definitions on the constructor
+        this.fields = fields;
+
+        MODEL_REGISTRY[this.tableName] = this;
+    }
+    
+    // Get all field definitions for this model class
+    static getFields(): Record<string, FieldConfig> {
+        // Initialize the class if not already done
+        if (!("fields" in this)) this.initializeClass();
+        return this.fields!;
+    }
+
+    getTableId(): number {
+        const model = (this.constructor as typeof Model);
+        if (model.tableId === undefined) {
+            model.tableId = getTableId(model.tableName);
+        }
+        return model.tableId;
+    }
+
+    // Serialization and persistence
+    save() {
+        const fields = (this.constructor as typeof Model).fields!;
+        let keyBytes = new Bytes().writeNumber(this.getTableId());
+        let valBytes = new Bytes();
+
+        for (const [key, fieldConfig] of Object.entries(fields)) {
+            const value = (this as any)[key];
+            fieldConfig.type.serialize(value, fieldConfig.primary ? keyBytes : valBytes);
+        }
+
+        olmdb.put(keyBytes.getBuffer(), valBytes.getBuffer());
+        return this;
+    }
+
+    // Static load method
+    static load(...primaryKeyValues: any[]): Model | undefined {
+        const instance = new this();
+        return instance.load(...primaryKeyValues) ? instance : undefined;
+    }
+
+    // Instance loading
+    load(...primaryKeyValues: any[]): boolean {
+        const fields = (this.constructor as typeof Model).fields!;
+        let keyBytes = new Bytes().writeNumber(this.getTableId());
+
+        // Serialize primary key values
+        let primaryKeyIndex = 0;
+        for (const [fieldKey, fieldConfig] of Object.entries(fields)) {
+            if (fieldConfig.primary) {
+                if (primaryKeyIndex >= primaryKeyValues.length) {
+                    throw new Error(`Missing primary key value for field ${fieldKey}`);
+                }
+                fieldConfig.type.serialize(primaryKeyValues[primaryKeyIndex], keyBytes);
+                primaryKeyIndex++;
+            }
+        }
+
+        if (primaryKeyIndex !== primaryKeyValues.length) {
+            throw new Error(`Expected ${primaryKeyIndex} primary key values, got ${primaryKeyValues.length}`);
+        }
+
+        const result = olmdb.get(keyBytes.getBuffer());
+        if (!result) return false;
+        const valueBytes = new Bytes(result);
+
+        // Deserialize non-primary fields
+        primaryKeyIndex = 0;
+        for (const [fieldKey, fieldConfig] of Object.entries(fields)) {
+            if (fieldConfig.primary) {
+                (this as any)[fieldKey] = primaryKeyValues[primaryKeyIndex];
+                primaryKeyIndex++;
+            } else {
+                fieldConfig.type.deserialize(this, fieldKey, valueBytes);
+            }
+        }
+
+        // Track that the model has been loaded
+        this._originalValues = new Map();
+        return true;
+    }
+
+    validate(): Error[] {
+        const errors: Error[] = [];
+        const fields = (this.constructor as typeof Model).fields!;
+        
+        for (const [key, fieldConfig] of Object.entries(fields)) {
+            const value = (this as any)[key];
+            for (const error of fieldConfig.type.getErrors(value)) {
+                errors.push(error.addPath(key));
+            }
+        }
+        
+        return errors;
+    }
+    
+    isValid(): boolean {
+        return this.validate().length === 0;
+    }
+}
+
+// Link type for models
 class LinkType<T extends typeof Model> extends TypeWrapper<InstanceType<T>> {
-    kind = 'link'
+    kind = 'link';
+    default = undefined;
     TargetModel!: T;
-    constructor(modelOrFunc: T  | (() => T)) {
+    
+    constructor(modelOrFunc: T | (() => T)) {
         super();
-        if ('_config' in modelOrFunc) {
+        if ('fields' in modelOrFunc) {
+            // It's a direct model reference
             this.TargetModel = modelOrFunc;
         } else {
-            // If a function is passed, we will lazily resolve it
-            // This allows circular dependencies in models
+            // It's a function that returns a model
+            const func = modelOrFunc as (() => T);
             Object.defineProperty(this, 'TargetModel', {
                 get: () => {
+                    const result = func();
                     Object.defineProperty(this, 'TargetModel', {
-                        value: modelOrFunc(),
+                        value: result,
                         configurable: true,
                         writable: true
                     });
-                    return this.TargetModel;
+                    return result;
                 },
                 configurable: true,
                 enumerable: true,
             });
         }
     }
+    
     serialize(value: InstanceType<T>, bytes: Bytes): void {
-        for (const [key, def] of Object.entries(value._config.fields)) {
-            if (def.primary) def.type.serialize((this as any)[key], bytes);
+        const fields = this.TargetModel.getFields();
+        for (const [key, fieldConfig] of Object.entries(fields)) {
+            if (fieldConfig.primary) fieldConfig.type.serialize((value as any)[key], bytes);
         }
     }
+    
     deserialize(obj: any, prop: string, bytes: Bytes) {
         const pk: any[] = [];
-        for (const [key, def] of Object.entries(this.TargetModel._config.fields)) {
-            if (def.primary) def.type.deserialize(pk, pk.length, bytes);
+        const fields = this.TargetModel.getFields();
+        
+        for (const [key, fieldConfig] of Object.entries(fields)) {
+            if (fieldConfig.primary) {
+                const index = pk.length;
+                fieldConfig.type.deserialize(pk, index, bytes);
+            }
         }
 
         // Define a getter to load the model on first access
         Object.defineProperty(obj, prop, {
             get: function() {
-                const obj = new (this.TargetModel as any)();
-                if (!obj.load(pk)) {
+                const model = new (this.TargetModel as any)();
+                if (!model.load(...pk)) {
                     throw new Error(`Failed to load model ${this.TargetModel.name} with primary key ${pk}`);
                 }
-                // Invoke set() below, to remove the getter and setter, and just revert to a simple value property
-                this[prop] = obj;
-                return obj;
+                // Override this property with the loaded value
+                this[prop] = model;
+                return model;
             },
             set: function(newValue) {
                 Object.defineProperty(this, prop, {
@@ -364,18 +432,21 @@ class LinkType<T extends typeof Model> extends TypeWrapper<InstanceType<T>> {
                 });
             },
             enumerable: true,
-            configurable: true,
+            configurable: true
         });
     }
+    
     getErrors(value: any): Error[] {
         if (!(value instanceof this.TargetModel)) {
             return [new Error(`Expected instance of ${this.TargetModel.name}, got ${typeof value}`)];
         }
         return [];
     }
+    
     serializeType(bytes: Bytes): void {
-        bytes.writeString(this.TargetModel._config.tableName || this.TargetModel.constructor.name);
+        bytes.writeString(this.TargetModel.tableName);
     }
+    
     static deserializeType(bytes: Bytes, featureFlags: number): LinkType<any> {
         const tableName = bytes.readString();
         const targetModel = MODEL_REGISTRY[tableName];
@@ -384,7 +455,7 @@ class LinkType<T extends typeof Model> extends TypeWrapper<InstanceType<T>> {
     }
 }
 
-
+// Type helper shortcuts
 export const string = new StringType();
 export const number = new NumberType();
 export const boolean = new BooleanType();
@@ -395,11 +466,11 @@ export function literal<const T>(value: T) {
 
 const undef = new LiteralType(undefined);
 export function opt<const T>(inner: TypeWrapper<T>|BasicType) {
-    return new OrType<T|undefined>([undef, wrapIfLiteral(inner),]);
+    return new OrType<undefined|T>([undef, wrapIfLiteral(inner)]);
 }
 
 export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: number} = {}) {
-    return new ArrayType<T>(inner, opts);
+    return new ArrayType<T>(wrapIfLiteral(inner), opts);
 }
 
 export function or<const TWA extends (TypeWrapper<unknown>|BasicType)[]>(...choices: TWA) {
@@ -411,34 +482,11 @@ export function link<const T extends typeof Model>(TargetModel: T | (() => T)) {
 }
 
 type BasicType = TypeWrapper<any> | string | number | boolean | undefined | null;
-
-export type FieldsConfig = {
-    [K in string]: FieldConfig;
-};
-
-export interface FieldConfig {
-    type: TypeWrapper<any>,
-    description?: string,
-    default?: any,
-    primary?: boolean, // If true, this field is part of the primary key
-}
-
-export interface ModelConfig {
-    tableName?: string; // defaults to class name
-    indexes?: Array<string|string[]>; // defaults to []
-}
-
-export interface ExtendedModelConfig extends ModelConfig {
-    fields: Record<string, FieldConfig>;
-    tableId?: number; // Used internally to track table IDs
-}
-
-export type WrapperToType<T> = T extends TypeWrapper<infer U> ? U : T;
-
 type WrappersToUnionType<T extends BasicType[]> = {
     [K in keyof T]: T[K] extends TypeWrapper<infer U> ? U : T[K];
 }[number];
 
+// Utility functions
 function wrapIfLiteral<const T>(type: TypeWrapper<T>): TypeWrapper<T>;
 function wrapIfLiteral<const T>(type: T): LiteralType<T>;
 
@@ -446,6 +494,7 @@ function wrapIfLiteral(type: any) {
     return type instanceof TypeWrapper ? type : new LiteralType(type);
 }
 
+// Table ID mapping
 const MAX_TABLE_ID_ID = -1;
 const TABLE_NAME_ID = -2;
 
@@ -463,40 +512,13 @@ function getTableId(tableName: string): number {
     return id;
 }
 
-
-/**
- * This preserves only the *types* of a model, enough to serialize/deserialize
- * data afterwards (in order to migrate it to a new model version).
- * It does not preserve the class methods, property descriptions, validators, etc.
- */
-export function serializeModel<T>(arg: {fields: FieldsConfig}, bytes: Bytes) {
-    const schema = arg.fields;
-    bytes.writeNumber(0); // feature flags, reserved for future use
-    bytes.writeNumber(Object.keys(schema).length);
-    for (const [key, def] of Object.entries(schema)) {
-        bytes.writeString(key);
-        serializeType(def.type, bytes);
-    }
-}
-
+// Schema serialization utilities
 function serializeType(arg: TypeWrapper<any>, bytes: Bytes) {
     bytes.writeString(arg.kind);
     arg.serializeType(bytes);
 }
 
-export function deserializeModel<T>(bytes: Bytes) {
-    const featureFlags = bytes.readNumber(); // reserved for future use
-    const count = bytes.readNumber();
-    const schema: FieldsConfig = {};
-    for (let i = 0; i < count; i++) {
-        const name = bytes.readString();
-        const type = deserializeType(bytes, featureFlags);
-        schema[name] = {type};
-    }
-    return createModel(schema);
-}
-
-const TYPE_WRAPPERS: Record<string,TypeWrapper<any> | {deserializeType: (bytes: Bytes, featureFlags: number) => TypeWrapper<any>}> = {
+const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (bytes: Bytes, featureFlags: number) => TypeWrapper<any>}> = {
     string: string,
     number: number,
     array: ArrayType,
@@ -504,7 +526,6 @@ const TYPE_WRAPPERS: Record<string,TypeWrapper<any> | {deserializeType: (bytes: 
     literal: LiteralType,
     boolean: boolean,
     link: LinkType,
-    // multiLink: MultiLinkType
 };
 
 function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
@@ -514,6 +535,17 @@ function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
         return TypeWrapper.deserializeType(bytes, featureFlags);
     } else {
         return TypeWrapper;
+    }
+}
+
+// Model schema serialization
+export function serializeModel(TargetModel: typeof Model, bytes: Bytes) {
+    const fields = TargetModel.getFields();
+    bytes.writeNumber(0); // feature flags
+    bytes.writeNumber(Object.keys(fields).length);
+    for (const [key, fieldConfig] of Object.entries(fields)) {
+        bytes.writeString(key);
+        serializeType(fieldConfig.type, bytes);
     }
 }
 

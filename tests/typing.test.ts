@@ -3,35 +3,43 @@ import * as E from '../src/typing';
 import { Bytes } from '../src/bytes';
 
 
-class Person extends E.createModel({
+
+const Person = E.createModel({
     name: { type: E.string, description: "Full name" },
     age: { type: E.opt(E.number), description: "Current age" },
     cars: { type: E.array(E.opt(E.string)), description: "Owned car types" },
     test: { type: E.or(E.string, E.number), description: "Test field with union type" },
     owned_data: { type: E.array(E.link(() => Data)) }
-}) {
-    toString() { return `${this.name} (${this.age} years old)` }
-}
+});
 
 
-class Data extends E.createModel({
+const Data = E.createModel({
     id: { type: E.number, description: "Unique identifier" },
     nothing: {type: E.literal("test"), description: "A useless literal field with a fixed value"},
     mode: { type: E.or("auto", "manual", E.array(E.number)), description: "Operation mode" },
     createdAt: { type: E.number, description: "Creation timestamp" },
     owner: { type: E.opt(E.link(Person)), description: "Optional data owner"},
     subjects: { type: E.array(E.link(Person), {min: 1, max: 10}), description: "The people this data is about"},
-}, {
-    tableName: "test"
-}) {
-    static nextId = 1;
-    constructor() {
-        super();
-        this.id = Data.nextId++;
-        this.mode = "manual";
-        this.createdAt = Date.now();
-    }
-}
+});
+
+
+let p = new Person({name: "x", age: "y"});
+p.cars = ["Toyota", "Honda", undefined, "Ford"];
+p.owned_data = [new Data({mode: "auto"}), new Data(), 3];
+p.owned_data[0].mode = "error";
+
+
+// , {
+//     tableName: "test"
+// }) {
+//     static nextId = 1;
+//     constructor() {
+//         super();
+//         this.id = Data.nextId++;
+//         this.mode = "manual";
+//         this.createdAt = Date.now();
+//     }
+// }
 
 test("Person model serialization and deserialization", () => {
     let model = new Person({test: "hello"});
