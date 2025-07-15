@@ -8,10 +8,11 @@ class Person extends E.createModel({
     age: { type: E.opt(E.number), description: "Current age" },
     cars: { type: E.array(E.opt(E.string)), description: "Owned car types" },
     test: { type: E.or(E.string, E.number), description: "Test field with union type" },
-    owned_data: { type: E.multiLink(Data) }
+    owned_data: { type: E.array(E.link(() => Data)) }
 }) {
     toString() { return `${this.name} (${this.age} years old)` }
 }
+
 
 class Data extends E.createModel({
     id: { type: E.number, description: "Unique identifier" },
@@ -19,7 +20,7 @@ class Data extends E.createModel({
     mode: { type: E.or("auto", "manual", E.array(E.number)), description: "Operation mode" },
     createdAt: { type: E.number, description: "Creation timestamp" },
     owner: { type: E.opt(E.link(Person)), description: "Optional data owner"},
-    subjects: { type: E.multiLink(Person, {min: 1, max: 10, reverse: 'owner_data'}), description: "The people this data is about"},
+    subjects: { type: E.array(E.link(Person), {min: 1, max: 10}), description: "The people this data is about"},
 }, {
     tableName: "test"
 }) {
@@ -41,11 +42,11 @@ test("Person model serialization and deserialization", () => {
 
     let bytes = new Bytes();
     model.serialize(bytes);
-    
+
     expect(bytes).toBeDefined();
 
     let model2 = Person.deserialize(bytes.copy());
-    
+
     expect(model2.name).toBe("test");
     expect(model2.age).toBe(42);
     expect(model2.cars).toEqual(["Toyota", "Honda", undefined, "Ford"]);
@@ -56,18 +57,18 @@ test("Person model serialization and deserialization", () => {
 test("Data model creation and serialization", () => {
     let data = new Data();
     data.mode = "manual";
-    
+
     expect(data.id).toBeGreaterThan(0);
     expect(data.mode).toBe("manual");
     expect(data.createdAt).toBeGreaterThan(0);
 
     let dataBytes = new Bytes();
     data.serialize(dataBytes);
-    
+
     expect(dataBytes).toBeDefined();
 
     let data2 = Data.deserialize(dataBytes.copy());
-    
+
     expect(data2.id).toBe(data.id);
     expect(data2.mode).toBe("manual");
     expect(data2.createdAt).toBe(data.createdAt);
@@ -76,20 +77,20 @@ test("Data model creation and serialization", () => {
 test("Model metadata serialization and deserialization", () => {
     let metaBytes = new Bytes();
     E.serializeModel(Data, metaBytes);
-    
+
     expect(metaBytes).toBeDefined();
 
     const Data2 = E.deserializeModel(metaBytes.copy());
-    
+
     expect(Data2).toBeDefined();
 
     // Test that deserialized model can deserialize data
     let data = new Data();
     let dataBytes = new Bytes();
     data.serialize(dataBytes);
-    
+
     let data3 = Data2.deserialize(dataBytes.copy());
-    
+
     expect(data3).toBeDefined();
     expect(data3.id).toBe(data.id);
     expect(data3.mode).toBe(data.mode);
@@ -149,7 +150,7 @@ Person.stream({
 - They need to be updated whenever the data changes, within the same transaction.
 
 ## Migrations
-- The data on disk has a version. For each version, we can validate that it is compatible (doesn't break) with the current schema. 
+- The data on disk has a version. For each version, we can validate that it is compatible (doesn't break) with the current schema.
 - There's a migrations object, with keys like 1, 2, etc. Each migration is a function that takes the data and returns the migrated data.
 - Deployment must be managed by something we provide:
   - It will verify that all data can be migrated (without actually making changes, that will be done on-demand)
