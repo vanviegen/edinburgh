@@ -14,9 +14,8 @@ class Error {
 
 // Base type wrapper remains the same
 export abstract class TypeWrapper<const T> {
-    // _T!: T;
+    _T!: T; // This field *is* required, because of reasons!
     abstract kind: string;
-    abstract default: T | undefined;
 
     constructor() {}
     abstract serialize(value: any, bytes: Bytes): void;
@@ -33,7 +32,6 @@ export abstract class TypeWrapper<const T> {
 
 export class StringType extends TypeWrapper<string> {
     kind = 'string';
-    default = '';
     serialize(value: any, bytes: Bytes) {
         bytes.writeString(value);
     }
@@ -50,7 +48,6 @@ export class StringType extends TypeWrapper<string> {
 
 export class NumberType extends TypeWrapper<number> {
     kind = 'number';
-    default = 0;
     serialize(value: any, bytes: Bytes) {
         bytes.writeNumber(value);
     }
@@ -67,7 +64,6 @@ export class NumberType extends TypeWrapper<number> {
 
 export class ArrayType<T> extends TypeWrapper<T[]> {
     kind = 'array';
-    default = [];
     constructor(public inner: TypeWrapper<T>, public opts: {min?: number, max?: number} = {}) {
         super();
     }
@@ -115,11 +111,8 @@ export class ArrayType<T> extends TypeWrapper<T[]> {
 
 export class OrType<const T> extends TypeWrapper<T> {
     kind = 'or';
-    default: T | undefined;
-
     constructor(public choices: TypeWrapper<T>[]) {
         super();
-        this.default = choices[0].default; // Default to the first choice's default
     }
     serialize(value: T, bytes: Bytes) {
         for(let i=0; i<this.choices.length; i++) {
@@ -171,7 +164,6 @@ export class OrType<const T> extends TypeWrapper<T> {
 
 class LiteralType<const T> extends TypeWrapper<T> {
     kind = 'literal';
-    default = undefined; // There doesn't need to be a default, as value is always set
     constructor(public value: T) {
         super();
     }
@@ -194,7 +186,6 @@ class LiteralType<const T> extends TypeWrapper<T> {
 
 class BooleanType extends TypeWrapper<boolean> {
     kind = 'boolean';
-    default = false;
     serialize(value: boolean, bytes: Bytes) {
         bytes.writeBits(value ? 1 : 0, 1);
     }
@@ -224,14 +215,10 @@ export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig> = {
     return options as any;
 }
 
-// Model registry for type deserialization
-const MODEL_REGISTRY: Record<string, typeof Model> = {};
-
 // Base Model class
 export class Model {
     static tableName: string = this.name;
     static indexes?: Array<string|string[]>;
-
     private static fields?: Record<string, FieldConfig>;
     private static tableId?: number;
     
@@ -259,22 +246,20 @@ export class Model {
                 fields[key] = value;
                 
                 // Set default value on the prototype
-                proto[key] = 'default' in value ? value.default : value.type.default;
+                proto[key] = value.default;
             }
         }
         // Store field definitions on the constructor
         this.fields = fields;
-
         MODEL_REGISTRY[this.tableName] = this;
     }
     
     // Get all field definitions for this model class
     static getFields(): Record<string, FieldConfig> {
-        // Initialize the class if not already done
         if (!("fields" in this)) this.initializeClass();
         return this.fields!;
     }
-
+    
     getTableId(): number {
         const model = (this.constructor as typeof Model);
         if (model.tableId === undefined) {
@@ -364,10 +349,13 @@ export class Model {
     }
 }
 
+// Model registry for type deserialization
+const MODEL_REGISTRY: Record<string, typeof Model> = {};
+
+
 // Link type for models
 class LinkType<T extends typeof Model> extends TypeWrapper<InstanceType<T>> {
     kind = 'link';
-    default = undefined;
     TargetModel!: T;
     
     constructor(modelOrFunc: T | (() => T)) {
@@ -466,7 +454,7 @@ export function literal<const T>(value: T) {
 
 const undef = new LiteralType(undefined);
 export function opt<const T>(inner: TypeWrapper<T>|BasicType) {
-    return new OrType<undefined|T>([undef, wrapIfLiteral(inner)]);
+    return new OrType<T|undefined>([undef, wrapIfLiteral(inner)]);
 }
 
 export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: number} = {}) {
@@ -539,8 +527,8 @@ function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
 }
 
 // Model schema serialization
-export function serializeModel(TargetModel: typeof Model, bytes: Bytes) {
-    const fields = TargetModel.getFields();
+export function serializeModel(MyModel: typeof Model, bytes: Bytes) {
+    const fields = MyModel.getFields();
     bytes.writeNumber(0); // feature flags
     bytes.writeNumber(Object.keys(fields).length);
     for (const [key, fieldConfig] of Object.entries(fields)) {
