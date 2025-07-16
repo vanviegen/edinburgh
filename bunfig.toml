@@ -1,0 +1,2 @@
+[test]
+pattern = "tests/**/*.test.ts"
