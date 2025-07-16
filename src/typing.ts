@@ -1,6 +1,8 @@
 import { Bytes } from "./bytes";
 import * as olmdb from "olmdb";
 
+export const transact = olmdb.transact;
+
 const EMPTY_MAP = new Map<string, any>(); // Don't change!
 
 class Error {
@@ -26,9 +28,6 @@ export abstract class TypeWrapper<const T> {
     }
     serializeType(bytes: Bytes) {}
 }
-
-// Type wrappers (StringType, NumberType, etc.) remain the same
-// ... keep all your existing type wrapper implementations ...
 
 export class StringType extends TypeWrapper<string> {
     kind = 'string';
@@ -452,27 +451,38 @@ export function literal<const T>(value: T) {
     return new LiteralType<T>(value);
 }
 
+export function or<const T extends (TypeWrapper<unknown>|BasicType)[]>(...choices: T) {
+    return new OrType<UnwrapTypes<T>>(choices.map(wrapIfLiteral) as any); // Not sure why we need the any cast here...
+}
+    
 const undef = new LiteralType(undefined);
-export function opt<const T>(inner: TypeWrapper<T>|BasicType) {
-    return new OrType<T|undefined>([undef, wrapIfLiteral(inner)]);
+export function opt<const T extends TypeWrapper<unknown>|BasicType>(inner: T) {
+    return or(undefined, inner);
 }
 
 export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: number} = {}) {
     return new ArrayType<T>(wrapIfLiteral(inner), opts);
 }
 
-export function or<const TWA extends (TypeWrapper<unknown>|BasicType)[]>(...choices: TWA) {
-    return new OrType<WrappersToUnionType<TWA>>(choices.map(wrapIfLiteral));
-}
+
+
+// export function or<const TWA extends (TypeWrapper<unknown> | BasicType)[]>(...choices: TWA) {
+//     // Create a properly typed array of TypeWrappers
+//     const wrappedChoices = choices.map(wrapIfLiteral) as TypeWrapper<WrappersToUnionType<TWA>>[];
+//     return new OrType<WrappersToUnionType<TWA>>(wrappedChoices);
+// }
 
 export function link<const T extends typeof Model>(TargetModel: T | (() => T)) {
     return new LinkType<T>(TargetModel);
 }
 
 type BasicType = TypeWrapper<any> | string | number | boolean | undefined | null;
-type WrappersToUnionType<T extends BasicType[]> = {
+type UnwrapTypes<T extends BasicType[]> = {
     [K in keyof T]: T[K] extends TypeWrapper<infer U> ? U : T[K];
 }[number];
+
+type UnwrapType<T extends BasicType|TypeWrapper<unknown>> = T extends TypeWrapper<infer U> ? U : T;
+type WrapType<T extends BasicType|TypeWrapper<unknown>> = T extends TypeWrapper<unknown> ? T : LiteralType<T>
 
 // Utility functions
 function wrapIfLiteral<const T>(type: TypeWrapper<T>): TypeWrapper<T>;
@@ -525,15 +535,3 @@ function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
         return TypeWrapper;
     }
 }
-
-// Model schema serialization
-export function serializeModel(MyModel: typeof Model, bytes: Bytes) {
-    const fields = MyModel.getFields();
-    bytes.writeNumber(0); // feature flags
-    bytes.writeNumber(Object.keys(fields).length);
-    for (const [key, fieldConfig] of Object.entries(fields)) {
-        bytes.writeString(key);
-        serializeType(fieldConfig.type, bytes);
-    }
-}
-

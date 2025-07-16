@@ -4,7 +4,7 @@
     "": {
       "name": "edinburgh",
       "dependencies": {
-        "olmdb": "^0.2.0",
+        "olmdb": "^0.2.5",
         "typescript": "^5.8.3",
       },
       "devDependencies": {
@@ -12,6 +12,9 @@
       },
     },
   },
+  "trustedDependencies": [
+    "olmdb",
+  ],
   "packages": {
     "@types/bun": ["@types/bun@1.2.18", "", { "dependencies": { "bun-types": "1.2.18" } }, "sha512-Xf6RaWVheyemaThV0kUfaAUvCNokFr+bH8Jxp+tTZfx7dAPA8z9ePnP9S9+Vspzuxxx9JRAXhnyccRj3GyCMdQ=="],
 
@@ -23,7 +26,7 @@
 
     "csstype": ["csstype@3.1.3", "", {}, "sha512-M1uQkMl8rQK/szD0LNhtqxIPLpimGm8sOBwU7lLnCpSbTyY3yeU1Vc7l4KT5zT4s/yOxHH5O7tIuuLOCnLADRw=="],
 
-    "olmdb": ["olmdb@0.2.0", "", {}, "sha512-i8HBxmuJ4Z3nwYu8g6P0b6sHKU+I8IpqvAWeeZWSLOp24MyPShLxmoXhAIJoALlagI+nmyFkqtHIEh99uSY09A=="],
+    "olmdb": ["olmdb@0.2.5", "", {}, "sha512-CRT7osisjSrRyB8LCmVepWPk2EEa14y1qYYU8ARPJ6gWtcPRIav0veS6bS/qdg5bR3EyckP+nocN8ZVUPazX/g=="],
 
     "typescript": ["typescript@5.8.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ=="],
 
