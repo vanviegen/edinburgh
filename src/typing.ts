@@ -98,7 +98,6 @@ class ModelError extends Error {
     }
 }
 
-// Base type wrapper remains the same
 export abstract class TypeWrapper<const T> {
     _T!: T; // This field *is* required, because of reasons!
     abstract kind: string;
@@ -111,6 +110,10 @@ export abstract class TypeWrapper<const T> {
         return this.getErrors(value).length === 0;
     }
     serializeType(bytes: Bytes) {}
+}
+// Subclasses *may* default a default value, but usually should not.
+export interface TypeWrapper<T> {
+    default?: T | ((model: Model<unknown>) => T);
 }
 
 export class StringType extends TypeWrapper<string> {
@@ -287,8 +290,7 @@ class BooleanType extends TypeWrapper<boolean> {
 export interface FieldConfig<T> {
     type: TypeWrapper<T>;
     description?: string;
-    default?: T | ((model: any) => T);
-    primary?: boolean;
+    default?: T | ((model: Model<unknown>) => T);
 }
 
 
@@ -383,7 +385,7 @@ function initModels() {
                 cls.fields[key] = value;
                 
                 // Set default value on the prototype
-                const def = value.default;
+                const def = value.default || value.type.default;
                 if (typeof def === 'function') {
                     // The default is a function. We'll define a getter on the property in the model prototype,
                     // and once it is read, we'll run the function and set the value as a plain old property
@@ -411,6 +413,11 @@ function initModels() {
 }
 
 
+type IndexTuple<M extends typeof Model<any>, F extends readonly (keyof InstanceType<M> & string)[]> = {
+  [I in keyof F]: InstanceType<M>[F[I]]
+}
+
+
 class Index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> & string)[]> {
     constructor(private MyModel: M, private fieldNames: F, private type: 'primary' | 'unique' | 'secondary' = 'secondary') {
         if (type==='primary') {
@@ -421,8 +428,8 @@ class Index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> 
 
     indexId?: number;
 
-    deserializeKey(bytes: Bytes): (keyof InstanceType<M>)[] {
-        const result: (keyof InstanceType<M>)[] = [];
+    deserializeKey(bytes: Bytes): IndexTuple<M, F> {
+        const result: IndexTuple<M, F> = [] as any;
         for (let i = 0; i < this.fieldNames.length; i++) {
             const fieldName = this.fieldNames[i];
             const fieldConfig = (this.MyModel.fields as any)[fieldName] as FieldConfig<unknown>;
@@ -431,7 +438,7 @@ class Index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> 
         return result;
     }
 
-    serializeKey(args: { [I in keyof F]: InstanceType<M>[F[I]] }, bytes: Bytes) {
+    serializeKey(args: IndexTuple<M, F>, bytes: Bytes) {
         for (let i = 0; i < this.fieldNames.length; i++) {
             const fieldName = this.fieldNames[i];
             const fieldConfig = this.MyModel.fields[fieldName];
@@ -439,8 +446,16 @@ class Index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> 
         }
     }
 
+    serializeModelKey(model: InstanceType<M>, bytes: Bytes) {
+        for (let i = 0; i < this.fieldNames.length; i++) {
+            const fieldName = this.fieldNames[i];
+            const fieldConfig = this.MyModel.fields[fieldName];
+            fieldConfig.type.serialize(model[fieldName], bytes);
+        }
+    }
+
     // args should be an array with the types that the names in F have in InstanceType<M>
-    get(...args: { [I in keyof F]: InstanceType<M>[F[I]] }): InstanceType<M> | undefined {
+    get(...args: IndexTuple<M, F>): InstanceType<M> | undefined {
         if (this.type === 'secondary') {
             throw new ModelError(`Cannot get index ${this.MyModel.name}[${this.fieldNames.join(', ')}]: it is not a primary or unique index`);
         }
@@ -452,7 +467,7 @@ class Index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> 
         if (!valueBuffer) return;
         
         if (this.type === 'unique') {
-            // valueBuffer is a primary key for the target primary index.
+            // valueBuffer contains the index id and key of the primary key that holds the actual data.
             valueBuffer = olmdb.get(valueBuffer);
             if (!valueBuffer) throw new ModelError(`Unique index ${this.MyModel.name}[${this.fieldNames.join(', ')}] points at non-existing primary for key: ${args.join(', ')}`);
         }
@@ -496,6 +511,10 @@ export function index<M extends typeof Model<any>, const F extends (keyof Instan
 
 const INIT_INSTANCE_SYMBOL = Symbol();
 
+export interface Model<SUB> {
+  constructor: typeof Model<SUB>;
+}
+
 // Base Model class
 export abstract class Model<SUB> {
     static pk?: Index<any, any>;
@@ -503,7 +522,7 @@ export abstract class Model<SUB> {
     static tableName: string = this.name;
     static fields: Record<string, FieldConfig<unknown>>;
     fields!: Record<string, FieldConfig<unknown>>;
-    private static tableId?: number;
+    static tableId?: number;
     
     // Track original values for change detection
     _originalValues?: Record<string, any>;
@@ -518,15 +537,10 @@ export abstract class Model<SUB> {
 
     // Serialization and persistence
     save() {
-        TODO(); // Save to all (changed) indexes
         this.validate(true);
-        let keyBytes = new Bytes().writeNumber((this.constructor as typeof Model).getTableId());
+        let keyBytes = new Bytes().writeNumber(this.constructor.tableId!);
+        this.constructor.pk!.serializeModelKey(this, keyBytes);
         let valBytes = new Bytes();
-
-        for (const [key, fieldConfig] of Object.entries(this.fields)) {
-            const value = (this as any)[key];
-            fieldConfig.type.serialize(value, fieldConfig.primary ? keyBytes : valBytes);
-        }
 
         olmdb.put(keyBytes.getBuffer(), valBytes.getBuffer());
         return this;
@@ -570,20 +584,11 @@ class LinkType<T extends typeof Model> extends TypeWrapper<InstanceType<T>> {
     }
     
     serialize(value: InstanceType<T>, bytes: Bytes): void {
-        this.TargetModel.pk!.serializeKey(value, bytes);
+        this.TargetModel.pk!.serializeModelKey(value, bytes);
     }
     
     deserialize(obj: any, prop: string, bytes: Bytes) {
-        const pk: any[] = [];
-        const fields = this.TargetModel.fields;
-        
-        for (const [key, fieldConfig] of Object.entries(fields)) {
-            if (fieldConfig.primary) {
-                const index = pk.length;
-                fieldConfig.type.deserialize(pk, index, bytes);
-            }
-        }
-
+        const pk = this.TargetModel.pk!.deserializeKey(bytes);
         const TargetModel = this.TargetModel;
 
         // Define a getter to load the model on first access
@@ -629,10 +634,49 @@ class LinkType<T extends typeof Model> extends TypeWrapper<InstanceType<T>> {
     }
 }
 
+const ID_REGEX = /^[0-9a-fA-F]{10}$/;
+
+class IdType extends TypeWrapper<number> {
+    kind = 'id';
+
+    serialize(value: string, bytes: Bytes): void {
+        bytes.writeHex(value);
+    }
+    
+    deserialize(obj: any, prop: string, bytes: Bytes): void {
+        obj[prop] = bytes.readHex(5);
+    }
+    
+    getErrors(value: any): ModelError[] {
+        if (!value.match(ID_REGEX)) {
+            return [new ModelError(`Invalid ID format: ${value}`)];
+        }
+        return [];
+    }
+    
+    serializeType(bytes: Bytes): void {
+        bytes.writeString('id');
+    }
+    
+    static deserializeType(bytes: Bytes, featureFlags: number): IdType {
+        return new IdType();
+    }
+
+    default(model: Model<unknown>): string {
+        // Generate a random ID, and if it already exists in the database, retry.
+        let id: string;
+        do {
+            id = Math.random().toString(16).slice(2, 12); // 10 hex characters
+        } while (olmdb.get(new Bytes().writeNumber(model.constructor.tableId!).writeHex(id).getBuffer()));
+        return id;
+    }
+}
+
 // Type helper shortcuts
 export const string = new StringType();
 export const number = new NumberType();
 export const boolean = new BooleanType();
+export const id = new IdType();
 
 export function literal<const T>(value: T) {
     return new LiteralType<T>(value);
@@ -651,17 +695,10 @@ export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?:
     return new ArrayType<T>(wrapIfLiteral(inner), opts);
 }
 
-
-
-// export function or<const TWA extends (TypeWrapper<unknown> | BasicType)[]>(...choices: TWA) {
-//     // Create a properly typed array of TypeWrappers
-//     const wrappedChoices = choices.map(wrapIfLiteral) as TypeWrapper<WrappersToUnionType<TWA>>[];
-//     return new OrType<WrappersToUnionType<TWA>>(wrappedChoices);
-// }
-
 export function link<const T extends typeof Model>(TargetModel: T) {
     return new LinkType<T>(TargetModel);
 }
+
 
 type BasicType = TypeWrapper<any> | string | number | boolean | undefined | null;
 type UnwrapTypes<T extends BasicType[]> = {

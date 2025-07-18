@@ -126,6 +126,31 @@ export class Bytes {
         return this.readBits(bitsNeeded);
     }
 
+    writeHex(value: string): Bytes {
+        this.padWriteBits();
+        const byteCount = Math.ceil(value.length / 2);
+        this.ensureCapacity(byteCount);
+        for (let i = 0; i < byteCount; i++) {
+            const hexPair = value.slice(i * 2, i * 2 + 2);
+            this.buffer[this.writeByte++] = parseInt(hexPair, 16);
+        }
+        return this;
+    }
+
+    readHex(byteCount: number): string {
+        this.padReadBits();
+        if (byteCount < 0 || byteCount > this.buffer.length - this.readByte) {
+            throw new Error('Invalid byte count for readHex');
+        }
+        
+        let hex = '';
+        for (let i = 0; i < byteCount; i++) {
+            const byte = this.buffer[this.readByte++];
+            hex += byte.toString(16).padStart(2, '0');
+        }
+        return hex;
+    }
+
     padReadBits() {
         // If we have any bits left in the current byte, pad them to 8
         if (this.readBit < 8) {
