@@ -13,7 +13,8 @@ try {
 
 @E.registerModel
 class Person extends E.Model<Person> {
-    name = field(E.string, {description: "Full name", primary: true});
+    pk = E.index(Person, ["name"], "primary");
+    name = field(E.string, {description: "Full name"});
     age = field(E.opt(E.number), {description: "Current age", default: 42});
     cars = field(E.array(E.opt(E.string)), {description: "Owned car types"});
     test = field(E.or(E.string, E.number), {description: "Test field with union type", default: "example"});
@@ -23,17 +24,11 @@ class Person extends E.Model<Person> {
     static byCar = E.index(Person, ["cars"]);
 }
 
-Person.byName.get("Frank", "test");
-Person.byName.get(42, "test");
-Person.byName.get("Frank", 42);
-
-Person.byCar.get(["Toyota", "Honda"]);
-Person.byCar.get([true, "Honda"]);
 
 
 @E.registerModel
 class Data extends E.Model<Data> {
-    id = field(E.number, {description: "Unique identifier", primary: true});
+    id = field(E.number, {description: "Unique identifier"});
     nothing = field(E.literal("test"), {description:  "A useless literal field with a fixed value", default: "test"});
     mode = field(E.or("auto", "manual", E.array(E.number)), {description: "Operation mode", default: "auto"});
     createdAt = field(E.number, {description: "Creation timestamp"});
@@ -44,8 +39,19 @@ class Data extends E.Model<Data> {
     // static bySubject = E.index("subjects", {multi: true});
 }
 
+
 function noNeedToRunThis() {
     // Verify that TypeScript errors pop up in all the right places and not in the wrong places.
+
+    Person.byName.get("Frank", "test");
+    // @ts-expect-error
+    Person.byName.get(42, "test");
+    Person.byName.get("Frank", 42);
+
+    Person.byCar.get(["Toyota", "Honda"]);
+    // @ts-expect-error
+    Person.byCar.get([true, "Honda"]);
+
     // @ts-expect-error
     let z = new Person({name: "x", age: "Str"});
 

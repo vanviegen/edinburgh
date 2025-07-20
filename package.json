@@ -23,7 +23,7 @@
     "@types/bun": "^1.2.16"
   },
   "dependencies": {
-    "olmdb": "^0.2.5",
+    "olmdb": "^0.2.7",
     "typescript": "^5.8.3"
   },
   "trustedDependencies": [

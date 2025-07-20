@@ -110,10 +110,16 @@ export abstract class TypeWrapper<const T> {
         return this.getErrors(value).length === 0;
     }
     serializeType(bytes: Bytes) {}
+    
+    // Skip indexing for this field value
+    skipIndex(value: T): boolean {
+        return false;
+    }
 }
+
 // Subclasses *may* default a default value, but usually should not.
 export interface TypeWrapper<T> {
-    default?: T | ((model: Model<unknown>) => T);
+    default?(model: Model<T>): T;
 }
 
 export class StringType extends TypeWrapper<string> {
@@ -232,6 +238,14 @@ export class OrType<const T> extends TypeWrapper<T> {
         }
         return errors;
     }
+    skipIndex(value: T): boolean {
+        for (const choice of this.choices) {
+            if (choice.validate(value)) {
+                return choice.skipIndex(value);
+            }
+        }
+        return false;
+    }
     serializeType(bytes: Bytes): void {
         bytes.writeNumber(this.choices.length);
         for (const choice of this.choices) {
@@ -264,6 +278,11 @@ class LiteralType<const T> extends TypeWrapper<T> {
     serializeType(bytes: Bytes): void {
         bytes.writeString(JSON.stringify(this.value));
     }
+    
+    skipIndex(value: T): boolean {
+        return value == null;
+    }
+    
     static deserializeType(bytes: Bytes, featureFlags: number): LiteralType<any> {
         const value = JSON.parse(bytes.readString());
         return new LiteralType(value);
@@ -290,7 +309,7 @@ class BooleanType extends TypeWrapper<boolean> {
 export interface FieldConfig<T> {
     type: TypeWrapper<T>;
     description?: string;
-    default?: T | ((model: Model<unknown>) => T);
+    default?: T | ((model: Model<any>) => T);
 }
 
 
@@ -328,6 +347,7 @@ export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> 
 }
 
 let uninitializedModels = new Set<typeof Model<unknown>>();
+const MODEL_REGISTRY: Record<string, typeof Model> = {};
 
 export function registerModel<T extends typeof Model<unknown>>(cls: T): T {
     function constructor(this: any, initial?: Record<string,any>) {
@@ -375,7 +395,18 @@ function initModels() {
             // We'll try again after the next class has successfully initialized.
             continue;
         }
+
         uninitializedModels.delete(cls);
+        
+        // If no primary key exists, create one using 'id' field
+        if (!cls.pk) {
+            // If no `id` field exists, add it automatically
+            if (!instance.id) {
+                instance.id = { type: identifier }; 
+            }
+            // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
+            new Index(cls, ['id'], 'primary');
+        }
 
         for (const key in instance) {
             const value = instance[key] as FieldConfig<unknown>;
@@ -417,16 +448,20 @@ type IndexTuple<M extends typeof Model<any>, F extends readonly (keyof InstanceT
   [I in keyof F]: InstanceType<M>[F[I]]
 }
 
+const MAX_INDEX_ID_PREFIX = -1;
+const INDEX_ID_PREFIX = -2;
 
-class Index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> & string)[]> {
-    constructor(private MyModel: M, private fieldNames: F, private type: 'primary' | 'unique' | 'secondary' = 'secondary') {
-        if (type==='primary') {
+class Index<M extends typeof Model<any>, const F extends readonly (keyof InstanceType<M> & string)[]> {
+    constructor(private MyModel: M, public fieldNames: F, private type: 'primary' | 'unique' | 'secondary' = 'secondary') {
+        this.MyModel._indexes.push(this);
+        
+        if (type === 'primary') {
             if (MyModel.pk) throw new ModelError(`Model ${MyModel.name} already has a primary key defined`);
             MyModel.pk = this;
         }
     }
 
-    indexId?: number;
+    cachedIndexId?: number;
 
     deserializeKey(bytes: Bytes): IndexTuple<M, F> {
         const result: IndexTuple<M, F> = [] as any;
@@ -454,12 +489,41 @@ class Index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> 
         }
     }
 
+    getIndexId() {
+        // Resolve an index to a number
+        if (this.cachedIndexId == null) {
+
+            const indexNameBytes = new Bytes().writeNumber(INDEX_ID_PREFIX).writeString(this.MyModel.tableName).writeString(this.type);
+            for(let name of this.fieldNames) indexNameBytes.writeString(name);
+            const indexNameBuf = indexNameBytes.getBuffer();
+
+            let result = olmdb.get(indexNameBuf);
+            if (result) {
+                this.cachedIndexId = new Bytes(result).readNumber();
+            } else {
+                const maxIndexIdBuf = new Bytes().writeNumber(MAX_INDEX_ID_PREFIX).getBuffer();
+                result = olmdb.get(maxIndexIdBuf);
+                this.cachedIndexId = result ? new Bytes(result).readNumber() + 1 : 1;
+                // TODO: only cache if transaction succeeds
+
+                const idBuf = new Bytes().writeNumber(this.cachedIndexId).getBuffer()
+                olmdb.put(indexNameBuf, idBuf);
+                olmdb.put(maxIndexIdBuf, idBuf); // This will also cause the transaction to rerun if we were raced
+                olmdb.onRevert(() => {
+                    // When raced, unset the cached index id
+                    this.cachedIndexId = undefined;
+                });
+            }
+        }
+        return this.cachedIndexId;
+    }
+
     // args should be an array with the types that the names in F have in InstanceType<M>
     get(...args: IndexTuple<M, F>): InstanceType<M> | undefined {
         if (this.type === 'secondary') {
             throw new ModelError(`Cannot get index ${this.MyModel.name}[${this.fieldNames.join(', ')}]: it is not a primary or unique index`);
         }
-        let indexId = this.indexId ||= getIndexId(this.MyModel.tableName, this.fieldNames as string[]); // We're pretty sure field names should not be number or symbols, right?
+        let indexId = this.getIndexId(); // We're pretty sure field names should not be number or symbols, right?
         let keyBytes = new Bytes().writeNumber(indexId);
         this.serializeKey(args, keyBytes);
 
@@ -491,6 +555,83 @@ class Index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> 
         result._originalValues = deepClone(values);
         return result;
     }
+
+    save(model: InstanceType<M>) {        
+        if (this.type === 'primary') this.savePrimary(model);
+        else if (this.type === 'unique') this.saveUnique(model);
+        else throw new ModelError(`Index type '${this.type}' not implemented yet`);
+    }
+
+    skipIndex(model: InstanceType<M>): boolean {
+        for (const fieldName of this.fieldNames) {
+            const fieldConfig = this.MyModel.fields[fieldName];
+            if (fieldConfig.type.skipIndex(model[fieldName])) return true;
+        }
+        return false;
+    }
+
+    savePrimary(model: InstanceType<M>) {
+        let keyBytes = new Bytes().writeNumber(this.getIndexId());
+        this.serializeModelKey(model, keyBytes);
+        
+        let valBytes = new Bytes();
+        // Serialize all non-primary key fields
+        for (const [fieldName, fieldConfig] of Object.entries(model.fields)) {
+            if (!this.fieldNames.includes(fieldName as any)) {
+                if (!fieldConfig.type.skipIndex((model as any)[fieldName])) {
+                    fieldConfig.type.serialize((model as any)[fieldName], valBytes);
+                }
+            }
+        }
+        
+        olmdb.put(keyBytes.getBuffer(), valBytes.getBuffer());
+    }
+
+    /**
+     * TODO
+     * Does it make sense to include the primary key index id within each secondary index value?
+     * It's convenient, because we don't need to prefix the buffer (which we can only do by rewriting it.)
+     * It does waste space though.
+     */
+
+    saveUnique(model: InstanceType<M>) {
+        let newKeyBytes;
+        if (!this.skipIndex(model)) {
+            newKeyBytes = new Bytes().writeNumber(this.getIndexId());
+            this.serializeModelKey(model, newKeyBytes);
+        }
+
+        // Check if index values have changed
+        if (model._originalValues) {
+            let orgKeyBytes;
+            if (!this.skipIndex(model._originalValues as any)) {
+                orgKeyBytes = new Bytes().writeNumber(this.getIndexId());
+                this.serializeModelKey(model._originalValues as any, orgKeyBytes);
+            }
+            if ((!newKeyBytes && !orgKeyBytes) || (newKeyBytes && orgKeyBytes && Buffer.compare(newKeyBytes.getBuffer(), orgKeyBytes.getBuffer()) === 0)) {
+                // No change in index key, nothing to do
+                return;
+            }
+            // Delete the old key
+            if (orgKeyBytes) olmdb.del(orgKeyBytes.getBuffer());
+        }
+        
+        if (!newKeyBytes) {
+            // No new key, nothing to do
+            return;
+        }
+
+        // Check if key already exists
+        if (olmdb.get(newKeyBytes.getBuffer())) {
+            throw new ModelError(`Unique constraint violation for ${model.constructor.tableName}[${this.fieldNames.join('+')}]`);
+        }
+        
+        // Value is the primary key
+        let valBytes = new Bytes().writeNumber(model.constructor.pk!.getIndexId());
+        model.constructor.pk!.serializeModelKey(model, valBytes);
+
+        olmdb.put(newKeyBytes.getBuffer(), valBytes.getBuffer());
+    }
 }
 
 function deepClone(obj: Record<string, any>): Record<string, any> {
@@ -504,8 +645,13 @@ function deepClone(obj: Record<string, any>): Record<string, any> {
     return clone;
 }
 
-export function index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> & string) | (keyof InstanceType<M> & string)[]>(MyModel: M, fields: F, type: 'primary' | 'unique' | 'secondary' = 'secondary') {
-    return new Index(MyModel, fields instanceof Array ? fields : [fields], type);
+type IndexType = 'primary' | 'unique' | 'secondary';
+
+export function index<M extends typeof Model<any>, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F, type?: IndexType) : Index<M, [F]>;
+export function index<M extends typeof Model<any>, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS, type?: IndexType) : Index<M, FS>;
+
+export function index(MyModel: typeof Model<any>, fields: any, type: IndexType = 'secondary') {
+    return new Index(MyModel, Array.isArray(fields) ? fields : [fields], type);
 }
 
 
@@ -518,16 +664,16 @@ export interface Model<SUB> {
 // Base Model class
 export abstract class Model<SUB> {
     static pk?: Index<any, any>;
+    static _indexes: Index<any, any>[] = [];
 
     static tableName: string = this.name;
     static fields: Record<string, FieldConfig<unknown>>;
     fields!: Record<string, FieldConfig<unknown>>;
-    static tableId?: number;
     
     // Track original values for change detection
     _originalValues?: Record<string, any>;
-    
-    constructor(initial: Partial<SUB> = {}) {
+
+    constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
         // This constructor will only be called once, from `initModels`. All other instances will
         // be created by the 'fake' constructor. The typing for `initial` *is* important though.
         if (initial as any !== INIT_INSTANCE_SYMBOL) {
@@ -538,12 +684,25 @@ export abstract class Model<SUB> {
     // Serialization and persistence
     save() {
         this.validate(true);
-        let keyBytes = new Bytes().writeNumber(this.constructor.tableId!);
-        this.constructor.pk!.serializeModelKey(this, keyBytes);
-        let valBytes = new Bytes();
-
-        olmdb.put(keyBytes.getBuffer(), valBytes.getBuffer());
+        
+        
+        // Handle unique indexes
+        for (const idx of this.constructor._indexes) {
+            idx.save(this)
+        }
+        
+        // Update original values
+        const originalOriginalValues = this._originalValues;
+        this._originalValues = deepClone(this as any);
+        olmdb.onRevert(() => {
+            this._originalValues = originalOriginalValues
+        });
         return this;
+    }
+
+    // Static load method
+    static load(...args: any[]) {
+        return this.pk!.get(...args);
     }
 
     // Discard changes by restoring original values
@@ -571,12 +730,8 @@ export abstract class Model<SUB> {
     }
 }
 
-// Model registry for type deserialization
-const MODEL_REGISTRY: Record<string, typeof Model> = {};
-
-
 // Link type for models
-class LinkType<T extends typeof Model> extends TypeWrapper<InstanceType<T>> {
+class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceType<T>> {
     kind = 'link';
     
     constructor(public TargetModel: T) {
@@ -636,7 +791,7 @@ class LinkType<T extends typeof Model> extends TypeWrapper<InstanceType<T>> {
 
 const ID_REGEX = /^[0-9a-fA-F]{10}$/;
 
-class IdType extends TypeWrapper<number> {
+class IdentifierType extends TypeWrapper<string> {
     kind = 'id';
 
     serialize(value: string, bytes: Bytes): void {
@@ -655,19 +810,18 @@ class IdType extends TypeWrapper<number> {
     }
     
     serializeType(bytes: Bytes): void {
-        bytes.writeString('id');
     }
     
-    static deserializeType(bytes: Bytes, featureFlags: number): IdType {
-        return new IdType();
+    static deserializeType(bytes: Bytes, featureFlags: number): IdentifierType {
+        return new IdentifierType();
     }
 
-    default(model: Model<unknown>): string {
+    default(model: Model<any>): string {
         // Generate a random ID, and if it already exists in the database, retry.
         let id: string;
         do {
             id = Math.random().toString(16).slice(2, 12); // 10 hex characters
-        } while (olmdb.get(new Bytes().writeNumber(model.constructor.tableId!).writeHex(id).getBuffer()));
+        } while (olmdb.get(new Bytes().writeNumber(model.constructor.pk!.cachedIndexId!).writeHex(id).getBuffer()));
         return id;
     }
 }
@@ -676,7 +830,7 @@ class IdType extends TypeWrapper<number> {
 export const string = new StringType();
 export const number = new NumberType();
 export const boolean = new BooleanType();
-export const id = new IdType();
+export const identifier = new IdentifierType();
 
 export function literal<const T>(value: T) {
     return new LiteralType<T>(value);
@@ -688,14 +842,14 @@ export function or<const T extends (TypeWrapper<unknown>|BasicType)[]>(...choice
     
 const undef = new LiteralType(undefined);
 export function opt<const T extends TypeWrapper<unknown>|BasicType>(inner: T) {
-    return or(undefined, inner);
+    return or(undef, inner);
 }
 
 export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: number} = {}) {
     return new ArrayType<T>(wrapIfLiteral(inner), opts);
 }
 
-export function link<const T extends typeof Model>(TargetModel: T) {
+export function link<const T extends typeof Model<any>>(TargetModel: T) {
     return new LinkType<T>(TargetModel);
 }
 
@@ -719,28 +873,6 @@ function wrapIfLiteral<const T>(type: T): LiteralType<T>;
 
 function wrapIfLiteral(type: any) {
     return type instanceof TypeWrapper ? type : new LiteralType(type);
-}
-
-// Resolve an index to a number
-const MAX_INDEX_ID_PREFIX = -1;
-const INDEX_ID_PREFIX = -2;
-
-function getIndexId(indexName: string, fieldNames: string[]): number {
-    const indexNameBytes = new Bytes().writeNumber(INDEX_ID_PREFIX).writeString(indexName);
-    for(let name of fieldNames) {
-        indexNameBytes.writeString(name);
-    }
-    const indexNameBuf = indexNameBytes.getBuffer();
-    let result = olmdb.get(indexNameBuf);
-    if (result) return new Bytes(result).readNumber();
-
-    const maxIndexIdBuf = new Bytes().writeNumber(MAX_INDEX_ID_PREFIX).getBuffer();
-    result = olmdb.get(maxIndexIdBuf);
-    const id = result ? new Bytes(result).readNumber() + 1 : 1;
-    const idBuf = new Bytes().writeNumber(id).getBuffer()
-    olmdb.put(indexNameBuf, idBuf);
-    olmdb.put(maxIndexIdBuf, idBuf);
-    return id;
 }
 
 // Schema serialization utilities
