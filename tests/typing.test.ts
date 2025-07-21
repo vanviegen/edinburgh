@@ -13,15 +13,16 @@ try {
 
 @E.registerModel
 class Person extends E.Model<Person> {
-    pk = E.index(Person, ["name"], "primary");
+    static pk = E.index(Person, ["name"], "primary");
+
     name = field(E.string, {description: "Full name"});
     age = field(E.opt(E.number), {description: "Current age", default: 42});
     cars = field(E.array(E.opt(E.string)), {description: "Owned car types"});
     test = field(E.or(E.string, E.number), {description: "Test field with union type", default: "example"});
     owned_data = field(E.array(E.link(Data)), {description: "Owned data", default: () => []});
 
-    static byName = E.index(Person, ["name","test"], "unique");
-    static byCar = E.index(Person, ["cars"]);
+    static byCombi = E.index(Person, ["name","test"], "unique");
+    static byCar = E.index(Person, ["cars"], "unique");
 }
 
 
@@ -43,10 +44,10 @@ class Data extends E.Model<Data> {
 function noNeedToRunThis() {
     // Verify that TypeScript errors pop up in all the right places and not in the wrong places.
 
-    Person.byName.get("Frank", "test");
+    Person.byCombi.get("Frank", "test");
     // @ts-expect-error
-    Person.byName.get(42, "test");
-    Person.byName.get("Frank", 42);
+    Person.byCombi.get(42, "test");
+    Person.byCombi.get("Frank", 42);
 
     Person.byCar.get(["Toyota", "Honda"]);
     // @ts-expect-error
@@ -168,7 +169,7 @@ test("Boolean type validation", () => {
 test("Model persistence", async () => {
     @E.registerModel
     class TestModel extends E.Model<TestModel> {
-        id = field(E.number, {primary: true});
+        id = field(E.number);
         name = field(E.string);
         flag = field(E.boolean, {default: false});
     }

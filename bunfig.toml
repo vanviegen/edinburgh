@@ -1,2 +1,2 @@
 [test]
-pattern = "tests/**/*.test.ts"
+root="tests"

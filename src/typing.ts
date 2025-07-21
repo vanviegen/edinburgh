@@ -309,7 +309,7 @@ class BooleanType extends TypeWrapper<boolean> {
 export interface FieldConfig<T> {
     type: TypeWrapper<T>;
     description?: string;
-    default?: T | ((model: Model<any>) => T);
+    default?: T | ((model: Record<string,any>) => T);
 }
 
 
@@ -399,7 +399,7 @@ function initModels() {
         uninitializedModels.delete(cls);
         
         // If no primary key exists, create one using 'id' field
-        if (!cls.pk) {
+        if (!cls._pk) {
             // If no `id` field exists, add it automatically
             if (!instance.id) {
                 instance.id = { type: identifier }; 
@@ -452,12 +452,15 @@ const MAX_INDEX_ID_PREFIX = -1;
 const INDEX_ID_PREFIX = -2;
 
 class Index<M extends typeof Model<any>, const F extends readonly (keyof InstanceType<M> & string)[]> {
-    constructor(private MyModel: M, public fieldNames: F, private type: 'primary' | 'unique' | 'secondary' = 'secondary') {
+    constructor(private MyModel: M, public fieldNames: F, private type: IndexType) {
         this.MyModel._indexes.push(this);
         
         if (type === 'primary') {
-            if (MyModel.pk) throw new ModelError(`Model ${MyModel.name} already has a primary key defined`);
-            MyModel.pk = this;
+            // Do not access .pk on the typed Model, as it will prevent to user from assigning the index
+            // we're constructing to .pk on the model (circular type).
+            let AnyModel = MyModel as any; 
+            if (AnyModel._pk && AnyModel._pk !== this) throw new ModelError(`Model ${MyModel.name} already has a primary key defined`);
+            AnyModel._pk = this;
         }
     }
 
@@ -627,8 +630,8 @@ class Index<M extends typeof Model<any>, const F extends readonly (keyof Instanc
         }
         
         // Value is the primary key
-        let valBytes = new Bytes().writeNumber(model.constructor.pk!.getIndexId());
-        model.constructor.pk!.serializeModelKey(model, valBytes);
+        let valBytes = new Bytes().writeNumber(model.constructor._pk!.getIndexId());
+        model.constructor._pk!.serializeModelKey(model, valBytes);
 
         olmdb.put(newKeyBytes.getBuffer(), valBytes.getBuffer());
     }
@@ -663,7 +666,7 @@ export interface Model<SUB> {
 
 // Base Model class
 export abstract class Model<SUB> {
-    static pk?: Index<any, any>;
+    static _pk?: Index<any, any>;
     static _indexes: Index<any, any>[] = [];
 
     static tableName: string = this.name;
@@ -701,8 +704,8 @@ export abstract class Model<SUB> {
     }
 
     // Static load method
-    static load(...args: any[]) {
-        return this.pk!.get(...args);
+    static load<SUB>(this: typeof Model<SUB>, ...args: any[]): SUB | undefined {
+        return this._pk!.get(...args);
     }
 
     // Discard changes by restoring original values
@@ -739,11 +742,11 @@ class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceType<T>>
     }
     
     serialize(value: InstanceType<T>, bytes: Bytes): void {
-        this.TargetModel.pk!.serializeModelKey(value, bytes);
+        this.TargetModel._pk!.serializeModelKey(value, bytes);
     }
     
     deserialize(obj: any, prop: string, bytes: Bytes) {
-        const pk = this.TargetModel.pk!.deserializeKey(bytes);
+        const pk = this.TargetModel._pk!.deserializeKey(bytes);
         const TargetModel = this.TargetModel;
 
         // Define a getter to load the model on first access
@@ -821,7 +824,7 @@ class IdentifierType extends TypeWrapper<string> {
         let id: string;
         do {
             id = Math.random().toString(16).slice(2, 12); // 10 hex characters
-        } while (olmdb.get(new Bytes().writeNumber(model.constructor.pk!.cachedIndexId!).writeHex(id).getBuffer()));
+        } while (olmdb.get(new Bytes().writeNumber(model.constructor._pk!.cachedIndexId!).writeHex(id).getBuffer()));
         return id;
     }
 }
