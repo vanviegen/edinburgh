@@ -10,6 +10,13 @@ export class Bytes {
     public writeByte: number = 0;
     public writeBit: number = 8;
     
+    static BASE64_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$';
+    static BASE64_LOOKUP = (() => {
+        const arr = new Uint8Array(128); // all ASCII
+        for (let i = 0; i < this.BASE64_CHARS.length; ++i) arr[this.BASE64_CHARS.charCodeAt(i)] = i;
+        return arr;
+    })();
+
     constructor(data: Uint8Array | number | undefined = undefined) {
         if (data instanceof Uint8Array) {
             this.buffer = data;
@@ -22,6 +29,7 @@ export class Bytes {
     reset() {
         this.readByte = 0;
         this.readBit = 8;
+        return this;
     }
 
     byteCount(): number {
@@ -126,29 +134,22 @@ export class Bytes {
         return this.readBits(bitsNeeded);
     }
 
-    writeHex(value: string): Bytes {
-        this.padWriteBits();
-        const byteCount = Math.ceil(value.length / 2);
-        this.ensureCapacity(byteCount);
-        for (let i = 0; i < byteCount; i++) {
-            const hexPair = value.slice(i * 2, i * 2 + 2);
-            this.buffer[this.writeByte++] = parseInt(hexPair, 16);
+    readBase64(charCount: number): string {
+        let result = '';
+        for(let i = 0; i < charCount; i++) {
+            result += Bytes.BASE64_CHARS[this.readBits(6)];
+        }
+        return result;
+    }
+    
+    writeBase64(value: string) {
+        this.ensureCapacity(Math.ceil(value.length * 6 / 8));
+        for(let i = 0; i < value.length; i++) {
+            const v = Bytes.BASE64_LOOKUP[value.charCodeAt(i)];
+            if (v == undefined) throw new Error(`Invalid Base64 character: ${value[i]}`);
+            this.writeBits(v, 6);
         }
         return this;
-    }
-
-    readHex(byteCount: number): string {
-        this.padReadBits();
-        if (byteCount < 0 || byteCount > this.buffer.length - this.readByte) {
-            throw new Error('Invalid byte count for readHex');
-        }
-        
-        let hex = '';
-        for (let i = 0; i < byteCount; i++) {
-            const byte = this.buffer[this.readByte++];
-            hex += byte.toString(16).padStart(2, '0');
-        }
-        return hex;
     }
 
     padReadBits() {

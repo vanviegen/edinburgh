@@ -1,10 +1,11 @@
 import { test, expect, beforeEach } from "bun:test";
 import * as E from '../src/typing';
+import * as olmdb from "olmdb";
 const {field} = E;
 
 
 try {
-    E.olmdb.init("./.olmdb_test");
+    E.init("./.olmdb_test");
 } catch (error: any) {
     if (error.code !== "DUP_INIT") {
         throw error; // Rethrow if it's not the expected error
@@ -19,7 +20,7 @@ class Person extends E.Model<Person> {
     age = field(E.opt(E.number), {description: "Current age", default: 42});
     cars = field(E.array(E.opt(E.string)), {description: "Owned car types"});
     test = field(E.or(E.string, E.number), {description: "Test field with union type", default: "example"});
-    owned_data = field(E.array(E.link(Data)), {description: "Owned data", default: () => []});
+    owned_data = field(E.array(E.link(Data, 'subjects')), {description: "Owned data", default: () => []});
 
     static byCombi = E.index(Person, ["name","test"], "unique");
     static byCar = E.index(Person, ["cars"], "unique");
@@ -29,7 +30,7 @@ class Person extends E.Model<Person> {
 
 @E.registerModel
 class Data extends E.Model<Data> {
-    id = field(E.number, {description: "Unique identifier"});
+    id = field(E.identifier, {description: "Unique identifier"});
     nothing = field(E.literal("test"), {description:  "A useless literal field with a fixed value", default: "test"});
     mode = field(E.or("auto", "manual", E.array(E.number)), {description: "Operation mode", default: "auto"});
     createdAt = field(E.number, {description: "Creation timestamp"});
@@ -39,7 +40,6 @@ class Data extends E.Model<Data> {
     // static byCreationTime = E.index("createdAt");
     // static bySubject = E.index("subjects", {multi: true});
 }
-
 
 function noNeedToRunThis() {
     // Verify that TypeScript errors pop up in all the right places and not in the wrong places.
@@ -87,38 +87,52 @@ function noNeedToRunThis() {
 beforeEach(async () => {
     // Clean up all existing pairs
     await E.transact(() => {
-        for (const {key} of E.olmdb.scan()) {
-            E.olmdb.del(key);
+        for (const {key} of olmdb.scan()) {
+            olmdb.del(key);
         }
     });
 });
 
-test("Checks for validity", () => {
-    let p = new Person({cars: ["Toyota", "Honda", "Ford"]});
-    expect(p.isValid()).toBe(false);
+test("Checks for validity", async () => {
+    const p = new Person();
+    expect(p.constructor).toBe(Person);
 
-    p.name = "Frank";
-    expect(p.isValid()).toBe(true);
+    await E.transact(() => {
+        let p = new Person({cars: ["Toyota", "Honda", "Ford"]});
+        expect(p.isValid()).toBe(false);
 
-    p.age = undefined;
-    expect(p.isValid()).toBe(true);
+        p.name = "Frank";
+        expect(p.isValid()).toBe(true);
 
-    // @ts-expect-error
-    p.cars = undefined;
-    expect(p.isValid()).toBe(false);
+        p.age = undefined;
+        expect(p.isValid()).toBe(true);
 
-    // @ts-expect-error
-    p.cars = 3;
-    // p.cars = ["Toyota", "Honda", undefined, "Ford", 5];
-    expect(p.isValid()).toBe(false);
-    p.cars = ["Toyota", "Honda", "Ford"];
-    expect(p.isValid()).toBe(true);
+        // @ts-expect-error
+        p.cars = undefined;
+        expect(p.isValid()).toBe(false);
 
-    // @ts-expect-error
-    p.age = "y";
-    expect(p.isValid()).toBe(false);
-    p.age = 42;
-    expect(p.isValid()).toBe(true);
+        // @ts-expect-error
+        p.cars = 3;
+        // @ts-expect-error
+        p.cars = ["Toyota", "Honda", undefined, "Ford", 5];
+        expect(p.isValid()).toBe(false);
+        p.cars = ["Toyota", "Honda", "Ford"];
+        expect(p.isValid()).toBe(true);
+
+        // @ts-expect-error
+        p.age = "y";
+        expect(p.isValid()).toBe(false);
+        p.age = 42;
+        expect(p.isValid()).toBe(true);
+    });
+
+    await E.transact(() => {
+        const p = Person.load("Frank");
+        expect(p).toBeDefined();
+        expect(p!.name).toBe("Frank");
+        expect(p!.age).toBe(42);
+        expect(p!.cars).toEqual(["Toyota", "Honda", "Ford"]);
+    });
 })
 
 test("Sets defaults", () => {
