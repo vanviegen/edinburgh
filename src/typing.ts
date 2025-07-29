@@ -380,6 +380,13 @@ let uninitializedModels = new Set<typeof Model<unknown>>();
 const modelRegistry: Record<string, typeof Model> = {};
 const registerModelCache = new WeakMap<typeof Model, typeof Model>();
 
+function isObjectEmpty(obj: object) {
+    for (let key in obj) {
+        if (obj.hasOwnProperty(key)) return false;
+    }
+    return true;
+}
+
 export function registerModel<T extends typeof Model<unknown>>(cls: T): T {
     if (cls.isProxied) return cls; // Object is already wrapped
     if (registerModelCache.has(cls)) {
@@ -389,8 +396,12 @@ export function registerModel<T extends typeof Model<unknown>>(cls: T): T {
         if (uninitializedModels.has(this.constructor)) {
             throw new DatabaseError("Cannot instantiate while linked models haven't been registered yet", 'INIT_ERROR');
         }
-        if (initial) Object.assign(this, initial);
-        
+        if (initial && !isObjectEmpty(initial)) {
+            Object.assign(this, initial);
+            const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
+            modifiedInstances.add(this);
+        }
+
         return new Proxy(this, modificationTracker);
     }
 
@@ -462,7 +473,7 @@ function initModels() {
                 cls.fields[key] = value;
                 
                 // Set default value on the prototype
-                const def = value.default || value.type.default;
+                const def = value.default ?? value.type.default;
                 if (typeof def === 'function') {
                     // The default is a function. We'll define a getter on the property in the model prototype,
                     // and once it is read, we'll run the function and set the value as a plain old property
@@ -481,7 +492,7 @@ function initModels() {
                         },
                         configurable: true,    
                     });
-                } else {
+                } else if (def !== undefined) {
                     (cls.prototype as any)[key] = def;
                 }
             }
@@ -816,6 +827,8 @@ export abstract class Model<SUB> {
         if (this._originalValues) {
             Object.assign(this, deepClone(this._originalValues));
         }
+        const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
+        modifiedInstances.delete((this as any)[TARGET_SYMBOL] || this);
     }
 
     validate(raise: boolean = false): DatabaseError[] {

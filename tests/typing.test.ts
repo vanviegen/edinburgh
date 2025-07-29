@@ -135,7 +135,7 @@ test("Checks for validity", async () => {
     });
 })
 
-test("Sets defaults", () => {
+test("Sets defaults", async () => {
 
     @E.registerModel
     class Defaults extends E.Model<Defaults> {
@@ -148,36 +148,41 @@ test("Sets defaults", () => {
         userName = field(E.string, {default: obj => `${obj.first}${obj.last[0]||''}`.toLowerCase()})
     }
 
-    let d = new Defaults();
-    expect(d.role).toBe("CEO");
-    expect(d.tags).toEqual([12, 5]);
-    d.tags.pop()
-    d.first = "John";
-    d.last = "Lennon";
-    expect(d.userName).toBe("johnl");
+    await E.transact(() => {
+        let d = new Defaults();
+        expect(d.role).toBe("CEO");
+        expect(d.tags).toEqual([12, 5]);
+        d.tags.pop()
+        d.first = "John";
+        d.last = "Lennon";
+        expect(d.userName).toBe("johnl");
 
-    let e = new Defaults();
-    e.tags.push(9);
-
-    expect(d.tags).toEqual([12]);
-    expect(e.tags).toEqual([12, 5, 9]);
+        let e = new Defaults();
+        e.tags.push(9);
+        
+        expect(d.tags).toEqual([12]);
+        expect(e.tags).toEqual([12, 5, 9]);
+        e.discard();
+    });
 })
 
-test("Boolean type validation", () => {
+test("Boolean type validation", async () => {
     @E.registerModel
     class Settings extends E.Model<Settings> {
         enabled = field(E.boolean, {description: "Feature toggle"});
     }
 
-    let s = new Settings({enabled: true});
-    expect(s.isValid()).toBe(true);
+    await E.transact(() => {
+        let s = new Settings({enabled: true});
+        expect(s.isValid()).toBe(true);
 
-    // @ts-expect-error
-    s.enabled = "true";
-    expect(s.isValid()).toBe(false);
+        // @ts-expect-error
+        s.enabled = "true";
+        expect(s.isValid()).toBe(false);
 
-    s.enabled = false;
-    expect(s.isValid()).toBe(true);
+        s.enabled = false;
+        expect(s.isValid()).toBe(true);
+    });
 })
 
 test("Model persistence", async () => {
@@ -189,8 +194,7 @@ test("Model persistence", async () => {
     }
 
     await E.transact(async () => {
-        const model = new TestModel({id: 1, name: "test"});
-        model.save();
+        new TestModel({id: 1, name: "test"});
     });
 
     await E.transact(() => {
@@ -209,24 +213,21 @@ test("Model persistence", async () => {
 })
 
 test("Link type validation and lazy loading", async () => {
-    await E.transact(async () => {
+    const id = await E.transact(async () => {
         let person = new Person({name: "Frank", cars: ["Toyota", "Honda"]});
-        person.save();
 
-        let data = new Data({
-            id: 1,
+        return (new Data({
             mode: "auto",
             createdAt: 123456,
             subjects: [person]
-        });
-        data.save();
+        })).id;
     });
 
     // Test loading
     await E.transact(async () => {
-        const loadedData = await Data.load(1)
+        const loadedData = await Data.load(id);
         expect(loadedData).toBeDefined();
-        expect(loadedData!.id).toBe(1);
+        expect(loadedData!.id).toBe(id);
         expect(loadedData!.mode).toBe("auto");
         expect(loadedData!.createdAt).toBe(123456);
         expect(loadedData!.subjects.length).toBe(1);
@@ -235,6 +236,7 @@ test("Link type validation and lazy loading", async () => {
         // @ts-expect-error
         loadedData!.subjects = [new Data()];
         expect(loadedData!.isValid()).toBe(false);
+        loadedData!.discard();
     });
 })
 
