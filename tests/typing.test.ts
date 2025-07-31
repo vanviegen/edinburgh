@@ -162,7 +162,7 @@ test("Sets defaults", async () => {
         
         expect(d.tags).toEqual([12]);
         expect(e.tags).toEqual([12, 5, 9]);
-        e.discard();
+        e.preventPersist();
     });
 })
 
@@ -236,7 +236,7 @@ test("Link type validation and lazy loading", async () => {
         // @ts-expect-error
         loadedData!.subjects = [new Data()];
         expect(loadedData!.isValid()).toBe(false);
-        loadedData!.discard();
+        loadedData!.preventPersist();
     });
 })
 

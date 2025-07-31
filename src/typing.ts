@@ -4,7 +4,7 @@ import * as olmdb from "olmdb";
 
 // We use recursive proxies to track modifications made to, say, arrays within models. In
 // order to know which model a nested object belongs to, we maintain a WeakMap that maps
-// objects to their owner model.
+// objects to their owner (unproxied) model.
 const modificationOwnerMap = new WeakMap<object, Model<any>>();
 
 // A cache for the proxies around nested objects, so that we don't need to recreate them
@@ -18,7 +18,7 @@ const TARGET_SYMBOL = Symbol('target');
 // This symbol is used to attach a set of modified instances to the running transaction.
 const MODIFIED_INSTANCES_SYMBOL = Symbol('modifiedInstances');
 
-let logLevel = 2;
+let logLevel = 0;
 
 
 /**
@@ -73,8 +73,8 @@ export function transact<T>(fn: () => T): Promise<T> {
             return result;
         } catch (error) {
             // Discard changes on all saved and still unsaved instances
-            for (const instance of savedInstances) instance.discard();
-            for (const instance of modifiedInstances) instance.discard();
+            for (const instance of savedInstances) instance.preventPersist();
+            for (const instance of modifiedInstances) instance.preventPersist();
             throw error;
         }
     });
@@ -101,26 +101,56 @@ const modificationTracker: ProxyHandler<any> = {
         // Check cache first
         let proxy = modificationProxyCache.get(value);
         if (proxy) return proxy;
-        
-        const ownerModel = modificationOwnerMap.get(target) || target;
-        if (target === ownerModel && !ownerModel._fields[prop as string]) {
-            // No need to track properties that are not model fields.
-            return value;
+
+        let model;
+        if (target instanceof Model) {
+            if (!target._fields[prop as string]) {
+                // No need to track properties that are not model fields.
+                return value;
+            }
+            model = target;
+        } else {
+            model = modificationOwnerMap.get(target);
+            assert(model);
         }
 
+        let state = model._state;
+        if (state !== 0 && state !== 2) {
+            // We don't need to track changes for this model (anymore). So we can just return the unproxied object.
+            // As we doing the modificationProxyCache lookup first, the identity of returned objects will not change:
+            // once a proxied object is returned, the same property will always return a proxied object.
+            return value;
+        }
+        
         if (modificationOwnerMap.get(value)) {
             throw new DatabaseError("Object cannot be embedded in multiple model instances", 'VALUE_ERROR');
         }
-        modificationOwnerMap.set(value, ownerModel);
+        modificationOwnerMap.set(value, model);
         proxy = new Proxy(value, modificationTracker);
         modificationProxyCache.set(value, proxy);
         return proxy;
     },
     set(target, prop, value) {
+        let model;
+        if (target instanceof Model) {
+            model = target;
+        } else {
+            model = modificationOwnerMap.get(target);
+            assert(model);
+        }
+
+        let state = model._state;
+        if (state === 0 || state === 2) {
+            const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
+            modifiedInstances.add(model);
+            if (state === 2) {
+                model._state = model.constructor._indexes!.map(idx => idx.getKeyFromModel(model, idx.type === 'primary', false));
+            } else {
+                model._state = 1;
+            }
+        }
+
         target[prop] = value;
-        const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
-        const ownerModel = modificationOwnerMap.get(target) || target;
-        modifiedInstances.add(ownerModel);
         return true;
     }
 };
@@ -133,14 +163,16 @@ export abstract class TypeWrapper<const T> {
     constructor() {}
     abstract serialize(obj: any, prop: string|number, bytes: Bytes, model?: Model<any>): void;
     abstract deserialize(obj: any, prop: string|number, bytes: Bytes, model?: Model<any>): void;
-    abstract getErrors(value: any): DatabaseError[];
-    validate(value: any): boolean {
-        return this.getErrors(value).length === 0;
+    abstract getErrors(obj: any, prop: string | number): DatabaseError[];
+    validateAndSerialize(obj: any, prop: string|number, bytes: Bytes, model?: Model<any>): void {
+        const errors = this.getErrors(obj, prop);
+        if (errors.length) throw errors[0];
+        this.serialize(obj, prop, bytes, model);
     }
     serializeType(bytes: Bytes) {}
     
     // Skip indexing for this field value
-    skipIndex(value: T): boolean {
+    checkSkipIndex(obj: any, prop: string | number): boolean {
         return false;
     }
 }
@@ -158,9 +190,9 @@ export class StringType extends TypeWrapper<string> {
     deserialize(obj: any, prop: string | number, bytes: Bytes, model?: Model<any>): void {
         obj[prop] = bytes.readString();
     }
-    getErrors(value: any): DatabaseError[] {
-        if (typeof value !== 'string') {
-            return [new DatabaseError(`Expected string, got ${typeof value}`, 'INVALID_TYPE')];
+    getErrors(obj: any, prop: string | number): DatabaseError[] {
+        if (typeof obj[prop] !== 'string') {
+            return [new DatabaseError(`Expected string, got ${typeof obj[prop]}`, 'INVALID_TYPE')];
         }
         return [];
     }
@@ -174,7 +206,8 @@ export class NumberType extends TypeWrapper<number> {
     deserialize(obj: any, prop: string | number, bytes: Bytes, model?: Model<any>): void {
         obj[prop] = bytes.readNumber();
     }
-    getErrors(value: any): DatabaseError[] {
+    getErrors(obj: any, prop: string | number): DatabaseError[] {
+        const value = obj[prop];
         if (typeof value !== 'number' || isNaN(value)) {
             return [new DatabaseError(`Expected number, got ${typeof value}`, 'INVALID_TYPE')];
         }
@@ -203,7 +236,8 @@ export class ArrayType<T> extends TypeWrapper<T[]> {
         }
         obj[prop] = result;
     }
-    getErrors(value: any): DatabaseError[] {
+    getErrors(obj: any, prop: string | number): DatabaseError[] {
+        const value = obj[prop];
         if (!Array.isArray(value)) {
             return [new DatabaseError(`Expected array, got ${typeof value}`, 'INVALID_TYPE')];
         }
@@ -215,7 +249,7 @@ export class ArrayType<T> extends TypeWrapper<T[]> {
             errors.push(new DatabaseError(`Array length ${value.length} is greater than maximum ${this.opts.max}`, 'OUT_OF_BOUNDS'));
         }
         for (let i = 0; i < value.length; i++) {
-            for(let itemError of this.inner.getErrors(value[i])) {
+            for(let itemError of this.inner.getErrors(value, i)) {
                 errors.push(addErrorPath(itemError, i));
             }
         }
@@ -235,17 +269,18 @@ export class OrType<const T> extends TypeWrapper<T> {
     constructor(public choices: TypeWrapper<T>[]) {
         super();
     }
-    serialize(obj: any, prop: string, bytes: Bytes, model?: Model<any>) {
-        const value = obj[prop];
-        for(let i=0; i<this.choices.length; i++) {
-            const type = this.choices[i];
-            if (type.validate(value)) {
-                bytes.writeUIntN(i, this.choices.length-1);
-                type.serialize(obj, prop, bytes, model);
-                return;
+    _getChoiceIndex(obj: any, prop: string | number): number {
+        for (const [i, choice] of this.choices.entries()) {
+            if (choice.getErrors(obj, prop).length === 0) {
+                return i;
             }
         }
-        throw new DatabaseError(`Value does not match any union type: ${value}`, 'INVALID_TYPE');
+        throw new DatabaseError(`Value does not match any union type: ${obj[prop]}`, 'INVALID_TYPE');
+    }
+    serialize(obj: any, prop: string, bytes: Bytes, model?: Model<any>) {
+        const choiceIndex = this._getChoiceIndex(obj, prop);
+        bytes.writeUIntN(choiceIndex, this.choices.length-1);
+        this.choices[choiceIndex].serialize(obj, prop, bytes, model);
     }
     deserialize(obj: any, prop: string | number, bytes: Bytes, model?: Model<any>): void {
         const index = bytes.readUIntN(this.choices.length-1);
@@ -255,26 +290,21 @@ export class OrType<const T> extends TypeWrapper<T> {
         const type = this.choices[index];
         type.deserialize(obj, prop, bytes, model);
     }
-    getErrors(value: T): DatabaseError[] {
+    getErrors(obj: any, prop: string | number): DatabaseError[] {
         const errors: DatabaseError[] = [];
         for (let i = 0; i < this.choices.length; i++) {
             const type = this.choices[i];
-            if (type.validate(value)) {
-                return [];
-            }
-            for (let err of type.getErrors(value)) {
-                errors.push(addErrorPath(err, `option ${i+1}`));
+            const subErrors = type.getErrors(obj, prop);
+            if (subErrors.length === 0) return [];
+            for (let err of subErrors) {
+                errors.push(addErrorPath(err, `opt${i+1}`));
             }
         }
         return errors;
     }
-    skipIndex(value: T): boolean {
-        for (const choice of this.choices) {
-            if (choice.validate(value)) {
-                return choice.skipIndex(value);
-            }
-        }
-        return false;
+    checkSkipIndex(obj: any, prop: string | number): boolean {
+        const choiceIndex = this._getChoiceIndex(obj, prop);
+        return this.choices[choiceIndex].checkSkipIndex(obj, prop);
     }
     serializeType(bytes: Bytes): void {
         bytes.writeNumber(this.choices.length);
@@ -302,15 +332,15 @@ class LiteralType<const T> extends TypeWrapper<T> {
     deserialize(obj: any, prop: string | number, bytes: Bytes, model?: Model<any>): void {
         obj[prop] = this.value;
     }
-    getErrors(value: any): DatabaseError[] {
-        return this.value===value ? [] : [new DatabaseError(`Invalid literal value ${value} instead of ${this.value}`, 'INVALID_TYPE')];
+    getErrors(obj: any, prop: string | number): DatabaseError[] {
+        return this.value===obj[prop] ? [] : [new DatabaseError(`Invalid literal value ${obj[prop]} instead of ${this.value}`, 'INVALID_TYPE')];
     }
     serializeType(bytes: Bytes): void {
         bytes.writeString(JSON.stringify(this.value));
     }
-    
-    skipIndex(value: T): boolean {
-        return value == null;
+
+    checkSkipIndex(obj: any, prop: string | number): boolean {
+        return obj[prop] == null;
     }
     
     static deserializeType(bytes: Bytes, featureFlags: number): LiteralType<any> {
@@ -327,9 +357,9 @@ class BooleanType extends TypeWrapper<boolean> {
     deserialize(obj: any, prop: string | number, bytes: Bytes, model?: Model<any>): void {
         obj[prop] = bytes.readBits(1) === 1;
     }
-    getErrors(value: any): DatabaseError[] {
-        if (typeof value !== 'boolean') {
-            return [new DatabaseError(`Expected boolean, got ${typeof value}`, 'INVALID_TYPE')];
+    getErrors(obj: any, prop: string | number): DatabaseError[] {
+        if (typeof obj[prop] !== 'boolean') {
+            return [new DatabaseError(`Expected boolean, got ${typeof obj[prop]}`, 'INVALID_TYPE')];
         }
         return [];
     }
@@ -405,7 +435,7 @@ export function registerModel<T extends typeof Model<unknown>>(cls: T): T {
         return new Proxy(this, modificationTracker);
     }
 
-    // TODO: either delete this or provide some comments
+    // We want .constructor to point at our fake constructor function.
     cls.prototype.constructor = constructor as any;
 
     // Copy the prototype chain for the constructor as well as for instantiated objects
@@ -514,7 +544,7 @@ const INDEX_ID_PREFIX = -2;
 
 class Index<M extends typeof Model<any>, const F extends readonly (keyof InstanceType<M> & string)[]> {
     private MyModel: M;
-    constructor(MyModel: M, public fieldNames: F, private type: IndexType) {
+    constructor(MyModel: M, public fieldNames: F, public type: IndexType) {
         MyModel = this.MyModel = registerModel(MyModel);
         (MyModel._indexes ||= []).push(this);
 
@@ -538,31 +568,42 @@ class Index<M extends typeof Model<any>, const F extends readonly (keyof Instanc
         return result;
     }
 
-    serializeKey(args: IndexTuple<M, F>, bytes: Bytes) {
+    serializeArgs(args: IndexTuple<M, F>, bytes: Bytes) {
         for (let i = 0; i < this.fieldNames.length; i++) {
             const fieldName = this.fieldNames[i];
             const fieldConfig = this.MyModel.fields[fieldName];
-            fieldConfig.type.serialize(args, i, bytes);
+            fieldConfig.type.validateAndSerialize(args, i, bytes);
         }
     }
 
-    toKeyBuffer(args: IndexTuple<M, F>): Uint8Array {
+    getKeyFromArgs(args: IndexTuple<M, F>): Uint8Array {
         let indexId = this.getIndexId(); // We're pretty sure field names should not be number or symbols, right?
         let keyBytes = new Bytes().writeNumber(indexId);
-        this.serializeKey(args, keyBytes);
+        this.serializeArgs(args, keyBytes);
         return keyBytes.getBuffer();
     }
 
-    serializeModelKey(model: InstanceType<M>, bytes: Bytes) {
+    serializeModel(model: InstanceType<M>, bytes: Bytes) {
         for (let i = 0; i < this.fieldNames.length; i++) {
             const fieldName = this.fieldNames[i];
             const fieldConfig = this.MyModel.fields[fieldName];
-            fieldConfig.type.serialize(model, fieldName, bytes, model);
+            fieldConfig.type.validateAndSerialize(model, fieldName, bytes, model);
         }
     }
 
-    modelToKeyArray(model: InstanceType<M>): IndexTuple<M, F> {
-        return this.fieldNames.map((fieldName) => model[fieldName]) as unknown as IndexTuple<M, F>;
+    getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: true): Uint8Array | undefined;
+    getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: false): Uint8Array;
+
+    getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: boolean): Uint8Array | undefined {
+        if (checkSkip && this.checkSkip(model)) return undefined;
+        const bytes = new Bytes();
+        if (includeIndexId) bytes.writeNumber(this.getIndexId());
+        this.serializeModel(model, bytes);
+        return bytes.getBuffer();
+    }
+
+    modelToArgs(model: InstanceType<M>): IndexTuple<M, F> | undefined {
+        return this.checkSkip(model) ? undefined: this.fieldNames.map((fieldName) => model[fieldName]) as unknown as IndexTuple<M, F>;
     }
 
     getIndexId(): number {
@@ -597,12 +638,14 @@ class Index<M extends typeof Model<any>, const F extends readonly (keyof Instanc
     }
 
     // args should be an array with the types that the names in F have in InstanceType<M>
-    get(...args: IndexTuple<M, F> | [Uint8Array]): InstanceType<M> | undefined {
+    get(...args: IndexTuple<M, F>): InstanceType<M> | undefined {
         if (this.type === 'secondary') {    
             throw new Error(`secondary indexes do not support get()`);
         }
-        let keyBuffer = args.length==1 && args[0] instanceof Uint8Array ? args[0] : this.toKeyBuffer(args as IndexTuple<M, F>);
-        console.log(`Getting primary ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] with key`, args, keyBuffer);
+        let keyBuffer = this.getKeyFromArgs(args as IndexTuple<M, F>);
+        if (logLevel >= 3) {
+            console.log(`Getting primary ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${this.getIndexId()}) with key`, args, keyBuffer);
+        }
 
         let valueBuffer = olmdb.get(keyBuffer);
         if (!valueBuffer) return;
@@ -630,106 +673,75 @@ class Index<M extends typeof Model<any>, const F extends readonly (keyof Instanc
             }
         }
 
-        // Track that the model has been loaded
-        result._originalValues = deepClone(values);
         return result;
     }
 
-    save(model: InstanceType<M>) {        
+    save(model: InstanceType<M>, originalKey?: Uint8Array) {
         // Note: this can (and usually will) be called on the non-proxied model instance.
         assert(this.MyModel.prototype === model.constructor.prototype);
-        if (this.type === 'primary') this.savePrimary(model);
-        else if (this.type === 'unique') this.saveUnique(model);
+        if (this.type === 'primary') this.savePrimary(model, originalKey);
+        else if (this.type === 'unique') this.saveUnique(model, originalKey);
         else throw new DatabaseError(`Index type '${this.type}' not implemented yet`, 'NOT_IMPLEMENTED');
     }
 
-    skipIndex(model: InstanceType<M>): boolean {
+    checkSkip(model: InstanceType<M>): boolean {
         for (const fieldName of this.fieldNames) {
             const fieldConfig = this.MyModel.fields[fieldName];
-            if (fieldConfig.type.skipIndex(model[fieldName])) return true;
+            if (fieldConfig.type.checkSkipIndex(model, fieldName)) return true;
         }
         return false;
     }
 
-    savePrimary(model: InstanceType<M>) {
-        let keyBytes = new Bytes().writeNumber(this.getIndexId());
-        this.serializeModelKey(model, keyBytes);
-        
-        let valBytes = new Bytes();
+    savePrimary(model: InstanceType<M>, originalKey?: Uint8Array) {
+        let newKey = this.getKeyFromModel(model, true, false); // Cannot be undefined for primary
+        // originalKey for primary includes the index id, so we can compare it directly
+        if (originalKey && Buffer.compare(newKey, originalKey)) throw new DatabaseError(`Cannot change primary key for ${this.MyModel.tableName}[${this.fieldNames.join(', ')}]: ${originalKey} -> ${newKey}`, 'PRIMARY_CHANGE');
+
         // Serialize all non-primary key fields
+        let valBytes = new Bytes();
         for (const [fieldName, fieldConfig] of Object.entries(model._fields)) {
             if (!this.fieldNames.includes(fieldName as any)) {
-                fieldConfig.type.serialize(model, fieldName, valBytes, model);
+                fieldConfig.type.validateAndSerialize(model, fieldName, valBytes, model);
             }
         }
         
-        olmdb.put(keyBytes.getBuffer(), valBytes.getBuffer());
+        olmdb.put(newKey, valBytes.getBuffer());
 
         if (logLevel >= 2) {
-            keyBytes.reset();
+            const keyBytes = new Bytes(newKey);
             let indexId = keyBytes.readNumber();
             console.log(`Saved primary ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${indexId}) with key`, this.deserializeKey(keyBytes), keyBytes.getBuffer());
         }
     }
 
-    saveUnique(model: InstanceType<M>) {
-        // Generate the new key, if there should be any.
-        let newKeyBytes;
-        if (!this.skipIndex(model)) {
-            newKeyBytes = new Bytes().writeNumber(this.getIndexId());
-            this.serializeModelKey(model, newKeyBytes);
-        }
+    saveUnique(model: InstanceType<M>, originalKey?: Uint8Array) {
+        let newKey = this.getKeyFromModel(model, false, true);
 
-        if (model._originalValues) {
-            // This record existed before. Generate the original key.
-            let orgKeyBytes;
-            if (!this.skipIndex(model._originalValues as any)) {
-                orgKeyBytes = new Bytes().writeNumber(this.getIndexId());
-                this.serializeModelKey(model._originalValues as any, orgKeyBytes);
-            }
-            // If the key hasn't changed, we're good.
-            if ((!newKeyBytes && !orgKeyBytes) || (newKeyBytes && orgKeyBytes && Buffer.compare(newKeyBytes.getBuffer(), orgKeyBytes.getBuffer()) === 0)) {
+        if (originalKey) {
+            if (newKey && Buffer.compare(newKey, originalKey) === 0) {
                 // No change in index key, nothing to do
                 return;
             }
-            // Delete the old key.
-            if (orgKeyBytes) olmdb.del(orgKeyBytes.getBuffer());
+            olmdb.del(originalKey);
         }
         
-        if (!newKeyBytes) {
+        if (!newKey) {
             // No new key, nothing to do
             return;
         }
 
         // Check that this is not a duplicate key
-        if (olmdb.get(newKeyBytes.getBuffer())) {
+        if (olmdb.get(newKey)) {
             throw new DatabaseError(`Unique constraint violation for ${model.constructor.tableName}[${this.fieldNames.join('+')}]`, 'UNIQUE_CONSTRAINT');
         }
         
-        // Value is the primary key
-        let valBytes = new Bytes().writeNumber(model.constructor._pk!.getIndexId());
-        model.constructor._pk!.serializeModelKey(model, valBytes);
-
-        olmdb.put(newKeyBytes.getBuffer(), valBytes.getBuffer());
+        let linkKey = model.constructor._pk!.getKeyFromModel(model, false, false);
+        olmdb.put(newKey, linkKey);
 
         if (logLevel >= 2) {
-            newKeyBytes.reset();
-            let indexId = newKeyBytes.readNumber();
-            console.log(`Saved unique index ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${indexId}) with key`, this.deserializeKey(newKeyBytes));
+            console.log(`Saved unique index ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] with key`, this.deserializeKey(new Bytes(newKey)));
         }
-
     }
-}
-
-function deepClone(obj: Record<string, any>): Record<string, any> {
-    if (obj === null || typeof obj !== 'object') return obj;
-    if (Array.isArray(obj)) return obj.map(deepClone);
-    
-    const clone: Record<string, any> = {};
-    for (const key in obj) {
-        clone[key] = deepClone(obj[key]);
-    }
-    return clone;
 }
 
 type IndexType = 'primary' | 'unique' | 'secondary';
@@ -768,8 +780,14 @@ export abstract class Model<SUB> {
     // when this instance was loaded, so that we know what to do on save().
     _reverseLinksToBeDeleted?: Map<LinkType<any>, Set<string>>; // The strings are JSONed primary keys
 
-    // Track original values for change detection
-    _originalValues?: Record<string, any>;
+    /** The keys for all indexes *before* the instance was modified.
+      * 0: new instance, unmodified
+      * 1: new instance, modified (and in modifiedInstances)
+      * 2: loaded from disk, unmodified
+      * 3: persistence disabled
+      * array: loaded from disk, modified (and in modifiedInstances), array values are original index buffers
+      */
+    _state: Array<Uint8Array> | 0 | 1 | 2 | 3 = 0;
 
     constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
         // This constructor will only be called once, from `initModels`. All other instances will
@@ -781,40 +799,39 @@ export abstract class Model<SUB> {
 
     // Serialization and persistence
     save() {
-        console.log(`Saving ${this.constructor.tableName}`, this.constructor._pk?.modelToKeyArray(this as any));
         // For performance, we'll work on the unproxied object, as we know we don't require change tracking for save.
         const unproxiedModel = ((this as any)[TARGET_SYMBOL] || this) as Model<SUB>;
 
         unproxiedModel.validate(true);
 
         // Handle unique indexes
-        for (const idx of this.constructor._indexes!) {
-            idx.save(unproxiedModel)
+        const indexes = this.constructor._indexes!;
+        const originalKeys = typeof unproxiedModel._state === 'object' ? unproxiedModel._state : undefined;
+        for (let i=0; i<indexes.length; i++) {
+            indexes[i].save(unproxiedModel, originalKeys?.[i]);
         }
 
         // Delete reverse links for which source links have been removed.
-        if (this._reverseLinksToBeDeleted) {
-            console.log(`Deleting reverse links for model ${this.constructor.name}`);
-            for(const [linkType,jsonSet] of this._reverseLinksToBeDeleted) {
-                for(const json of jsonSet) {
-                    const pkArray = JSON.parse(json) as any[];
-                    const reverseModel = linkType.TargetModel._pk!.get(pkArray) as Model<unknown> | undefined;
-                    assert(reverseModel);
-                    const arr = (reverseModel as any)[linkType.reverse!];
-                    const i = arr.indexOf(this);
-                    assert(i >= 0);
-                    arr.splice(i, 1);
-                }
-            }
-            delete this._reverseLinksToBeDeleted;
-        }
+        unproxiedModel._deleteReverseLinks();
         
-        // Update original values
-        const originalOriginalValues = unproxiedModel._originalValues;
-        this._originalValues = deepClone(unproxiedModel as any);
-        olmdb.onRevert(() => {
-            unproxiedModel._originalValues = originalOriginalValues
-        });
+        unproxiedModel._state = 2; // Loaded from disk, unmodified
+    }
+
+    _deleteReverseLinks() {
+        if (!this._reverseLinksToBeDeleted) return;
+        console.log(`Deleting reverse links for model ${this.constructor.name}`);
+        for(const [linkType,jsonSet] of this._reverseLinksToBeDeleted) {
+            for(const json of jsonSet) {
+                const pkArray = JSON.parse(json) as any[];
+                const reverseModel = linkType.TargetModel._pk!.get(...pkArray) as Model<unknown> | undefined;
+                assert(reverseModel);
+                const arr = (reverseModel as any)[linkType.reverse!];
+                const i = arr.indexOf(this);
+                assert(i >= 0);
+                arr.splice(i, 1);
+            }
+        }
+        delete this._reverseLinksToBeDeleted;
     }
 
     // Static load method
@@ -822,21 +839,29 @@ export abstract class Model<SUB> {
         return this._pk!.get(...args);
     }
 
-    // Discard changes by restoring original values
-    discard() {
-        if (this._originalValues) {
-            Object.assign(this, deepClone(this._originalValues));
-        }
+    // Changes to this instance will not be written to the database.
+    preventPersist() {
         const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
         modifiedInstances.delete((this as any)[TARGET_SYMBOL] || this);
+
+        delete this._reverseLinksToBeDeleted;
+        this._state = 3; // no persist
+        return this;
+    }
+
+    delete() {
+        const unproxiedModel = ((this as any)[TARGET_SYMBOL] || this) as Model<SUB>;
+        unproxiedModel._deleteReverseLinks();
+
+        olmdb.del(this.constructor._pk!.getKeyFromModel(unproxiedModel, true, false));
+        this.preventPersist();
     }
 
     validate(raise: boolean = false): DatabaseError[] {
         const errors: DatabaseError[] = [];
         
         for (const [key, fieldConfig] of Object.entries(this._fields)) {
-            const value = (this as any)[key];
-            for (const error of fieldConfig.type.getErrors(value)) {
+            for (const error of fieldConfig.type.getErrors(this, key)) {
                 addErrorPath(error, key);
                 if (raise) throw error;
                 errors.push(error);
@@ -869,14 +894,14 @@ class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceType<T>>
         let value = Reflect.get(obj, prop, WANT_PK_ARRAY) as any[] | Model<InstanceType<T>>;
         if (value instanceof Array) {
             // It's a pk array, and the object has not been loaded. We can just serialize it.
-            pk.serializeKey(value, bytes);
+            pk.serializeArgs(value, bytes);
             if (!this.reverse) return;
             pkArray = value;
         } else {
             // It's a model instance that has been loaded
-            pk.serializeModelKey(value, bytes);
+            pk.serializeModel(value, bytes);
             if (!this.reverse) return;
-            pkArray = pk.modelToKeyArray(value);
+            pkArray = pk.modelToArgs(value);
         }
         const jsonSet = model._reverseLinksToBeDeleted?.get(this);
 
@@ -900,7 +925,8 @@ class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceType<T>>
             throw new DatabaseError(`Reverse link property ${prop} on model ${this.TargetModel.tableName} should be a ${model.constructor.tableName}-links array without a reverse links`, 'INIT_ERROR');
         }
 
-        const targetInstance = pk.get(pkArray)!;
+        const targetInstance = pk.get(...pkArray);
+        assert(targetInstance);
         targetInstance[prop].push(obj);
         // The above will (through the Proxy) also add targetInstance back to modifiedInstances, so in case
         // it was already serialized before us, it will be serialized again. Not great, but good enough for now.
@@ -929,7 +955,7 @@ class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceType<T>>
             get: function() {
                 // Special case to return the primary key array instead of load the model, used by serialize.
                 if (this === WANT_PK_ARRAY) return pkArray; 
-                const targetModel = TargetModel._pk!.get(pkArray); // load by primary key Uint8Array
+                const targetModel = TargetModel._pk!.get(...pkArray); // load by primary key Uint8Array
                 if (!targetModel) {
                     throw new DatabaseError(`Linked ${TargetModel.tableName} instance ${pkArray.join(', ')} not found`, 'BROKEN_LINK');
                 }
@@ -949,10 +975,10 @@ class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceType<T>>
             configurable: true
         });
     }
-    
-    getErrors(value: any): DatabaseError[] {
-        if (!(value instanceof this.TargetModel)) {
-            return [new DatabaseError(`Expected instance of ${this.TargetModel.tableName}, got ${typeof value}`, 'VALUE_ERROR')];
+
+    getErrors(obj: any, prop: string | number): DatabaseError[] {
+        if (!(obj[prop] instanceof this.TargetModel)) {
+            return [new DatabaseError(`Expected instance of ${this.TargetModel.tableName}, got ${typeof obj[prop]}`, 'VALUE_ERROR')];
         }
         return [];
     }
@@ -976,7 +1002,7 @@ class IdentifierType extends TypeWrapper<string> {
 
     serialize(obj: any, prop: string|number, bytes: Bytes): void {
         const value = obj[prop];
-        assert(typeof value === 'string' && value.length === ID_SIZE);
+        assert(value.length === ID_SIZE);
         bytes.writeBase64(value);
     }
     
@@ -984,8 +1010,9 @@ class IdentifierType extends TypeWrapper<string> {
         obj[prop] = bytes.readBase64(ID_SIZE);
     }
     
-    getErrors(value: any): DatabaseError[] {
-        if (typeof value !== 'string' || value.length !== ID_SIZE) return [new DatabaseError(`Invalid ID format: ${value}`, 'VALUE_ERROR')];        
+    getErrors(obj: any, prop: string | number): DatabaseError[] {
+        const value = obj[prop];
+        if (typeof value !== 'string' || value.length !== ID_SIZE) return [new DatabaseError(`Invalid ID format: ${value}`, 'VALUE_ERROR')];
         return [];
     }
     
