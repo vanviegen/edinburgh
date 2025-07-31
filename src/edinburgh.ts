@@ -40,7 +40,7 @@
 
 import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
-import { Model, MODIFIED_INSTANCES_SYMBOL } from "./models";
+import { Model, MODIFIED_INSTANCES_SYMBOL } from "./models.js";
 
 // Re-export public API from types (only factory functions and instances)
 export {
@@ -55,7 +55,7 @@ export {
   number,
   boolean,
   identifier
-} from "./types";
+} from "./types.js";
 
 // Re-export public API from models
 export {
@@ -63,13 +63,13 @@ export {
   Model,
   registerModel,
   field,
-} from "./models";
+} from "./models.js";
 
 // Re-export public API from indexes
 export {
   // Index system
   index
-} from "./indexes";
+} from "./indexes.js";
 
 // Transaction management functions
 

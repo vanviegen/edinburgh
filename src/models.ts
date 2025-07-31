@@ -1,9 +1,9 @@
-import { Bytes } from "./bytes";
+import { Bytes } from "./bytes.js";
 import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
-import { TypeWrapper, identifier, LinkType } from "./types";
-import { Index, TARGET_SYMBOL } from "./indexes";
-import { assert, addErrorPath, logLevel } from "./utils";
+import { TypeWrapper, identifier, LinkType } from "./types.js";
+import { Index, TARGET_SYMBOL } from "./indexes.js";
+import { assert, addErrorPath, logLevel } from "./utils.js";
 
 /**
  * Configuration interface for model fields

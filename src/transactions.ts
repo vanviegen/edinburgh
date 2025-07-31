@@ -1,6 +1,6 @@
 import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
-import { Model, MODIFIED_INSTANCES_SYMBOL } from "./models";
+import { Model, MODIFIED_INSTANCES_SYMBOL } from "./models.js";
 
 /**
  * Executes a function within a database transaction context.

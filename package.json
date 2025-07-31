@@ -1,33 +1,47 @@
 {
   "name": "edinburgh",
   "version": "0.1.1",
-  "description": "A streaming backend framework and database, made for sharding and ease of use.",
+  "description": "Very fast object persistence for TypeScript, supporting optimistic transactions, on-demand reference loading, automatic back-references and indexes.",
   "type": "module",
   "main": "src/edinburgh.ts",
   "exports": {
-    ".": "./src/edinburgh.ts"
+    ".": {
+      "types": "./dist/edinburgh.d.ts",
+      "default": "./dist/edinburgh.js"
+    }
   },
+  "files": [
+    "src",
+    "dist"
+  ],
   "scripts": {
-    "test": "bun test"
+    "build": "rm -rf dist && tsc",
+    "test": "npm run test:bun && npm run test:node",
+    "test:bun": "bun test",
+    "test:node": "npm run build && npx tsc -p tsconfig.test.json && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
+    "prepack": "npm run build && npm run test"
   },
   "keywords": [
     "orm",
     "backend",
     "database",
-    "streaming",
-    "sharding",
+    "transactions",
+    "acid",
     "lmdb",
-    "typescript",
-    "migrations"
+    "olmdb",
+    "typescript"
   ],
   "author": "Frank van Viegen",
   "license": "MIT",
   "devDependencies": {
-    "@types/bun": "^1.2.16"
+    "@jest/globals": "^30.0.3",
+    "@types/bun": "^1.2.16",
+    "@types/node": "^22.10.6",
+    "jest": "^30.0.5",
+    "typescript": "^5.8.3"
   },
   "dependencies": {
-    "olmdb": "^0.2.10",
-    "typescript": "^5.8.3"
+    "olmdb": "^0.2.10"
   },
   "trustedDependencies": [
     "olmdb"

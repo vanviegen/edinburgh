@@ -31,6 +31,9 @@ export function addErrorPath(error: DatabaseError, path: string | number): Datab
 
 /**
  * Global log level for debugging output
- * 0 = no logging, 1 = basic, 2 = detailed, 3 = verbose
+ * 0 = no logging, 1 = model-level logs, 2 = update logs, 3 = read logs
  */
 export let logLevel = 0;
+
+/** @internal Symbol used to access the underlying model from a proxy */
+export declare const TARGET_SYMBOL: unique symbol;

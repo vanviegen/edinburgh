@@ -1,5 +1,5 @@
-import { test, expect, beforeEach } from "bun:test";
-import * as E from 'edinburgh';
+import { test, expect, beforeEach } from "@jest/globals";
+import * as E from '../dist/edinburgh.js';
 import * as olmdb from "olmdb";
 const {field} = E;
 

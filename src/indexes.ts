@@ -1,15 +1,15 @@
-import { Bytes } from "./bytes";
+import { Bytes } from "./bytes.js";
 import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
-import { registerModel, Model } from "./models";
-import { assert, logLevel } from "./utils";
+import { registerModel, Model } from "./models.js";
+import { assert, logLevel } from "./utils.js";
 
 /** @internal Symbol used to access the underlying model from a proxy */
 export const TARGET_SYMBOL = Symbol('target');
 
 // Index system types and utilities
-export type IndexTuple<M extends any, F extends readonly string[]> = {
-  [I in keyof F]: any // Will be properly typed when used with actual models
+type IndexTuple<M extends typeof Model<any>, F extends readonly (keyof InstanceType<M> & string)[]> = {
+    [I in keyof F]: InstanceType<M>[F[I]]
 }
 
 const MAX_INDEX_ID_PREFIX = -1;
@@ -26,7 +26,7 @@ export type IndexType = 'primary' | 'unique' | 'secondary';
  * @template M - The model class this index belongs to
  * @template F - The field names that make up this index
  */
-export class Index<M extends typeof Model, const F extends readonly string[]> {
+export class Index<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> {
     private MyModel: M;
     
     /**
@@ -173,7 +173,7 @@ export class Index<M extends typeof Model, const F extends readonly string[]> {
      * const userByEmail = User.byEmail.get("john@example.com");
      * ```
      */
-    get(...args: IndexTuple<M, F>): any {
+    get(...args: IndexTuple<M, F>): InstanceType<M> | undefined {
         if (this.type === 'secondary') {    
             throw new Error(`secondary indexes do not support get()`);
         }
@@ -319,8 +319,8 @@ export class Index<M extends typeof Model, const F extends readonly string[]> {
  * }
  * ```
  */
-export function index<M extends typeof Model, const F extends string>(MyModel: M, field: F, type?: IndexType) : Index<M, [F]>;
-export function index<M extends typeof Model, const FS extends readonly string[]>(MyModel: M, fields: FS, type?: IndexType) : Index<M, FS>;
+export function index<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F, type?: IndexType) : Index<M, [F]>;
+export function index<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS, type?: IndexType) : Index<M, FS>;
 
 export function index(MyModel: typeof Model, fields: any, type: IndexType = 'secondary') {
     return new Index(MyModel, Array.isArray(fields) ? fields : [fields], type);

@@ -1,7 +1,7 @@
-import { Bytes } from "./bytes";
+import { Bytes } from "./bytes.js";
 import { DatabaseError } from "olmdb";
-import { Model, registerModel, modelRegistry } from "./models";
-import { assert, addErrorPath, ERROR_AT } from "./utils";
+import { Model, registerModel, modelRegistry } from "./models.js";
+import { assert, addErrorPath, ERROR_AT } from "./utils.js";
 
 /**
  * Abstract base class for all type wrappers in the Edinburgh ORM system.

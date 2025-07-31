@@ -1,3 +1,5 @@
 dist
 node_modules
 .olmdb_test
+build.tests
+package-lock.json
