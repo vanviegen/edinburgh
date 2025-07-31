@@ -4,6 +4,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { buildDocumentation, documentationToMarkdown } from 'tsdoc-markdown';
 import { fileURLToPath } from 'url';
+import { createProgram, forEachChild, getCombinedModifierFlags, ModifierFlags } from 'typescript';
 
 // @ts-ignore
 if (typeof __dirname === 'undefined') global.__dirname = (typeof import.meta === 'undefined') ? process.cwd() : path.dirname(fileURLToPath(import.meta.url));
@@ -16,23 +17,57 @@ const projectRoot = path.resolve(__dirname, '..');
 * @returns {Promise<string>} Generated markdown documentation
 */
 async function generateMarkdownDoc(filePath) {
-    let entries = buildDocumentation({
-        inputFiles: [filePath],
-        options: {}
-    });
 
+    // Delete .tsdoc dir and recreate it
+    // const tsdocDir = path.join(projectRoot, '.tsdoc');
+    // await fs.rm(tsdocDir, { recursive: true, force: true });
+    // await fs.mkdir(tsdocDir, { recursive: true });
+    // await $`bun tsc --outFile .tsdoc/bundle.ts --module amd --moduleResolution node10`;
+
+    const program = createProgram([filePath], {});
+    const checker = program.getTypeChecker();
+    const sourceFile = program.getSourceFiles().filter(sf => path.resolve(sf.fileName) == path.resolve(filePath))[0];
+
+    for(const [name, symbol] of sourceFile.symbol.exports) {
+        for(const decl of symbol.declarations) {
+            console.log("### "+name);
+            console.log(decl.jsDoc?.[0]?.comment);
+            for(const [localName, local] of decl.locals ?? []) {
+                console.log(`| ${localName} | ${local.declarations[0].getText()} |`);
+                console.log(local);
+            }
+        }
+        // console.log(symbol);
+    }
+
+        // console.log(sourceFile);
+        // console.log(sourceFile);
+        // forEachChild(sourceFile, (node) => {
+            // if (!(getCombinedModifierFlags(node) & ModifierFlags.Export)) return;
+            // console.log(node);
+            // if (node.jsDoc?.[0]?.comment) console.log(node.jsDoc[0].comment);
+            // if (node.symbol?.exports) console.log(node.symbol.exports);
+        // });
+    return "";
+
+
+    // Only include functions and classes that are actually exported
     entries = entries.filter((doc) => {
-        if (doc.doc_type === 'const') doc.doc_type = 'function';
-        return doc.doc_type === 'function';
+        return true;
+        // Only include documented exports and main functions/classes
+        const isExported = doc.name && !doc.name.startsWith('_');
+        const isImportantType = ['function', 'class'].includes(doc.doc_type);
+        
+        return isExported && isImportantType;
     });
 
     const markdownContent = documentationToMarkdown({entries, options: {
         emoji: null,
-        headingLevel: "##",
+        headingLevel: "###",
     }});
     
     // Remove headers and TOCs
-    return markdownContent.replace(/^##[\s\S]*?\n###/g, '###').trim();
+    return markdownContent;
 }
 
 /**

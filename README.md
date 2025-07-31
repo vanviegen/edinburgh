@@ -13,38 +13,38 @@ Edinburgh is a high-performance ORM built on [OLMDB](https://github.com/vanviege
 
 ## Quick Demo
 ```typescript
-import { Model, registerModel, field, string, number, index, transact, init } from "edinburgh";
+import * as E from "edinburgh";
 
 // Initialize the database (optional, defaults to "./.olmdb")
-init("./my-database");
+E.init("./my-database");
 
 // Define a model
-@registerModel
-class User extends Model<User> {
+@E.registerModel
+class User extends E.Model<User> {
   // Define a primary key (optional, defaults to using the "id" field)
-  static pk = index(User, ["id"], "primary");
+  static pk = E.index(User, ["id"], "primary");
   // Define a unique index on the email field
-  static byEmail = index(User, "email", "unique");
+  static byEmail = E.index(User, "email", "unique");
 
   // Define fields with simple types -- they will be type-checked at compile time and validated at runtime.
-  id = field(identifier);
-  name = field(string);
-  email = field(string);
-  age = field(opt(number));
+  id = E.field(E.identifier);
+  name = E.field(E.string);
+  email = E.field(E.string);
+  age = E.field(E.opt(E.number));
 
   // A field with a more elaborate type. In Typescript: `User | User[] | "self" | "spouse"`
-  supervisor = field(choice(link(User), array(link(User)), literal("self"), literal("spouse")));
+  supervisor = E.field(E.choice(E.link(User), E.array(E.link(User)), E.literal("self"), E.literal("spouse")));
 }
 
 // Use in transactions
-await transact(() => {
+await E.transact(() => {
   const user = new User({
     name: "John Doe", 
     email: "john@example.com"
   });
 });
 
-await transact(() => {
+await E.transact(() => {
   // Query by unique index
   const user = User.byEmail.get("john@example.com")!;
   // The transaction will retry if there's a conflict, such as another transaction
@@ -56,44 +56,3 @@ await transact(() => {
 ## API Reference
 
 The following is auto-generated from `src/edinburgh.ts`:
-### transact
-
-Executes a function within a database transaction context.
-
-Loading models (also through links in other models) and changing models can only be done from
-within a transaction.
-
-Transactions have a consistent view of the database, and changes made within a transaction are
-isolated from other transactions until they are committed. In case a commit clashes with changes
-made by another transaction, the transaction function will automatically be re-executed up to 10
-times.
-
-| Function | Type |
-| ---------- | ---------- |
-| `transact` | `<T>(fn: () => T) => Promise<T>` |
-
-Parameters:
-
-* `fn`: - The function to execute within the transaction context
-
-
-Returns:
-
-A promise that resolves with the function's return value
-
-Examples:
-
-```typescript
-const result = await transact(() => {
-  const user = User.load("john_doe");
-  user.credits--;
-  return user.credits;
-});
-```
-```typescript
-// Transaction with automatic retry on conflicts
-await transact(() => {
-  const counter = Counter.load("global") || new Counter({id: "global", value: 0});
-  counter.value++;
-});
-```
