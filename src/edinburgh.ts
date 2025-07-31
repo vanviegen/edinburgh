@@ -33,7 +33,6 @@
  *     name: "John Doe", 
  *     email: "john@example.com"
  *   });
- *   user.save();
  * });
  * ```
  */
@@ -98,7 +97,6 @@ export {
  * const result = await transact(() => {
  *   const user = User.load("john_doe");
  *   user.credits--;
- *   user.save();
  *   return user.credits;
  * });
  * ```
@@ -109,7 +107,6 @@ export {
  * await transact(() => {
  *   const counter = Counter.load("global") || new Counter({id: "global", value: 0});
  *   counter.value++;
- *   counter.save();
  * });
  * ```
  */
@@ -126,7 +123,7 @@ export function transact<T>(fn: () => T): Promise<T> {
                 // Back referencing can cause models to be scheduled for save() a second time,
                 // which is why we require the outer loop.
                 for (const instance of modifiedInstances) {
-                    instance.save();
+                    instance._save();
                     savedInstances.add(instance);
                     modifiedInstances.delete(instance);
                 }

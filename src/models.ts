@@ -270,21 +270,7 @@ export abstract class Model<SUB> {
         }
     }
 
-    /**
-     * Save this model instance to the database.
-     * 
-     * Validates all fields, updates all indexes, and handles reverse link management.
-     * Called automatically for modified instances at transaction commit.
-     * 
-     * @throws {DatabaseError} If validation fails or constraints are violated
-     * 
-     * @example
-     * ```typescript
-     * const user = new User({name: "John", email: "john@example.com"});
-     * user.save(); // Explicitly save (usually automatic in transactions)
-     * ```
-     */
-    save() {
+    _save() {
         // For performance, we'll work on the unproxied object, as we know we don't require change tracking for save.
         const unproxiedModel = ((this as any)[TARGET_SYMBOL] || this) as Model<SUB>;
 
@@ -414,9 +400,7 @@ export abstract class Model<SUB> {
      * @example
      * ```typescript
      * const user = new User({name: "John"});
-     * if (user.isValid()) {
-     *   user.save();
-     * }
+     * if (!user.isValid()) shoutAtTheUser();
      * ```
      */
     isValid(): boolean {
