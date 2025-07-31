@@ -1,0 +1,36 @@
+import { DatabaseError } from "olmdb";
+
+/**
+ * Assert function for runtime checks with TypeScript assertion support
+ * @param cond - Condition to check
+ * @param message - Optional error message
+ * @throws {Error} If condition is false
+ */
+export function assert(cond: any, message?: string): asserts cond {
+    if (!cond) {
+        throw new Error(message || "Assertion failed");
+    }
+}
+
+/**
+ * Regular expression for parsing error messages with paths
+ */
+export const ERROR_AT = /^(.*) at ([a-zA-Z0-9_.]+)$/;
+
+/**
+ * Add a path segment to a DatabaseError message for better error reporting
+ * @param error - The DatabaseError to modify
+ * @param path - The path segment to add (string or number)
+ * @returns The modified DatabaseError
+ */
+export function addErrorPath(error: DatabaseError, path: string | number): DatabaseError {
+    const m = error.message.match(ERROR_AT);
+    error.message = m ? `${m[1]} at ${path}.${m[2]}` : `${error.message} at ${path}`;
+    return error;
+}
+
+/**
+ * Global log level for debugging output
+ * 0 = no logging, 1 = basic, 2 = detailed, 3 = verbose
+ */
+export let logLevel = 0;

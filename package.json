@@ -3,9 +3,12 @@
   "version": "0.1.1",
   "description": "A streaming backend framework and database, made for sharding and ease of use.",
   "type": "module",
+  "main": "src/edinburgh.ts",
+  "exports": {
+    ".": "./src/edinburgh.ts"
+  },
   "scripts": {
-    "test": "bun test",
-    "start": "bun src/index.ts"
+    "test": "bun test"
   },
   "keywords": [
     "orm",

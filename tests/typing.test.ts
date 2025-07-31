@@ -1,5 +1,5 @@
 import { test, expect, beforeEach } from "bun:test";
-import * as E from '../src/typing';
+import * as E from 'edinburgh';
 import * as olmdb from "olmdb";
 const {field} = E;
 
@@ -239,4 +239,3 @@ test("Link type validation and lazy loading", async () => {
         loadedData!.preventPersist();
     });
 })
-
