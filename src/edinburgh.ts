@@ -3,7 +3,6 @@ import { Model, MODIFIED_INSTANCES_SYMBOL } from "./models.js";
 
 // Re-export public API from models
 export {
-  // Core model system
   Model,
   registerModel,
   field,
@@ -27,7 +26,6 @@ export {
 
 // Re-export public API from indexes
 export {
-  // Index system
   index,
   dump,
 } from "./indexes.js";
@@ -47,18 +45,18 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
  * made by another transaction, the transaction function will automatically be re-executed up to 10
  * times.
  * 
- * @template T - The return type of the transaction function
- * @param fn - The function to execute within the transaction context
- * @returns A promise that resolves with the function's return value
- * @throws {TypeError} If nested transactions are attempted
- * @throws {DatabaseError} With code "RACING_TRANSACTION" if the transaction fails after retries due to conflicts
- * @throws {DatabaseError} With code "TRANSACTION_FAILED" if the transaction fails for other reasons
- * @throws {DatabaseError} With code "TXN_LIMIT" if maximum number of transactions is reached
- * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors
+ * @template T - The return type of the transaction function.
+ * @param fn - The function to execute within the transaction context.
+ * @returns A promise that resolves with the function's return value.
+ * @throws {TypeError} If nested transactions are attempted.
+ * @throws {DatabaseError} With code "RACING_TRANSACTION" if the transaction fails after retries due to conflicts.
+ * @throws {DatabaseError} With code "TRANSACTION_FAILED" if the transaction fails for other reasons.
+ * @throws {DatabaseError} With code "TXN_LIMIT" if maximum number of transactions is reached.
+ * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
  * 
  * @example
  * ```typescript
- * const paid = await transact(() => {
+ * const paid = await E.transact(() => {
  *   const user = User.load("john_doe");
  *   // This is concurrency-safe - the function will rerun if it is raced by another transaction
  *   if (user.credits > 0) {
@@ -70,7 +68,7 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
  * ```
  * ```typescript
  * // Transaction with automatic retry on conflicts
- * await transact(() => {
+ * await E.transact(() => {
  *   const counter = Counter.load("global") || new Counter({id: "global", value: 0});
  *   counter.value++;
  * });
@@ -104,4 +102,3 @@ export function transact<T>(fn: () => T): Promise<T> {
         }
     });
 }
-

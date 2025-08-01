@@ -76,22 +76,22 @@ times.
 
 **Parameters:**
 
-- `fn: () => T` - - The function to execute within the transaction context
+- `fn: () => T` - - The function to execute within the transaction context.
 
-**Returns:** A promise that resolves with the function's return value
+**Returns:** A promise that resolves with the function's return value.
 
 **Throws:**
 
-- If nested transactions are attempted
-- With code "RACING_TRANSACTION" if the transaction fails after retries due to conflicts
-- With code "TRANSACTION_FAILED" if the transaction fails for other reasons
-- With code "TXN_LIMIT" if maximum number of transactions is reached
-- With code "LMDB-{code}" for LMDB-specific errors
+- If nested transactions are attempted.
+- With code "RACING_TRANSACTION" if the transaction fails after retries due to conflicts.
+- With code "TRANSACTION_FAILED" if the transaction fails for other reasons.
+- With code "TXN_LIMIT" if maximum number of transactions is reached.
+- With code "LMDB-{code}" for LMDB-specific errors.
 
 **Examples:**
 
 ```typescript
-const paid = await transact(() => {
+const paid = await E.transact(() => {
   const user = User.load("john_doe");
   // This is concurrency-safe - the function will rerun if it is raced by another transaction
   if (user.credits > 0) {
@@ -103,149 +103,11 @@ const paid = await transact(() => {
 ```
 ```typescript
 // Transaction with automatic retry on conflicts
-await transact(() => {
+await E.transact(() => {
   const counter = Counter.load("global") || new Counter({id: "global", value: 0});
   counter.value++;
 });
 ```
-
-### literal (function)
-
-Create a literal type wrapper for a constant value
-
-**Signature:** `<const T>(value: T) => LiteralType<T>`
-
-**Type Parameters:**
-
-- `T`
-
-**Parameters:**
-
-- `value: T` - - The literal value
-
-**Returns:** A LiteralType instance
-
-**Examples:**
-
-```typescript
-const statusType = literal("active");
-const countType = literal(42);
-```
-
-### or (function)
-
-Create a union type wrapper from multiple type choices
-
-**Signature:** `<const T extends (TypeWrapper<unknown> | BasicType)[]>(...choices: T) => OrType<UnwrapTypes<T>>`
-
-**Type Parameters:**
-
-- `T extends (TypeWrapper<unknown>|BasicType)[]`
-
-**Parameters:**
-
-- `choices: T` - - The type choices for the union
-
-**Returns:** An OrType instance
-
-**Examples:**
-
-```typescript
-const stringOrNumber = or(string, number);
-const status = or("active", "inactive", "pending");
-```
-
-### opt (function)
-
-Create an optional type wrapper (allows undefined)
-
-**Signature:** `<const T extends TypeWrapper<unknown> | BasicType>(inner: T) => OrType<any>`
-
-**Type Parameters:**
-
-- `T extends TypeWrapper<unknown>|BasicType`
-
-**Parameters:**
-
-- `inner: T` - - The inner type to make optional
-
-**Returns:** An OrType that accepts the inner type or undefined
-
-**Examples:**
-
-```typescript
-const optionalString = opt(string);
-const optionalNumber = opt(number);
-```
-
-### array (function)
-
-Create an array type wrapper with optional length constraints
-
-**Signature:** `<const T>(inner: TypeWrapper<T>, opts?: { min?: number; max?: number; }) => ArrayType<T>`
-
-**Type Parameters:**
-
-- `T`
-
-**Parameters:**
-
-- `inner: TypeWrapper<T>` - - Type wrapper for array elements
-- `opts: {min?: number, max?: number}` (optional) - - Optional constraints (min/max length)
-
-**Returns:** An ArrayType instance
-
-**Examples:**
-
-```typescript
-const stringArray = array(string);
-const boundedArray = array(number, {min: 1, max: 10});
-```
-
-### link (function)
-
-Create a link type wrapper for model relationships
-
-**Signature:** `<const T extends typeof Model<any>>(TargetModel: T, reverse?: string & KeysOfType<InstanceType<T>, Model<any>[]>) => LinkType<T>`
-
-**Type Parameters:**
-
-- `T extends typeof Model<any>`
-
-**Parameters:**
-
-- `TargetModel: T` - - The model class this link points to
-- `reverse?: string & KeysOfType<InstanceType<T>, Model<any>[]>` - - Optional reverse link field name for bidirectional relationships
-
-**Returns:** A LinkType instance
-
-**Examples:**
-
-```typescript
-class User extends Model<User> {
-  posts = field(array(link(Post, 'author')));
-}
-
-class Post extends Model<Post> {
-  author = field(link(User));
-}
-```
-
-### string (constant)
-
-**Value:** `StringType`
-
-### number (constant)
-
-**Value:** `NumberType`
-
-### boolean (constant)
-
-**Value:** `BooleanType`
-
-### identifier (constant)
-
-**Value:** `IdentifierType`
 
 ### Model (class)
 
@@ -253,27 +115,23 @@ Base class for all database models in the Edinburgh ORM.
 
 Models represent database entities with typed fields, automatic serialization,
 change tracking, and relationship management. All model classes should extend
-this base class and be decorated with
+this base class and be decorated with `@registerModel`.
 
 #### tableName (static property)
 
-The database table name (defaults to class name)
+The database table name (defaults to class name).
 
 **Type:** `string`
 
 #### fields (static property)
 
-Field configuration metadata
+Field configuration metadata.
 
 **Type:** `Record<string, FieldConfig<unknown>>`
 
-#### isProxied (static property)
-
-**Type:** `boolean`
-
 #### load (static method)
 
-Load a model instance by primary key
+Load a model instance by primary key.
 
 **Signature:** `<SUB>(this: typeof Model<SUB>, ...args: any[]) => SUB`
 
@@ -284,9 +142,9 @@ Load a model instance by primary key
 **Parameters:**
 
 - `this: typeof Model<SUB>`
-- `args: any[]` - - Primary key field values
+- `args: any[]` - - Primary key field values.
 
-**Returns:** The model instance if found, undefined otherwise
+**Returns:** The model instance if found, undefined otherwise.
 
 **Examples:**
 
@@ -304,7 +162,7 @@ automatic persistence at transaction commit.
 
 **Signature:** `() => this`
 
-**Returns:** This model instance for chaining
+**Returns:** This model instance for chaining.
 
 **Examples:**
 
@@ -332,15 +190,15 @@ user.delete(); // Removes from database
 
 #### validate (method)
 
-Validate all fields in this model instance
+Validate all fields in this model instance.
 
 **Signature:** `(raise?: boolean) => DatabaseError[]`
 
 **Parameters:**
 
-- `raise: boolean` (optional) - - If true, throw on first validation error
+- `raise: boolean` (optional) - - If true, throw on first validation error.
 
-**Returns:** Array of validation errors (empty if valid)
+**Returns:** Array of validation errors (empty if valid).
 
 **Examples:**
 
@@ -354,11 +212,11 @@ if (errors.length > 0) {
 
 #### isValid (method)
 
-Check if this model instance is valid
+Check if this model instance is valid.
 
 **Signature:** `() => boolean`
 
-**Returns:** true if all validations pass
+**Returns:** true if all validations pass.
 
 **Examples:**
 
@@ -375,7 +233,7 @@ This decorator function transforms the model class to use a proxy-based construc
 that enables change tracking and automatic field initialization. It also extracts
 field metadata and sets up default values on the prototype.
 
-**Signature:** `<T extends typeof Model<unknown>>(cls: T) => T`
+**Signature:** `<T extends typeof Model<unknown>>(MyModel: T) => T`
 
 **Type Parameters:**
 
@@ -383,13 +241,20 @@ field metadata and sets up default values on the prototype.
 
 **Parameters:**
 
-- `cls: T` - - The model class to register
+- `MyModel: T` - - The model class to register.
 
-**Returns:** The enhanced model class with ORM capabilities
+**Returns:** The enhanced model class with ORM capabilities.
 
 **Examples:**
 
 ```typescript
+⁣@E.registerModel
+class User extends E.Model<User> {
+  static pk = E.index(User, ["id"], "primary");
+  id = E.field(E.identifier);
+  name = E.field(E.string);
+}
+```
 
 ### field (function)
 
@@ -407,23 +272,161 @@ This allows for both runtime introspection and compile-time type safety.
 
 **Parameters:**
 
-- `type: TypeWrapper<T>` - - The type wrapper for this field
-- `options: Partial<FieldConfig<T>>` (optional) - - Additional field configuration options
+- `type: TypeWrapper<T>` - - The type wrapper for this field.
+- `options: Partial<FieldConfig<T>>` (optional) - - Additional field configuration options.
 
-**Returns:** The field value (typed as T, but actually returns FieldConfig<T>)
+**Returns:** The field value (typed as T, but actually returns FieldConfig<T>).
 
 **Examples:**
 
 ```typescript
-class User extends Model<User> {
-  name = field(string, {description: "User's full name"});
-  age = field(opt(number), {description: "User's age", default: 25});
+class User extends E.Model<User> {
+  name = E.field(E.string, {description: "User's full name"});
+  age = E.field(E.opt(E.number), {description: "User's age", default: 25});
+}
+```
+
+### string (constant)
+
+**Value:** `StringType`
+
+### number (constant)
+
+**Value:** `NumberType`
+
+### boolean (constant)
+
+**Value:** `BooleanType`
+
+### identifier (constant)
+
+**Value:** `IdentifierType`
+
+### opt (function)
+
+Create an optional type wrapper (allows undefined).
+
+**Signature:** `<const T extends TypeWrapper<unknown> | BasicType>(inner: T) => OrType<any>`
+
+**Type Parameters:**
+
+- `T extends TypeWrapper<unknown>|BasicType`
+
+**Parameters:**
+
+- `inner: T` - - The inner type to make optional.
+
+**Returns:** A union type that accepts the inner type or undefined.
+
+**Examples:**
+
+```typescript
+const optionalString = E.opt(E.string);
+const optionalNumber = E.opt(E.number);
+```
+
+### or (function)
+
+Create a union type wrapper from multiple type choices.
+
+**Signature:** `<const T extends (TypeWrapper<unknown> | BasicType)[]>(...choices: T) => OrType<UnwrapTypes<T>>`
+
+**Type Parameters:**
+
+- `T extends (TypeWrapper<unknown>|BasicType)[]`
+
+**Parameters:**
+
+- `choices: T` - - The type choices for the union.
+
+**Returns:** A union type instance.
+
+**Examples:**
+
+```typescript
+const stringOrNumber = E.or(E.string, E.number);
+const status = E.or("active", "inactive", "pending");
+```
+
+### array (function)
+
+Create an array type wrapper with optional length constraints.
+
+**Signature:** `<const T>(inner: TypeWrapper<T>, opts?: { min?: number; max?: number; }) => ArrayType<T>`
+
+**Type Parameters:**
+
+- `T`
+
+**Parameters:**
+
+- `inner: TypeWrapper<T>` - - Type wrapper for array elements.
+- `opts: {min?: number, max?: number}` (optional) - - Optional constraints (min/max length).
+
+**Returns:** An array type instance.
+
+**Examples:**
+
+```typescript
+const stringArray = E.array(E.string);
+const boundedArray = E.array(E.number, {min: 1, max: 10});
+```
+
+### literal (function)
+
+Create a literal type wrapper for a constant value.
+
+**Signature:** `<const T>(value: T) => LiteralType<T>`
+
+**Type Parameters:**
+
+- `T`
+
+**Parameters:**
+
+- `value: T` - - The literal value.
+
+**Returns:** A literal type instance.
+
+**Examples:**
+
+```typescript
+const statusType = E.literal("active");
+const countType = E.literal(42);
+```
+
+### link (function)
+
+Create a link type wrapper for model relationships.
+
+**Signature:** `<const T extends typeof Model<any>>(TargetModel: T, reverse?: string & KeysOfType<InstanceType<T>, Model<any>[]>) => LinkType<T>`
+
+**Type Parameters:**
+
+- `T extends typeof Model<any>`
+
+**Parameters:**
+
+- `TargetModel: T` - - The model class this link points to.
+- `reverse?: string & KeysOfType<InstanceType<T>, Model<any>[]>` - - Optional reverse link field name for bidirectional relationships.
+
+**Returns:** A link type instance.
+
+**Examples:**
+
+```typescript
+class User extends E.Model<User> {
+  posts = E.field(E.array(E.link(Post, 'author')));
+}
+
+class Post extends E.Model<Post> {
+  author = E.field(E.link(User));
 }
 ```
 
 ### index (function)
 
-Create an index on model fields
+Create an index on model fields.
 
 **Signature:** `{ <M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F, type?: IndexType): Index<M, [F]>; <M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS, type?: IndexType): Index<...>; }`
 
@@ -434,21 +437,30 @@ Create an index on model fields
 
 **Parameters:**
 
-- `MyModel: M` - - The model class to create the index for
-- `field: F` - - Single field name for simple indexes
-- `type?: IndexType` - - The index type ("primary", "unique", or "secondary")
+- `MyModel: M` - - The model class to create the index for.
+- `field: F` - - Single field name for simple indexes.
+- `type?: IndexType` - - The index type ("primary", "unique", or "secondary").
 
-**Returns:** A new Index instance
+**Returns:** A new Index instance.
 
 **Examples:**
 
 ```typescript
-class User extends Model<User> {
-  static pk = index(User, ["id"], "primary");
-  static byEmail = index(User, "email", "unique");
-  static byNameAge = index(User, ["name", "age"], "secondary");
+class User extends E.Model<User> {
+  static pk = E.index(User, ["id"], "primary");
+  static byEmail = E.index(User, "email", "unique");
+  static byNameAge = E.index(User, ["name", "age"], "secondary");
 }
 ```
+
+### dump (function)
+
+Dump database contents for debugging.
+
+Prints all indexes and their data to the console for inspection.
+This is primarily useful for development and debugging purposes.
+
+**Signature:** `() => void`
 
 ### init (function)
 

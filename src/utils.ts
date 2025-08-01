@@ -1,10 +1,10 @@
 import { DatabaseError } from "olmdb";
 
 /**
- * Assert function for runtime checks with TypeScript assertion support
- * @param cond - Condition to check
- * @param message - Optional error message
- * @throws {Error} If condition is false
+ * Assert function for runtime checks with TypeScript assertion support.
+ * @param cond - Condition to check.
+ * @param message - Optional error message.
+ * @throws {Error} If condition is false.
  */
 export function assert(cond: any, message?: string): asserts cond {
     if (!cond) {
@@ -13,15 +13,15 @@ export function assert(cond: any, message?: string): asserts cond {
 }
 
 /**
- * Regular expression for parsing error messages with paths
+ * Regular expression for parsing error messages with paths.
  */
 export const ERROR_AT = /^(.*) at ([a-zA-Z0-9_.]+)$/;
 
 /**
- * Add a path segment to a DatabaseError message for better error reporting
- * @param error - The DatabaseError to modify
- * @param path - The path segment to add (string or number)
- * @returns The modified DatabaseError
+ * Add a path segment to a DatabaseError message for better error reporting.
+ * @param error - The DatabaseError to modify.
+ * @param path - The path segment to add (string or number).
+ * @returns The modified DatabaseError.
  */
 export function addErrorPath(error: DatabaseError, path: string | number): DatabaseError {
     const m = error.message.match(ERROR_AT);
@@ -30,8 +30,8 @@ export function addErrorPath(error: DatabaseError, path: string | number): Datab
 }
 
 /**
- * Global log level for debugging output
- * 0 = no logging, 1 = model-level logs, 2 = update logs, 3 = read logs
+ * Global log level for debugging output.
+ * 0 = no logging, 1 = model-level logs, 2 = update logs, 3 = read logs.
  */
 export let logLevel = 0;
 

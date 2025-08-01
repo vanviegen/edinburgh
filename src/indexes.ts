@@ -24,17 +24,17 @@ export type IndexType = 'primary' | 'unique' | 'secondary';
  * Indexes enable fast queries on specific field combinations and enforce uniqueness constraints.
  * Primary indexes store the actual model data, while unique indexes store references to the primary key.
  * 
- * @template M - The model class this index belongs to
- * @template F - The field names that make up this index
+ * @template M - The model class this index belongs to.
+ * @template F - The field names that make up this index.
  */
 export class Index<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> {
     public MyModel: M;
     
     /**
-     * Create a new index
-     * @param MyModel - The model class this index belongs to
-     * @param fieldNames - Array of field names that make up this index
-     * @param type - The index type ("primary", "unique", or "secondary")
+     * Create a new index.
+     * @param MyModel - The model class this index belongs to.
+     * @param fieldNames - Array of field names that make up this index.
+     * @param type - The index type ("primary", "unique", or "secondary").
      */
     constructor(MyModel: M, public fieldNames: F, public type: IndexType) {
         this.MyModel = MyModel = getMockModel(MyModel);
@@ -49,9 +49,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     cachedIndexId?: number;
 
     /**
-     * Deserialize index key bytes back to field values
-     * @param bytes - Bytes to read from
-     * @returns Array of field values
+     * Deserialize index key bytes back to field values.
+     * @param bytes - Bytes to read from.
+     * @returns Array of field values.
      */
     deserializeKey(bytes: Bytes): IndexTuple<M, F> {
         const result: IndexTuple<M, F> = [] as any;
@@ -64,9 +64,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Serialize field values to bytes for index key
-     * @param args - Field values to serialize
-     * @param bytes - Bytes to write to
+     * Serialize field values to bytes for index key.
+     * @param args - Field values to serialize.
+     * @param bytes - Bytes to write to.
      */
     serializeArgs(args: IndexTuple<M, F>, bytes: Bytes) {
         for (let i = 0; i < this.fieldNames.length; i++) {
@@ -77,9 +77,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Create database key from field values
-     * @param args - Field values
-     * @returns Database key bytes
+     * Create database key from field values.
+     * @param args - Field values.
+     * @returns Database key bytes.
      */
     getKeyFromArgs(args: IndexTuple<M, F>): Uint8Array {
         let indexId = this.getIndexId();
@@ -89,9 +89,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Serialize model fields to bytes for index key
-     * @param model - Model instance
-     * @param bytes - Bytes to write to
+     * Serialize model fields to bytes for index key.
+     * @param model - Model instance.
+     * @param bytes - Bytes to write to.
      */
     serializeModel(model: any, bytes: Bytes) {
         for (let i = 0; i < this.fieldNames.length; i++) {
@@ -105,11 +105,11 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     getKeyFromModel(model: any, includeIndexId: boolean, checkSkip: false): Uint8Array;
 
     /**
-     * Create database key from model instance
-     * @param model - Model instance
-     * @param includeIndexId - Whether to include index ID in key
-     * @param checkSkip - Whether to check if indexing should be skipped
-     * @returns Database key bytes or undefined if skipped
+     * Create database key from model instance.
+     * @param model - Model instance.
+     * @param includeIndexId - Whether to include index ID in key.
+     * @param checkSkip - Whether to check if indexing should be skipped.
+     * @returns Database key bytes or undefined if skipped.
      */
     getKeyFromModel(model: any, includeIndexId: boolean, checkSkip: boolean): Uint8Array | undefined {
         if (checkSkip && this.checkSkip(model)) return undefined;
@@ -120,17 +120,17 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Extract field values from model for this index
-     * @param model - Model instance
-     * @returns Field values or undefined if should be skipped
+     * Extract field values from model for this index.
+     * @param model - Model instance.
+     * @returns Field values or undefined if should be skipped.
      */
     modelToArgs(model: any): IndexTuple<M, F> | undefined {
         return this.checkSkip(model) ? undefined: this.fieldNames.map((fieldName) => model[fieldName]) as unknown as IndexTuple<M, F>;
     }
 
     /**
-     * Get or create unique index ID for this index
-     * @returns Numeric index ID
+     * Get or create unique index ID for this index.
+     * @returns Numeric index ID.
      */
     getIndexId(): number {
         // Resolve an index to a number
@@ -167,9 +167,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Get a model instance by index key values
-     * @param args - The index key values
-     * @returns The model instance if found, undefined otherwise
+     * Get a model instance by index key values.
+     * @param args - The index key values.
+     * @returns The model instance if found, undefined otherwise.
      * 
      * @example
      * ```typescript
@@ -218,9 +218,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Save index entry for a model instance
-     * @param model - Model instance to save
-     * @param originalKey - Original key if updating
+     * Save index entry for a model instance.
+     * @param model - Model instance to save.
+     * @param originalKey - Original key if updating.
      */
     save(model: any, originalKey?: Uint8Array) {
         // Note: this can (and usually will) be called on the non-proxied model instance.
@@ -231,9 +231,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Check if indexing should be skipped for a model instance
-     * @param model - Model instance
-     * @returns true if indexing should be skipped
+     * Check if indexing should be skipped for a model instance.
+     * @param model - Model instance.
+     * @returns true if indexing should be skipped.
      */
     checkSkip(model: any): boolean {
         for (const fieldName of this.fieldNames) {
@@ -244,9 +244,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Save primary index entry
-     * @param model - Model instance
-     * @param originalKey - Original key if updating
+     * Save primary index entry.
+     * @param model - Model instance.
+     * @param originalKey - Original key if updating.
      */
     savePrimary(model: any, originalKey?: Uint8Array) {
         let newKey = this.getKeyFromModel(model, true, false); // Cannot be undefined for primary
@@ -270,9 +270,9 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Save unique index entry
-     * @param model - Model instance
-     * @param originalKey - Original key if updating
+     * Save unique index entry.
+     * @param model - Model instance.
+     * @param originalKey - Original key if updating.
      */
     saveUnique(model: any, originalKey?: Uint8Array) {
         let newKey = this.getKeyFromModel(model, true, true);
@@ -305,22 +305,22 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
 }
 
 /**
- * Create an index on model fields
- * @template M - The model class
- * @template F - The field name (for single field index)
- * @template FS - The field names array (for composite index)
- * @param MyModel - The model class to create the index for
- * @param field - Single field name for simple indexes
- * @param fields - Array of field names for composite indexes  
- * @param type - The index type ("primary", "unique", or "secondary")
- * @returns A new Index instance
+ * Create an index on model fields.
+ * @template M - The model class.
+ * @template F - The field name (for single field index).
+ * @template FS - The field names array (for composite index).
+ * @param MyModel - The model class to create the index for.
+ * @param field - Single field name for simple indexes.
+ * @param fields - Array of field names for composite indexes.
+ * @param type - The index type ("primary", "unique", or "secondary").
+ * @returns A new Index instance.
  * 
  * @example
  * ```typescript
- * class User extends Model<User> {
- *   static pk = index(User, ["id"], "primary");
- *   static byEmail = index(User, "email", "unique");
- *   static byNameAge = index(User, ["name", "age"], "secondary");
+ * class User extends E.Model<User> {
+ *   static pk = E.index(User, ["id"], "primary");
+ *   static byEmail = E.index(User, "email", "unique");
+ *   static byNameAge = E.index(User, ["name", "age"], "secondary");
  * }
  * ```
  */
@@ -331,6 +331,12 @@ export function index(MyModel: typeof Model, fields: any, type: IndexType = 'sec
     return new Index(MyModel, Array.isArray(fields) ? fields : [fields], type);
 }
 
+/**
+ * Dump database contents for debugging.
+ * 
+ * Prints all indexes and their data to the console for inspection.
+ * This is primarily useful for development and debugging purposes.
+ */
 export function dump() {
     let indexesById = new Map<number, {type: string, fields: Record<string, TypeWrapper<any>>}>();
     for(const {key,value} of olmdb.scan()) {

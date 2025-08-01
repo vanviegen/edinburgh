@@ -3,6 +3,13 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 
 const BIT_COUNTS = [19, 35, 53]; // Bit counts for large integers
 
+/**
+ * A byte buffer for efficient reading and writing of primitive values and bit sequences.
+ * 
+ * The Bytes class provides methods for serializing and deserializing various data types
+ * including numbers, strings, bit sequences, and other primitive values to/from byte buffers.
+ * It supports both reading and writing operations with automatic buffer management.
+ */
 export class Bytes {
     public buffer: Uint8Array;
     public readByte: number = 0;
@@ -17,6 +24,10 @@ export class Bytes {
         return arr;
     })();
 
+    /**
+     * Create a new Bytes instance.
+     * @param data - Optional initial data as Uint8Array or buffer size as number.
+     */
     constructor(data: Uint8Array | number | undefined = undefined) {
         if (data instanceof Uint8Array) {
             this.buffer = data;
@@ -26,25 +37,46 @@ export class Bytes {
         }
     }
 
+    /**
+     * Reset read position to the beginning of the buffer.
+     * @returns This Bytes instance for chaining.
+     */
     reset() {
         this.readByte = 0;
         this.readBit = 8;
         return this;
     }
 
+    /**
+     * Get the number of bytes written to the buffer.
+     * @returns The byte count.
+     */
     byteCount(): number {
         return this.writeByte + (this.writeBit < 8 ? 1 : 0);
     }
 
+    /**
+     * Get the number of bits written to the buffer.
+     * @returns The bit count.
+     */
     bitCount(): number {
         return (this.writeByte * 8) + (8 - this.writeBit);
     }
 
+    /**
+     * Check if there are more bytes available for reading.
+     * @returns true if more bytes can be read.
+     */
     readAvailable(): boolean {
         return this.readByte < this.buffer.length;
     }
 
-    /** Safe up til 30 bits */
+    /**
+     * Read a specific number of bits from the buffer (safe up to 30 bits).
+     * @param bits - Number of bits to read (0-30).
+     * @param flip - Whether to flip the bit order.
+     * @returns The read value as a number.
+     */
     readBits(bits: number, flip: boolean=false): number {
         if (bits < 0 || bits > 30) {
             throw new Error('Invalid bit count');
@@ -86,7 +118,13 @@ export class Bytes {
         return flip ? ((1 << bits) - 1) ^ result : result;
     }
 
-    /** Safe up til 30 bits */
+    /**
+     * Write a specific number of bits to the buffer (safe up to 30 bits).
+     * @param value - The value to write.
+     * @param bits - Number of bits to write (0-30).
+     * @param flip - Whether to flip the bit order.
+     * @returns This Bytes instance for chaining.
+     */
     writeBits(value: number, bits: number, flip: boolean=false): Bytes {
         // console.log(`Writing ${value} with ${bits} bits (flip: ${flip})`);
         if (bits < 0 || bits > 30) {
@@ -119,6 +157,12 @@ export class Bytes {
         return this;
     }
 
+    /**
+     * Write an unsigned integer using only the minimum required bits.
+     * @param value - The value to write (must be 0 <= value <= maxValue).
+     * @param maxValue - The maximum possible value.
+     * @returns This Bytes instance for chaining.
+     */
     writeUIntN(value: number, maxValue: number): Bytes {
         if (!Number.isInteger(value) || value < 0 || value > maxValue) {
             throw new Error(`Value out of range: ${value} (max: ${maxValue})`);
@@ -129,6 +173,11 @@ export class Bytes {
         return this;
     }
 
+    /**
+     * Read an unsigned integer that was written with writeUIntN.
+     * @param maxValue - The maximum possible value (same as used in writeUIntN).
+     * @returns The read value.
+     */
     readUIntN(maxValue: number): number {
         if (maxValue < 0) {
             throw new Error(`Invalid max value: ${maxValue}`);
@@ -138,6 +187,11 @@ export class Bytes {
         return this.readBits(bitsNeeded);
     }
 
+    /**
+     * Read a Base64-encoded string of specified character count.
+     * @param charCount - Number of characters to read.
+     * @returns The decoded string.
+     */
     readBase64(charCount: number): string {
         let result = '';
         for(let i = 0; i < charCount; i++) {
@@ -146,6 +200,11 @@ export class Bytes {
         return result;
     }
     
+    /**
+     * Write a Base64-encoded string to the buffer.
+     * @param value - The Base64 string to write.
+     * @returns This Bytes instance for chaining.
+     */
     writeBase64(value: string) {
         this.ensureCapacity(Math.ceil(value.length * 6 / 8));
         for(let i = 0; i < value.length; i++) {
@@ -156,6 +215,11 @@ export class Bytes {
         return this;
     }
 
+    /**
+     * Pad read position to byte boundary.
+     * 
+     * If currently reading in the middle of a byte, advance to the next byte boundary.
+     */
     padReadBits() {
         // If we have any bits left in the current byte, pad them to 8
         if (this.readBit < 8) {
@@ -164,6 +228,11 @@ export class Bytes {
         }
     }
     
+    /**
+     * Pad write position to byte boundary.
+     * 
+     * If currently writing in the middle of a byte, advance to the next byte boundary.
+     */
     padWriteBits() {
         // If we have any bits left in the current byte, pad them to 8
         if (this.writeBit < 8) {
@@ -172,6 +241,10 @@ export class Bytes {
         }
     }
 
+    /**
+     * Ensure the buffer has capacity for additional bytes.
+     * @param additionalBytes - Number of additional bytes needed.
+     */
     ensureCapacity(additionalBytes: number): void {
         const needed = this.writeByte + additionalBytes + 1;
         if (needed <= this.buffer.length) return;
@@ -202,6 +275,15 @@ export class Bytes {
     *   54 bits (incl sign) fit in 58 bits
     */
     
+    /**
+     * Write a number to the buffer using efficient encoding.
+     * 
+     * Integers are encoded using variable-length encoding based on their magnitude.
+     * Large numbers and floating-point numbers use standard IEEE 754 representation.
+     * 
+     * @param value - The number to write.
+     * @returns This Bytes instance for chaining.
+     */
     writeNumber(value: number): Bytes {
         if (Number.isInteger(value) && value >= Number.MIN_SAFE_INTEGER && value <= Number.MAX_SAFE_INTEGER) {
             // 33 bit integer (incl sign)
@@ -241,6 +323,14 @@ export class Bytes {
         return this;
     }
 
+    /**
+     * Read a number from the buffer.
+     * 
+     * Reads numbers that were written using the writeNumber method,
+     * automatically detecting the encoding format.
+     * 
+     * @returns The read number.
+     */
     readNumber(): number {
         const header = this.readBits(5);
         
@@ -285,6 +375,11 @@ export class Bytes {
         return isNegative ? -value : value;
     }
     
+    /**
+     * Write a UTF-8 string to the buffer with null termination.
+     * @param value - The string to write.
+     * @returns This Bytes instance for chaining.
+     */
     writeString(value: string): Bytes {
         // Escape 0 characters and escape characters
         value = value.replace(/[\u0001\u0000]/g, (match: string) => match === '\u0001' ? '\u0001e' : '\u0001z');
@@ -297,6 +392,11 @@ export class Bytes {
         return this;
     }
 
+    /**
+     * Write another Bytes instance to this buffer.
+     * @param value - The Bytes instance to write.
+     * @returns This Bytes instance for chaining.
+     */
     writeBytes(value: Bytes): Bytes {
         let size = value.byteCount();
         this.writeNumber(size);
@@ -307,6 +407,10 @@ export class Bytes {
         return this;
     }
 
+    /**
+     * Read a Bytes instance from the buffer.
+     * @returns A new Bytes instance containing the read data.
+     */
     readBytes(): Bytes {
         const size = this.readNumber();
         if (size < 0 || size > this.buffer.length - this.readByte) {
@@ -317,6 +421,10 @@ export class Bytes {
         return bytes;
     }
 
+    /**
+     * Read a null-terminated UTF-8 string from the buffer.
+     * @returns The decoded string.
+     */
     readString(): string {
         this.padReadBits();
         const start = this.readByte;
@@ -336,6 +444,10 @@ export class Bytes {
         return value;
     }
 
+    /**
+     * Get the current buffer contents as a Uint8Array.
+     * @returns A new Uint8Array containing the written data.
+     */
     getBuffer(): Uint8Array {
         return this.buffer.subarray(0, this.byteCount());
     }
@@ -346,6 +458,10 @@ export class Bytes {
             .join(' ') + ` (${this.byteCount()} bytes)`;
     }
 
+    /**
+     * Create a copy of this Bytes instance.
+     * @returns A new Bytes instance with the same content.
+     */
     copy() {
         return new Bytes(this.getBuffer());
     }

@@ -4,12 +4,13 @@ import { Model, modelRegistry, getMockModel } from "./models.js";
 import { assert, addErrorPath } from "./utils.js";
 
 /**
- * Abstract base class for all type wrappers in the Edinburgh ORM system.
+ * @internal Abstract base class for all type wrappers in the Edinburgh ORM system.
  * 
+ * This is an implementation detail and should not be referenced directly in user code.
  * Type wrappers define how values are serialized to/from the database and how they are validated.
  * Each type wrapper must implement serialization, deserialization, and validation logic.
  * 
- * @template T - The TypeScript type this wrapper represents
+ * @template T - The TypeScript type this wrapper represents.
  */
 export abstract class TypeWrapper<const T> {
     /** @internal Used for TypeScript type inference - this field is required for the type system */
@@ -21,38 +22,38 @@ export abstract class TypeWrapper<const T> {
     constructor() {}
     
     /**
-     * Serialize a value from an object property to bytes
-     * @param obj - The object containing the value
-     * @param prop - The property name or index
-     * @param bytes - The Bytes instance to write to
-     * @param model - Optional model instance for context
+     * Serialize a value from an object property to bytes.
+     * @param obj - The object containing the value.
+     * @param prop - The property name or index.
+     * @param bytes - The Bytes instance to write to.
+     * @param model - Optional model instance for context.
      */
     abstract serialize(obj: any, prop: string|number, bytes: Bytes, model?: any): void;
     
     /**
-     * Deserialize a value from bytes into an object property
-     * @param obj - The object to set the value on
-     * @param prop - The property name or index
-     * @param bytes - The Bytes instance to read from
-     * @param model - Optional model instance for context
+     * Deserialize a value from bytes into an object property.
+     * @param obj - The object to set the value on.
+     * @param prop - The property name or index.
+     * @param bytes - The Bytes instance to read from.
+     * @param model - Optional model instance for context.
      */
     abstract deserialize(obj: any, prop: string|number, bytes: Bytes, model?: any): void;
     
     /**
-     * Validate a value and return any validation errors
-     * @param obj - The object containing the value
-     * @param prop - The property name or index
-     * @returns Array of validation errors (empty if valid)
+     * Validate a value and return any validation errors.
+     * @param obj - The object containing the value.
+     * @param prop - The property name or index.
+     * @returns Array of validation errors (empty if valid).
      */
     abstract getErrors(obj: any, prop: string | number): DatabaseError[];
     
     /**
-     * Validate a value and serialize it, throwing on validation errors
-     * @param obj - The object containing the value
-     * @param prop - The property name or index
-     * @param bytes - The Bytes instance to write to
-     * @param model - Optional model instance for context
-     * @throws {DatabaseError} If validation fails
+     * Validate a value and serialize it, throwing on validation errors.
+     * @param obj - The object containing the value.
+     * @param prop - The property name or index.
+     * @param bytes - The Bytes instance to write to.
+     * @param model - Optional model instance for context.
+     * @throws {DatabaseError} If validation fails.
      */
     validateAndSerialize(obj: any, prop: string|number, bytes: Bytes, model?: any): void {
         const errors = this.getErrors(obj, prop);
@@ -61,16 +62,16 @@ export abstract class TypeWrapper<const T> {
     }
     
     /**
-     * Serialize type metadata to bytes (for schema serialization)
-     * @param bytes - The Bytes instance to write to
+     * Serialize type metadata to bytes (for schema serialization).
+     * @param bytes - The Bytes instance to write to.
      */
     serializeType(bytes: Bytes) {}
     
     /**
-     * Check if indexing should be skipped for this field value
-     * @param obj - The object containing the value
-     * @param prop - The property name or index
-     * @returns true if indexing should be skipped
+     * Check if indexing should be skipped for this field value.
+     * @param obj - The object containing the value.
+     * @param prop - The property name or index.
+     * @returns true if indexing should be skipped.
      */
     checkSkipIndex(obj: any, prop: string | number): boolean {
         return false;
@@ -82,20 +83,20 @@ export abstract class TypeWrapper<const T> {
 }
 
 /**
- * Optional interface for type wrappers that can provide default values
- * @template T - The TypeScript type this wrapper represents
+ * Optional interface for type wrappers that can provide default values.
+ * @template T - The TypeScript type this wrapper represents.
  */
 export interface TypeWrapper<T> {
     /**
-     * Generate a default value for this type
-     * @param model - The model instance
-     * @returns The default value
+     * Generate a default value for this type.
+     * @param model - The model instance.
+     * @returns The default value.
      */
     default?(model: any): T;
 }
 
 /**
- * Type wrapper for string values
+ * @internal Type wrapper for string values.
  */
 export class StringType extends TypeWrapper<string> {
     kind = 'string';
@@ -117,7 +118,7 @@ export class StringType extends TypeWrapper<string> {
 }
 
 /**
- * Type wrapper for number values
+ * @internal Type wrapper for number values.
  */
 export class NumberType extends TypeWrapper<number> {
     kind = 'number';
@@ -140,7 +141,7 @@ export class NumberType extends TypeWrapper<number> {
 }
 
 /**
- * Type wrapper for boolean values
+ * @internal Type wrapper for boolean values.
  */
 export class BooleanType extends TypeWrapper<boolean> {
     kind = 'boolean';
@@ -162,16 +163,16 @@ export class BooleanType extends TypeWrapper<boolean> {
 }
 
 /**
- * Type wrapper for array values with optional length constraints
- * @template T - The type of array elements
+ * @internal Type wrapper for array values with optional length constraints.
+ * @template T - The type of array elements.
  */
 export class ArrayType<T> extends TypeWrapper<T[]> {
     kind = 'array';
     
     /**
-     * Create a new ArrayType
-     * @param inner - Type wrapper for array elements
-     * @param opts - Array constraints (min/max length)
+     * Create a new ArrayType.
+     * @param inner - Type wrapper for array elements.
+     * @param opts - Array constraints (min/max length).
      */
     constructor(public inner: TypeWrapper<T>, public opts: {min?: number, max?: number} = {}) {
         super();
@@ -225,15 +226,15 @@ export class ArrayType<T> extends TypeWrapper<T[]> {
 }
 
 /**
- * Type wrapper for union/discriminated union types
- * @template T - The union type this wrapper represents
+ * @internal Type wrapper for union/discriminated union types.
+ * @template T - The union type this wrapper represents.
  */
 export class OrType<const T> extends TypeWrapper<T> {
     kind = 'or';
     
     /**
-     * Create a new OrType
-     * @param choices - Array of type wrappers representing the union choices
+     * Create a new OrType.
+     * @param choices - Array of type wrappers representing the union choices.
      */
     constructor(public choices: TypeWrapper<T>[]) {
         super();
@@ -299,15 +300,15 @@ export class OrType<const T> extends TypeWrapper<T> {
 }
 
 /**
- * Type wrapper for literal values (constants)
- * @template T - The literal type this wrapper represents
+ * @internal Type wrapper for literal values (constants).
+ * @template T - The literal type this wrapper represents.
  */
 export class LiteralType<const T> extends TypeWrapper<T> {
     kind = 'literal';
     
     /**
-     * Create a new LiteralType
-     * @param value - The literal value this type represents
+     * Create a new LiteralType.
+     * @param value - The literal value this type represents.
      */
     constructor(public value: T) {
         super();
@@ -343,7 +344,7 @@ export class LiteralType<const T> extends TypeWrapper<T> {
 const ID_SIZE = 7;
 
 /**
- * Type wrapper for auto-generated unique identifier strings
+ * @internal Type wrapper for auto-generated unique identifier strings.
  */
 export class IdentifierType extends TypeWrapper<string> {
     kind = 'id';
@@ -396,17 +397,17 @@ const WANT_PK_ARRAY = {};
 export type KeysOfType<T, TProp> = { [P in keyof T]: T[P] extends TProp? P : never}[keyof T];
 
 /**
- * Type wrapper for model relationships (foreign keys)
- * @template T - The target model class type
+ * @internal Type wrapper for model relationships (foreign keys).
+ * @template T - The target model class type.
  */
 export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceType<T>> {
     kind = 'link';
     TargetModel: T;
 
     /**
-     * Create a new LinkType
-     * @param TargetModel - The model class this link points to
-     * @param reverse - Optional reverse link field name for bidirectional relationships
+     * Create a new LinkType.
+     * @param TargetModel - The model class this link points to.
+     * @param reverse - Optional reverse link field name for bidirectional relationships.
      */
     constructor(TargetModel: T, public reverse?: string & KeysOfType<InstanceType<T>, Model<any>[]>) {
         super();
@@ -523,28 +524,28 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
 }
 
 // Pre-defined type instances for convenience
-/** Predefined string type instance */
+/** Predefined string type instance. */
 export const string = new StringType();
 
-/** Predefined number type instance */
+/** Predefined number type instance. */
 export const number = new NumberType();
 
-/** Predefined boolean type instance */
+/** Predefined boolean type instance. */
 export const boolean = new BooleanType();
 
-/** Predefined identifier type instance */
+/** Predefined identifier type instance. */
 export const identifier = new IdentifierType();
 
 /**
- * Create a literal type wrapper for a constant value
- * @template T - The literal type
- * @param value - The literal value
- * @returns A LiteralType instance
+ * Create a literal type wrapper for a constant value.
+ * @template T - The literal type.
+ * @param value - The literal value.
+ * @returns A literal type instance.
  * 
  * @example
  * ```typescript
- * const statusType = literal("active");
- * const countType = literal(42);
+ * const statusType = E.literal("active");
+ * const countType = E.literal(42);
  * ```
  */
 export function literal<const T>(value: T) {
@@ -552,15 +553,15 @@ export function literal<const T>(value: T) {
 }
 
 /**
- * Create a union type wrapper from multiple type choices
- * @template T - Array of type wrapper or basic types
- * @param choices - The type choices for the union
- * @returns An OrType instance
+ * Create a union type wrapper from multiple type choices.
+ * @template T - Array of type wrapper or basic types.
+ * @param choices - The type choices for the union.
+ * @returns A union type instance.
  * 
  * @example
  * ```typescript
- * const stringOrNumber = or(string, number);
- * const status = or("active", "inactive", "pending");
+ * const stringOrNumber = E.or(E.string, E.number);
+ * const status = E.or("active", "inactive", "pending");
  * ```
  */
 export function or<const T extends (TypeWrapper<unknown>|BasicType)[]>(...choices: T) {
@@ -570,15 +571,15 @@ export function or<const T extends (TypeWrapper<unknown>|BasicType)[]>(...choice
 const undef = new LiteralType(undefined);
 
 /**
- * Create an optional type wrapper (allows undefined)
- * @template T - TypeWrapper or basic type to make optional
- * @param inner - The inner type to make optional
- * @returns An OrType that accepts the inner type or undefined
+ * Create an optional type wrapper (allows undefined).
+ * @template T - Type wrapper or basic type to make optional.
+ * @param inner - The inner type to make optional.
+ * @returns A union type that accepts the inner type or undefined.
  * 
  * @example
  * ```typescript
- * const optionalString = opt(string);
- * const optionalNumber = opt(number);
+ * const optionalString = E.opt(E.string);
+ * const optionalNumber = E.opt(E.number);
  * ```
  */
 export function opt<const T extends TypeWrapper<unknown>|BasicType>(inner: T) {
@@ -586,16 +587,16 @@ export function opt<const T extends TypeWrapper<unknown>|BasicType>(inner: T) {
 }
 
 /**
- * Create an array type wrapper with optional length constraints
- * @template T - The element type
- * @param inner - Type wrapper for array elements
- * @param opts - Optional constraints (min/max length)
- * @returns An ArrayType instance
+ * Create an array type wrapper with optional length constraints.
+ * @template T - The element type.
+ * @param inner - Type wrapper for array elements.
+ * @param opts - Optional constraints (min/max length).
+ * @returns An array type instance.
  * 
  * @example
  * ```typescript
- * const stringArray = array(string);
- * const boundedArray = array(number, {min: 1, max: 10});
+ * const stringArray = E.array(E.string);
+ * const boundedArray = E.array(E.number, {min: 1, max: 10});
  * ```
  */
 export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: number} = {}) {
@@ -603,20 +604,20 @@ export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?:
 }
 
 /**
- * Create a link type wrapper for model relationships
- * @template T - The target model class
- * @param TargetModel - The model class this link points to
- * @param reverse - Optional reverse link field name for bidirectional relationships
- * @returns A LinkType instance
+ * Create a link type wrapper for model relationships.
+ * @template T - The target model class.
+ * @param TargetModel - The model class this link points to.
+ * @param reverse - Optional reverse link field name for bidirectional relationships.
+ * @returns A link type instance.
  * 
  * @example
  * ```typescript
- * class User extends Model<User> {
- *   posts = field(array(link(Post, 'author')));
+ * class User extends E.Model<User> {
+ *   posts = E.field(E.array(E.link(Post, 'author')));
  * }
  * 
- * class Post extends Model<Post> {
- *   author = field(link(User));
+ * class Post extends E.Model<Post> {
+ *   author = E.field(E.link(User));
  * }
  * ```
  */
@@ -638,7 +639,11 @@ function wrapIfLiteral(type: any) {
     return type instanceof TypeWrapper ? type : new LiteralType(type);
 }
 
-// Schema serialization utilities
+/**
+ * Serialize a type wrapper to bytes for schema persistence.
+ * @param arg - The type wrapper to serialize.
+ * @param bytes - The Bytes instance to write to.
+ */
 export function serializeType(arg: TypeWrapper<any>, bytes: Bytes) {
     bytes.writeString(arg.kind);
     arg.serializeType(bytes);
@@ -654,6 +659,12 @@ const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (bytes:
     id: identifier,
 };
 
+/**
+ * Deserialize a type wrapper from bytes.
+ * @param bytes - The Bytes instance to read from.
+ * @param featureFlags - Feature flags for version compatibility.
+ * @returns The deserialized type wrapper.
+ */
 export function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
     const kind = bytes.readString();
     const TypeWrapper = TYPE_WRAPPERS[kind];

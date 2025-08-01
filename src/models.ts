@@ -6,15 +6,15 @@ import { Index, TARGET_SYMBOL } from "./indexes.js";
 import { assert, addErrorPath, logLevel } from "./utils.js";
 
 /**
- * Configuration interface for model fields
- * @template T - The field type
+ * Configuration interface for model fields.
+ * @template T - The field type.
  */
 export interface FieldConfig<T> {
-    /** The type wrapper that defines how this field is serialized/validated */
+    /** The type wrapper that defines how this field is serialized/validated. */
     type: TypeWrapper<T>;
-    /** Optional human-readable description of the field */
+    /** Optional human-readable description of the field. */
     description?: string;
-    /** Optional default value or function that generates default values */
+    /** Optional default value or function that generates default values. */
     default?: T | ((model: Record<string,any>) => T);
 }
 
@@ -25,16 +25,16 @@ export interface FieldConfig<T> {
  * while appearing to return the actual field value type to the type system.
  * This allows for both runtime introspection and compile-time type safety.
  * 
- * @template T - The field type
- * @param type - The type wrapper for this field
- * @param options - Additional field configuration options
- * @returns The field value (typed as T, but actually returns FieldConfig<T>)
+ * @template T - The field type.
+ * @param type - The type wrapper for this field.
+ * @param options - Additional field configuration options.
+ * @returns The field value (typed as T, but actually returns FieldConfig<T>).
  * 
  * @example
  * ```typescript
- * class User extends Model<User> {
- *   name = field(string, {description: "User's full name"});
- *   age = field(opt(number), {description: "User's age", default: 25});
+ * class User extends E.Model<User> {
+ *   name = E.field(E.string, {description: "User's full name"});
+ *   age = E.field(E.opt(E.number), {description: "User's age", default: 25});
  * }
  * ```
  */
@@ -62,40 +62,40 @@ function isObjectEmpty(obj: object) {
  * that enables change tracking and automatic field initialization. It also extracts
  * field metadata and sets up default values on the prototype.
  * 
- * @template T - The model class type
- * @param OrgModel - The model class to register
- * @returns The enhanced model class with ORM capabilities
+ * @template T - The model class type.
+ * @param MyModel - The model class to register.
+ * @returns The enhanced model class with ORM capabilities.
  * 
  * @example
  * ```typescript
- * @registerModel
- * class User extends Model<User> {
- *   static pk = index(User, ["id"], "primary");
- *   id = field(identifier);
- *   name = field(string);
+ * ⁣@E.registerModel
+ * class User extends E.Model<User> {
+ *   static pk = E.index(User, ["id"], "primary");
+ *   id = E.field(E.identifier);
+ *   name = E.field(E.string);
  * }
  * ```
  */
-export function registerModel<T extends typeof Model<unknown>>(OrgModel: T): T {
-    const MockModel = getMockModel(OrgModel);
+export function registerModel<T extends typeof Model<unknown>>(MyModel: T): T {
+    const MockModel = getMockModel(MyModel);
 
     // Copy own static methods/properties
-    for(const name of Object.getOwnPropertyNames(OrgModel)) {
+    for(const name of Object.getOwnPropertyNames(MyModel)) {
         if (name !== 'length' && name !== 'prototype' && name !== 'name' && name !== 'mock') {
-            (MockModel as any)[name] = (OrgModel as any)[name];
+            (MockModel as any)[name] = (MyModel as any)[name];
         }
     }
 
     // Initialize an empty `fields` object, and set it on both constructors, as well as on the prototype.
     MockModel.fields = MockModel.prototype._fields = {};
-    MockModel.tableName ||= OrgModel.name; // Set the table name to the class name if not already set
+    MockModel.tableName ||= MyModel.name; // Set the table name to the class name if not already set
 
     // Register the constructor by name
     if (MockModel.tableName in modelRegistry) throw new DatabaseError(`Model with table name '${MockModel.tableName}' already registered`, 'INIT_ERROR');
     modelRegistry[MockModel.tableName] = MockModel;
 
     // Attempt to instantiate the class and gather field metadata
-    uninitializedModels.add(OrgModel);
+    uninitializedModels.add(MyModel);
     initModels();
 
     return MockModel;
@@ -205,8 +205,8 @@ export const MODIFIED_INSTANCES_SYMBOL = Symbol('modifiedInstances');
 /** @internal Symbol used to access the underlying model from a proxy */
 
 /**
- * Model interface that ensures proper typing for the constructor property
- * @template SUB - The concrete model subclass
+ * Model interface that ensures proper typing for the constructor property.
+ * @template SUB - The concrete model subclass.
  */
 export interface Model<SUB> {
   constructor: typeof Model<SUB>;
@@ -217,39 +217,39 @@ export interface Model<SUB> {
  * 
  * Models represent database entities with typed fields, automatic serialization,
  * change tracking, and relationship management. All model classes should extend
- * this base class and be decorated with @registerModel.
+ * this base class and be decorated with `@registerModel`.
  * 
- * @template SUB - The concrete model subclass (for proper typing)
+ * @template SUB - The concrete model subclass (for proper typing).
  * 
  * @example
  * ```typescript
- * @registerModel
- * class User extends Model<User> {
- *   static pk = index(User, ["id"], "primary");
+ * ⁣@E.registerModel
+ * class User extends E.Model<User> {
+ *   static pk = E.index(User, ["id"], "primary");
  *   
- *   id = field(identifier);
- *   name = field(string);
- *   email = field(string);
+ *   id = E.field(E.identifier);
+ *   name = E.field(E.string);
+ *   email = E.field(E.string);
  *   
- *   static byEmail = index(User, "email", "unique");
+ *   static byEmail = E.index(User, "email", "unique");
  * }
  * ```
  */
 export abstract class Model<SUB> {
-    /** @internal Primary key index for this model */
+    /** @internal Primary key index for this model. */
     static _pk?: Index<any, any>;
-    /** @internal All indexes for this model */
+    /** @internal All indexes for this model. */
     static _indexes?: Index<any, any>[];
 
-    /** The database table name (defaults to class name) */
+    /** The database table name (defaults to class name). */
     static tableName: string;
-    /** Field configuration metadata */
+    /** Field configuration metadata. */
     static fields: Record<string, FieldConfig<unknown>>;
     
-    /** @internal Field configuration for this instance */
+    /** @internal Field configuration for this instance. */
     _fields!: Record<string, FieldConfig<unknown>>;
 
-    /** @internal Tracking for reverse links that need deletion */
+    /** @internal Tracking for reverse links that need deletion. */
     _reverseLinksToBeDeleted?: Map<LinkType<any>, Set<string>>;
 
     /** 
@@ -308,9 +308,9 @@ export abstract class Model<SUB> {
     }
 
     /**
-     * Load a model instance by primary key
-     * @param args - Primary key field values
-     * @returns The model instance if found, undefined otherwise
+     * Load a model instance by primary key.
+     * @param args - Primary key field values.
+     * @returns The model instance if found, undefined otherwise.
      * 
      * @example
      * ```typescript
@@ -328,7 +328,7 @@ export abstract class Model<SUB> {
      * Removes the instance from the modified instances set and disables
      * automatic persistence at transaction commit.
      * 
-     * @returns This model instance for chaining
+     * @returns This model instance for chaining.
      * 
      * @example
      * ```typescript
@@ -367,9 +367,9 @@ export abstract class Model<SUB> {
     }
 
     /**
-     * Validate all fields in this model instance
-     * @param raise - If true, throw on first validation error
-     * @returns Array of validation errors (empty if valid)
+     * Validate all fields in this model instance.
+     * @param raise - If true, throw on first validation error.
+     * @returns Array of validation errors (empty if valid).
      * 
      * @example
      * ```typescript
@@ -394,8 +394,8 @@ export abstract class Model<SUB> {
     }
     
     /**
-     * Check if this model instance is valid
-     * @returns true if all validations pass
+     * Check if this model instance is valid.
+     * @returns true if all validations pass.
      * 
      * @example
      * ```typescript
