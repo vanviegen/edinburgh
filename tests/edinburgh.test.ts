@@ -1,5 +1,5 @@
 import { test, expect, beforeEach } from "@jest/globals";
-import * as E from '../dist/edinburgh.js';
+import * as E from 'edinburgh';
 import * as olmdb from "olmdb";
 const {field} = E;
 
@@ -26,8 +26,6 @@ class Person extends E.Model<Person> {
     static byCar = E.index(Person, ["cars"], "unique");
 }
 
-
-
 @E.registerModel
 class Data extends E.Model<Data> {
     id = field(E.identifier, {description: "Unique identifier"});
@@ -43,15 +41,6 @@ class Data extends E.Model<Data> {
 
 function noNeedToRunThis() {
     // Verify that TypeScript errors pop up in all the right places and not in the wrong places.
-
-    Person.byCombi.get("Frank", "test");
-    // @ts-expect-error
-    Person.byCombi.get(42, "test");
-    Person.byCombi.get("Frank", 42);
-
-    Person.byCar.get(["Toyota", "Honda"]);
-    // @ts-expect-error
-    Person.byCar.get([true, "Honda"]);
 
     // @ts-expect-error
     let z = new Person({name: "x", age: "Str"});

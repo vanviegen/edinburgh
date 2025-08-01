@@ -40,6 +40,10 @@ export class Bytes {
         return (this.writeByte * 8) + (8 - this.writeBit);
     }
 
+    readAvailable(): boolean {
+        return this.readByte < this.buffer.length;
+    }
+
     /** Safe up til 30 bits */
     readBits(bits: number, flip: boolean=false): number {
         if (bits < 0 || bits > 30) {

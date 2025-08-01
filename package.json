@@ -1,27 +1,27 @@
 {
   "name": "edinburgh",
   "version": "0.1.1",
-  "description": "Very fast object persistence for TypeScript, supporting optimistic transactions, on-demand reference loading, automatic back-references and indexes.",
-  "type": "module",
-  "main": "src/edinburgh.ts",
+  "author": "Frank van Viegen",
+  "devDependencies": {
+    "@jest/globals": "^30.0.3",
+    "@types/bun": "^1.2.16",
+    "@types/node": "^22.10.6",
+    "jest": "^30.0.5",
+    "tsdoc-markdown": "^1.2.0",
+    "typescript": "^5.8.3"
+  },
   "exports": {
     ".": {
+      "bun": "./src/edinburgh.ts",
       "types": "./dist/edinburgh.d.ts",
       "default": "./dist/edinburgh.js"
     }
   },
+  "description": "Very fast object persistence for TypeScript, supporting optimistic transactions, on-demand reference loading, automatic back-references and indexes.",
   "files": [
     "src",
     "dist"
   ],
-  "scripts": {
-    "build": "rm -rf dist && tsc",
-    "test": "npm run test:bun && npm run test:node",
-    "test:bun": "bun test",
-    "test:node": "npm run build && npx tsc -p tsconfig.test.json && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
-    "prepack": "npm run build && npm run test",
-    "update-readme-tsdoc": "bun tools/update-readme-tsdoc.js"
-  },
   "keywords": [
     "orm",
     "backend",
@@ -32,20 +32,20 @@
     "olmdb",
     "typescript"
   ],
-  "author": "Frank van Viegen",
-  "license": "MIT",
-  "devDependencies": {
-    "@jest/globals": "^30.0.3",
-    "@types/bun": "^1.2.16",
-    "@types/node": "^22.10.6",
-    "jest": "^30.0.5",
-    "tsdoc-markdown": "^1.2.0",
-    "typescript": "^5.8.3"
-  },
-  "dependencies": {
-    "olmdb": "^0.2.10"
+  "license": "ISC",
+  "scripts": {
+    "build": "rm -rf dist && tsc",
+    "test": "npm run test:bun && npm run test:node",
+    "test:bun": "bun test",
+    "test:node": "npm run build && rm -rf dist.tests && npx tsc -p tsconfig.test.json && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
+    "prepack": "npm run build && npm run test",
+    "update-readme-tsdoc": "bun tools/update-readme-tsdoc.js"
   },
   "trustedDependencies": [
     "olmdb"
-  ]
+  ],
+  "type": "module",
+  "dependencies": {
+    "olmdb": "^0.2.11"
+  }
 }

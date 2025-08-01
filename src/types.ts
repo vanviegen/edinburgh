@@ -1,7 +1,7 @@
 import { Bytes } from "./bytes.js";
 import { DatabaseError } from "olmdb";
-import { Model, registerModel, modelRegistry } from "./models.js";
-import { assert, addErrorPath, ERROR_AT } from "./utils.js";
+import { Model, modelRegistry, getMockModel } from "./models.js";
+import { assert, addErrorPath } from "./utils.js";
 
 /**
  * Abstract base class for all type wrappers in the Edinburgh ORM system.
@@ -74,6 +74,10 @@ export abstract class TypeWrapper<const T> {
      */
     checkSkipIndex(obj: any, prop: string | number): boolean {
         return false;
+    }
+
+    toString(): string {
+        return `${this.kind}`;
     }
 }
 
@@ -322,7 +326,7 @@ export class LiteralType<const T> extends TypeWrapper<T> {
     }
     
     serializeType(bytes: Bytes): void {
-        bytes.writeString(JSON.stringify(this.value));
+        bytes.writeString(this.value===undefined ? "" : JSON.stringify(this.value));
     }
 
     checkSkipIndex(obj: any, prop: string | number): boolean {
@@ -330,7 +334,8 @@ export class LiteralType<const T> extends TypeWrapper<T> {
     }
     
     static deserializeType(bytes: Bytes, featureFlags: number): LiteralType<any> {
-        const value = JSON.parse(bytes.readString());
+        const json = bytes.readString();
+        const value = json==="" ? undefined : JSON.parse(json);
         return new LiteralType(value);
     }
 }
@@ -405,7 +410,7 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
      */
     constructor(TargetModel: T, public reverse?: string & KeysOfType<InstanceType<T>, Model<any>[]>) {
         super();
-        this.TargetModel = registerModel(TargetModel);
+        this.TargetModel = getMockModel(TargetModel);
     }
 
     serialize(obj: any, prop: string | number, bytes: Bytes, model: Model<InstanceType<T>>): void {
@@ -634,7 +639,7 @@ function wrapIfLiteral(type: any) {
 }
 
 // Schema serialization utilities
-function serializeType(arg: TypeWrapper<any>, bytes: Bytes) {
+export function serializeType(arg: TypeWrapper<any>, bytes: Bytes) {
     bytes.writeString(arg.kind);
     arg.serializeType(bytes);
 }
@@ -649,7 +654,7 @@ const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (bytes:
     id: identifier,
 };
 
-function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
+export function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
     const kind = bytes.readString();
     const TypeWrapper = TYPE_WRAPPERS[kind];
     if ('deserializeType' in TypeWrapper) {
@@ -658,7 +663,3 @@ function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
         return TypeWrapper;
     }
 }
-
-
-
-

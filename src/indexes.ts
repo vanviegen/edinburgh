@@ -1,8 +1,9 @@
-import { Bytes } from "./bytes.js";
-import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
-import { registerModel, Model } from "./models.js";
+import { DatabaseError } from "olmdb";
+import { Bytes } from "./bytes.js";
+import { getMockModel, Model, modelRegistry } from "./models.js";
 import { assert, logLevel } from "./utils.js";
+import { deserializeType, serializeType, TypeWrapper } from "./types.js";
 
 /** @internal Symbol used to access the underlying model from a proxy */
 export const TARGET_SYMBOL = Symbol('target');
@@ -27,7 +28,7 @@ export type IndexType = 'primary' | 'unique' | 'secondary';
  * @template F - The field names that make up this index
  */
 export class Index<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> {
-    private MyModel: M;
+    public MyModel: M;
     
     /**
      * Create a new index
@@ -36,7 +37,7 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
      * @param type - The index type ("primary", "unique", or "secondary")
      */
     constructor(MyModel: M, public fieldNames: F, public type: IndexType) {
-        MyModel = this.MyModel = registerModel(MyModel as any) as M;
+        this.MyModel = MyModel = getMockModel(MyModel);
         (MyModel._indexes ||= []).push(this);
 
         if (type === 'primary') {
@@ -136,7 +137,10 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
         let indexId = this.cachedIndexId;
         if (indexId == null) {
             const indexNameBytes = new Bytes().writeNumber(INDEX_ID_PREFIX).writeString(this.MyModel.tableName).writeString(this.type);
-            for(let name of this.fieldNames) indexNameBytes.writeString(name);
+            for(let name of this.fieldNames) {
+                indexNameBytes.writeString(name);
+                serializeType(this.MyModel.fields[name].type, indexNameBytes);
+            }
             const indexNameBuf = indexNameBytes.getBuffer();
 
             let result = olmdb.get(indexNameBuf);
@@ -151,7 +155,7 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
                     this.cachedIndexId = indexId;
                 });
 
-                const idBuf = new Bytes().writeNumber(indexId).getBuffer()
+                const idBuf = new Bytes().writeNumber(indexId).getBuffer();
                 olmdb.put(indexNameBuf, idBuf);
                 olmdb.put(maxIndexIdBuf, idBuf); // This will also cause the transaction to rerun if we were raced
                 if (logLevel >= 1) {
@@ -186,9 +190,11 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
         if (!valueBuffer) return;
 
         if (this.type === 'unique') {
-            // valueBuffer contains the index id and key of the primary key that holds the actual data.
-            valueBuffer = olmdb.get(valueBuffer);
-            if (!valueBuffer) throw new DatabaseError(`Unique index ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] points at non-existing primary for key: ${args.join(', ')}`, 'CONSISTENCY_ERROR');
+            const pk = this.MyModel._pk!;
+            const valueArgs = pk.deserializeKey(new Bytes(valueBuffer))
+            const result = pk.get(...valueArgs);
+            if (!result) throw new DatabaseError(`Unique index ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] points at non-existing primary for key: ${args.join(', ')}`, 'CONSISTENCY_ERROR');
+            return result;
         }
         
         // This is a primary index. So we can now deserialize all primary and non-primary fields into instance values.
@@ -244,7 +250,6 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
      */
     savePrimary(model: any, originalKey?: Uint8Array) {
         let newKey = this.getKeyFromModel(model, true, false); // Cannot be undefined for primary
-        // originalKey for primary includes the index id, so we can compare it directly
         if (originalKey && Buffer.compare(newKey, originalKey)) throw new DatabaseError(`Cannot change primary key for ${this.MyModel.tableName}[${this.fieldNames.join(', ')}]: ${originalKey} -> ${newKey}`, 'PRIMARY_CHANGE');
 
         // Serialize all non-primary key fields
@@ -270,7 +275,7 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
      * @param originalKey - Original key if updating
      */
     saveUnique(model: any, originalKey?: Uint8Array) {
-        let newKey = this.getKeyFromModel(model, false, true);
+        let newKey = this.getKeyFromModel(model, true, true);
 
         if (originalKey) {
             if (newKey && Buffer.compare(newKey, originalKey) === 0) {
@@ -324,4 +329,37 @@ export function index<M extends typeof Model, const FS extends readonly (keyof I
 
 export function index(MyModel: typeof Model, fields: any, type: IndexType = 'secondary') {
     return new Index(MyModel, Array.isArray(fields) ? fields : [fields], type);
+}
+
+export function dump() {
+    let indexesById = new Map<number, {type: string, fields: Record<string, TypeWrapper<any>>}>();
+    for(const {key,value} of olmdb.scan()) {
+        const kb = new Bytes(key);
+        const vb = new Bytes(value);
+        const indexId = kb.readNumber();
+        if (indexId === MAX_INDEX_ID_PREFIX) {
+            console.log("Max index id", vb.readNumber());
+        } else if (indexId === INDEX_ID_PREFIX) {
+            const name = kb.readString();
+            const type = kb.readString();
+            const fields: Record<string, TypeWrapper<any>> = {};
+            while(kb.readAvailable()) {
+                const name = kb.readString();
+                fields[name] = deserializeType(kb, 0);
+            }
+            const fieldDescription = Object.entries(fields).map(([name, type]) => `${name}:${type}`);
+            const indexId = vb.readNumber();
+            console.log(`Definition for ${type} ${indexId} for ${name}[${fieldDescription.join(',')}]`);
+            indexesById.set(indexId, {type, fields});
+        } else if (indexId > 0 && indexesById.has(indexId)) {
+            const {type, fields} = indexesById.get(indexId)!;
+            const rowKey = {};
+            for(const [fieldName, fieldType] of Object.entries(fields)) {
+                fieldType.deserialize(rowKey, fieldName, kb);
+            }
+            console.log(`Row for ${type} ${indexId} with key ${JSON.stringify(rowKey)}`, vb);
+        } else {
+            console.log(`Unhandled ${indexId} index`, kb.readString(), vb.getBuffer());
+        }
+    }
 }

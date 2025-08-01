@@ -1,21 +1,6 @@
 import * as olmdb from "olmdb";
 import { Model, MODIFIED_INSTANCES_SYMBOL } from "./models.js";
 
-// Re-export public API from types (only factory functions and instances)
-export {
-  // Type factory functions
-  literal,
-  or,
-  opt,
-  array,
-  link,
-  // Pre-defined type instances
-  string,
-  number,
-  boolean,
-  identifier
-} from "./types.js";
-
 // Re-export public API from models
 export {
   // Core model system
@@ -24,10 +9,27 @@ export {
   field,
 } from "./models.js";
 
+
+// Re-export public API from types (only factory functions and instances)
+export {
+  // Pre-defined type instances
+  string,
+  number,
+  boolean,
+  identifier,
+  // Type factory functions
+  opt,
+  or,
+  array,
+  literal,
+  link,
+} from "./types.js";
+
 // Re-export public API from indexes
 export {
   // Index system
-  index
+  index,
+  dump,
 } from "./indexes.js";
 
 // Re-export from OLMDB
@@ -102,3 +104,4 @@ export function transact<T>(fn: () => T): Promise<T> {
         }
     });
 }
+

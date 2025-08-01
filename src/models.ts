@@ -47,7 +47,6 @@ export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> 
 // Model registration and initialization
 let uninitializedModels = new Set<typeof Model<unknown>>();
 export const modelRegistry: Record<string, typeof Model> = {};
-const registerModelCache = new WeakMap<typeof Model, typeof Model>();
 
 function isObjectEmpty(obj: object) {
     for (let key in obj) {
@@ -64,7 +63,7 @@ function isObjectEmpty(obj: object) {
  * field metadata and sets up default values on the prototype.
  * 
  * @template T - The model class type
- * @param cls - The model class to register
+ * @param OrgModel - The model class to register
  * @returns The enhanced model class with ORM capabilities
  * 
  * @example
@@ -77,12 +76,37 @@ function isObjectEmpty(obj: object) {
  * }
  * ```
  */
-export function registerModel<T extends typeof Model<unknown>>(cls: T): T {
-    if (cls.isProxied) return cls; // Object is already wrapped
-    if (registerModelCache.has(cls)) {
-        return registerModelCache.get(cls) as T;
+export function registerModel<T extends typeof Model<unknown>>(OrgModel: T): T {
+    const MockModel = getMockModel(OrgModel);
+
+    // Copy own static methods/properties
+    for(const name of Object.getOwnPropertyNames(OrgModel)) {
+        if (name !== 'length' && name !== 'prototype' && name !== 'name' && name !== 'mock') {
+            (MockModel as any)[name] = (OrgModel as any)[name];
+        }
     }
-    function constructor(this: any, initial?: Record<string,any>) {
+
+    // Initialize an empty `fields` object, and set it on both constructors, as well as on the prototype.
+    MockModel.fields = MockModel.prototype._fields = {};
+    MockModel.tableName ||= OrgModel.name; // Set the table name to the class name if not already set
+
+    // Register the constructor by name
+    if (MockModel.tableName in modelRegistry) throw new DatabaseError(`Model with table name '${MockModel.tableName}' already registered`, 'INIT_ERROR');
+    modelRegistry[MockModel.tableName] = MockModel;
+
+    // Attempt to instantiate the class and gather field metadata
+    uninitializedModels.add(OrgModel);
+    initModels();
+
+    return MockModel;
+}
+
+export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
+    const AnyOrgModel = OrgModel as any;
+    if (AnyOrgModel._isMock) return OrgModel;
+    if (AnyOrgModel._mock) return AnyOrgModel._mock;
+
+    const MockModel = function (this: any, initial?: Record<string,any>) {
         if (uninitializedModels.has(this.constructor)) {
             throw new DatabaseError("Cannot instantiate while linked models haven't been registered yet", 'INIT_ERROR');
         }
@@ -93,46 +117,27 @@ export function registerModel<T extends typeof Model<unknown>>(cls: T): T {
         }
 
         return new Proxy(this, modificationTracker);
-    }
+    } as any as T;
 
     // We want .constructor to point at our fake constructor function.
-    cls.prototype.constructor = constructor as any;
+    OrgModel.prototype.constructor = MockModel as any;
 
     // Copy the prototype chain for the constructor as well as for instantiated objects
-    Object.setPrototypeOf(constructor, Object.getPrototypeOf(cls));
-    constructor.prototype = cls.prototype;
-    cls.tableName ||= cls.name; // Set the table name to the class name if not already set
-
-    // Copy own static methods/properties
-    for(const name of Object.getOwnPropertyNames(cls)) {
-        if (name !== 'length' && name !== 'prototype' && name !== 'name') {
-            (constructor as any)[name] = (cls as any)[name];
-        }
-    }
-
-    // Initialize an empty `fields` object, and set it on both constructors, as well as on the prototype.
-    const result = constructor as unknown as T;
-    result.fields = cls.fields = constructor.prototype._fields = {};
-    result.isProxied = true;
-
-    // Register the constructor both by name and by original class
-    registerModelCache.set(cls, result);
-    modelRegistry[result.tableName] = result;
-
-    // Attempt to instantiate the class and gather field metadata
-    uninitializedModels.add(cls);
-    initModels();
-
-    return result;
+    Object.setPrototypeOf(MockModel, Object.getPrototypeOf(OrgModel));
+    MockModel.prototype = OrgModel.prototype;
+    (MockModel as any)._isMock = true;
+    AnyOrgModel._mock = MockModel;
+    return MockModel;
 }
 
 function initModels() {
-    for(const cls of uninitializedModels) {
+    for(const OrgModel of uninitializedModels) {
+        const MockModel = getMockModel(OrgModel);
         // Create an instance (the only one to ever exist) of the actual class,
         // in order to gather field config data. 
         let instance;
         try {
-            instance = new (cls as any)(INIT_INSTANCE_SYMBOL);
+            instance = new (OrgModel as any)(INIT_INSTANCE_SYMBOL);
         } catch(e) {
             if (!(e instanceof ReferenceError)) throw e;
             // ReferenceError: Cannot access 'SomeLinkedClass' before initialization.
@@ -140,19 +145,16 @@ function initModels() {
             continue;
         }
 
-        uninitializedModels.delete(cls);
+        uninitializedModels.delete(OrgModel);
 
-        const proxied = registerModelCache.get(cls);
-        assert(proxied);
-        
         // If no primary key exists, create one using 'id' field
-        if (!proxied._pk) {
+        if (!MockModel._pk) {
             // If no `id` field exists, add it automatically
             if (!instance.id) {
                 instance.id = { type: identifier }; 
             }
             // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
-            new Index(cls, ['id'], 'primary');
+            new Index(MockModel, ['id'], 'primary');
         }
 
         for (const key in instance) {
@@ -160,15 +162,15 @@ function initModels() {
             // Check if this property contains field metadata
             if (value && value.type instanceof TypeWrapper) {
                 // Set the configuration on the constructor's `fields` property
-                cls.fields[key] = value;
-                
+                MockModel.fields[key] = value;
+
                 // Set default value on the prototype
                 const def = value.default ?? value.type.default;
                 if (typeof def === 'function') {
                     // The default is a function. We'll define a getter on the property in the model prototype,
                     // and once it is read, we'll run the function and set the value as a plain old property
                     // on the instance object.
-                    Object.defineProperty(cls.prototype, key, {    
+                    Object.defineProperty(MockModel.prototype, key, {    
                         get() {
                             // This will call set(), which will define the property on the instance.
                             return (this[key] = def(this));
@@ -183,13 +185,13 @@ function initModels() {
                         configurable: true,    
                     });
                 } else if (def !== undefined) {
-                    (cls.prototype as any)[key] = def;
+                    (MockModel.prototype as any)[key] = def;
                 }
             }
         }
 
         if (logLevel >= 1) {
-            console.log(`Registered model ${cls.tableName}[${proxied._pk?.fieldNames.join(',')}] with fields: ${Object.keys(cls.fields).join(' ')}`);
+            console.log(`Registered model ${MockModel.tableName}[${MockModel._pk!.fieldNames.join(',')}] with fields: ${Object.keys(MockModel.fields).join(' ')}`);
         }
     }
 }
@@ -243,8 +245,6 @@ export abstract class Model<SUB> {
     static tableName: string;
     /** Field configuration metadata */
     static fields: Record<string, FieldConfig<unknown>>;
-    /** @internal Flag indicating if this is the proxied version */
-    static isProxied: boolean | undefined;
     
     /** @internal Field configuration for this instance */
     _fields!: Record<string, FieldConfig<unknown>>;
@@ -490,7 +490,7 @@ export const modificationTracker: ProxyHandler<any> = {
             const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
             modifiedInstances.add(model);
             if (state === 2) {
-                model._state = model.constructor._indexes!.map(idx => idx.getKeyFromModel(model, idx.type === 'primary', false));
+                model._state = model.constructor._indexes!.map(idx => idx.getKeyFromModel(model, true, false));
             } else {
                 model._state = 1;
             }
