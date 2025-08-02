@@ -56,7 +56,8 @@ await E.transact(() => {
 ## API Reference
 
 The following is auto-generated from `src/edinburgh.ts`:
-### transact (function)
+
+### transact · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L77)
 
 Executes a function within a database transaction context.
 
@@ -72,7 +73,7 @@ times.
 
 **Type Parameters:**
 
-- `T`
+- `T` - The return type of the transaction function.
 
 **Parameters:**
 
@@ -109,7 +110,7 @@ await E.transact(() => {
 });
 ```
 
-### Model (class)
+### Model · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Base class for all database models in the Edinburgh ORM.
 
@@ -117,27 +118,42 @@ Models represent database entities with typed fields, automatic serialization,
 change tracking, and relationship management. All model classes should extend
 this base class and be decorated with `@registerModel`.
 
-#### tableName (static property)
+**Type Parameters:**
+
+- `SUB` - The concrete model subclass (for proper typing).
+
+**Examples:**
+
+```typescript
+⁣@E.registerModel
+class User extends E.Model<User> {
+  static pk = E.index(User, ["id"], "primary");
+  
+  id = E.field(E.identifier);
+  name = E.field(E.string);
+  email = E.field(E.string);
+  
+  static byEmail = E.index(User, "email", "unique");
+}
+```
+
+#### Model.tableName · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 The database table name (defaults to class name).
 
 **Type:** `string`
 
-#### fields (static property)
+#### Model.fields · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Field configuration metadata.
 
 **Type:** `Record<string, FieldConfig<unknown>>`
 
-#### load (static method)
+#### Model.load · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Load a model instance by primary key.
 
 **Signature:** `<SUB>(this: typeof Model<SUB>, ...args: any[]) => SUB`
-
-**Type Parameters:**
-
-- `SUB`
 
 **Parameters:**
 
@@ -153,7 +169,7 @@ const user = User.load("user123");
 const post = Post.load("post456", "en");
 ```
 
-#### preventPersist (method)
+#### model.preventPersist · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Prevent this instance from being persisted to the database.
 
@@ -161,6 +177,9 @@ Removes the instance from the modified instances set and disables
 automatic persistence at transaction commit.
 
 **Signature:** `() => this`
+
+**Parameters:**
+
 
 **Returns:** This model instance for chaining.
 
@@ -172,7 +191,7 @@ user.name = "New Name";
 user.preventPersist(); // Changes won't be saved
 ```
 
-#### delete (method)
+#### model.delete · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Delete this model instance from the database.
 
@@ -181,6 +200,9 @@ handles reverse link cleanup, and prevents further persistence.
 
 **Signature:** `() => void`
 
+**Parameters:**
+
+
 **Examples:**
 
 ```typescript
@@ -188,7 +210,7 @@ const user = User.load("user123");
 user.delete(); // Removes from database
 ```
 
-#### validate (method)
+#### model.validate · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Validate all fields in this model instance.
 
@@ -210,11 +232,14 @@ if (errors.length > 0) {
 }
 ```
 
-#### isValid (method)
+#### model.isValid · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Check if this model instance is valid.
 
 **Signature:** `() => boolean`
+
+**Parameters:**
+
 
 **Returns:** true if all validations pass.
 
@@ -225,7 +250,7 @@ const user = new User({name: "John"});
 if (!user.isValid()) shoutAtTheUser();
 ```
 
-### registerModel (function)
+### registerModel · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L83)
 
 Register a model class with the Edinburgh ORM system.
 
@@ -237,7 +262,7 @@ field metadata and sets up default values on the prototype.
 
 **Type Parameters:**
 
-- `T extends typeof Model<unknown>`
+- `T extends typeof Model<unknown>` - The model class type.
 
 **Parameters:**
 
@@ -256,7 +281,7 @@ class User extends E.Model<User> {
 }
 ```
 
-### field (function)
+### field · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L52)
 
 Create a field definition for a model property.
 
@@ -268,7 +293,7 @@ This allows for both runtime introspection and compile-time type safety.
 
 **Type Parameters:**
 
-- `T`
+- `T` - The field type.
 
 **Parameters:**
 
@@ -286,23 +311,31 @@ class User extends E.Model<User> {
 }
 ```
 
-### string (constant)
+### string · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
+
+Predefined string type instance.
 
 **Value:** `StringType`
 
-### number (constant)
+### number · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
+
+Predefined number type instance.
 
 **Value:** `NumberType`
 
-### boolean (constant)
+### boolean · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
+
+Predefined boolean type instance.
 
 **Value:** `BooleanType`
 
-### identifier (constant)
+### identifier · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
+
+Predefined identifier type instance.
 
 **Value:** `IdentifierType`
 
-### opt (function)
+### opt · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Create an optional type wrapper (allows undefined).
 
@@ -310,7 +343,7 @@ Create an optional type wrapper (allows undefined).
 
 **Type Parameters:**
 
-- `T extends TypeWrapper<unknown>|BasicType`
+- `T extends TypeWrapper<unknown>|BasicType` - Type wrapper or basic type to make optional.
 
 **Parameters:**
 
@@ -325,7 +358,7 @@ const optionalString = E.opt(E.string);
 const optionalNumber = E.opt(E.number);
 ```
 
-### or (function)
+### or · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Create a union type wrapper from multiple type choices.
 
@@ -333,7 +366,7 @@ Create a union type wrapper from multiple type choices.
 
 **Type Parameters:**
 
-- `T extends (TypeWrapper<unknown>|BasicType)[]`
+- `T extends (TypeWrapper<unknown>|BasicType)[]` - Array of type wrapper or basic types.
 
 **Parameters:**
 
@@ -348,7 +381,7 @@ const stringOrNumber = E.or(E.string, E.number);
 const status = E.or("active", "inactive", "pending");
 ```
 
-### array (function)
+### array · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Create an array type wrapper with optional length constraints.
 
@@ -356,7 +389,7 @@ Create an array type wrapper with optional length constraints.
 
 **Type Parameters:**
 
-- `T`
+- `T` - The element type.
 
 **Parameters:**
 
@@ -372,7 +405,7 @@ const stringArray = E.array(E.string);
 const boundedArray = E.array(E.number, {min: 1, max: 10});
 ```
 
-### literal (function)
+### literal · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Create a literal type wrapper for a constant value.
 
@@ -380,7 +413,7 @@ Create a literal type wrapper for a constant value.
 
 **Type Parameters:**
 
-- `T`
+- `T` - The literal type.
 
 **Parameters:**
 
@@ -395,7 +428,7 @@ const statusType = E.literal("active");
 const countType = E.literal(42);
 ```
 
-### link (function)
+### link · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Create a link type wrapper for model relationships.
 
@@ -403,7 +436,7 @@ Create a link type wrapper for model relationships.
 
 **Type Parameters:**
 
-- `T extends typeof Model<any>`
+- `T extends typeof Model<any>` - The target model class.
 
 **Parameters:**
 
@@ -424,7 +457,7 @@ class Post extends E.Model<Post> {
 }
 ```
 
-### index (function)
+### index · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Create an index on model fields.
 
@@ -432,8 +465,8 @@ Create an index on model fields.
 
 **Type Parameters:**
 
-- `M extends typeof Model`
-- `F extends (keyof InstanceType<M> & string)`
+- `M extends typeof Model` - The model class.
+- `F extends (keyof InstanceType<M> & string)` - The field name (for single field index).
 
 **Parameters:**
 
@@ -453,7 +486,7 @@ class User extends E.Model<User> {
 }
 ```
 
-### dump (function)
+### dump · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Dump database contents for debugging.
 
@@ -462,7 +495,7 @@ This is primarily useful for development and debugging purposes.
 
 **Signature:** `() => void`
 
-### init (function)
+### init · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Initialize the database with the specified directory path.
 This function may only be called once. If it is not called before the first transact(),
@@ -486,7 +519,7 @@ the database will be automatically initialized with the default directory.
 init("./my-database");
 ```
 
-### onCommit (function)
+### onCommit · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Registers a callback to be executed when the current transaction commits successfully.
 The callback will be executed outside of transaction context.
@@ -501,7 +534,7 @@ The callback will be executed outside of transaction context.
 
 - If called outside of a transaction context
 
-### onRevert (function)
+### onRevert · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
 
 Registers a callback to be executed when the current transaction is reverted (aborted due to error).
 The callback will be executed outside of transaction context.
@@ -516,7 +549,7 @@ The callback will be executed outside of transaction context.
 
 - If called outside of a transaction context
 
-### getTransactionData (function)
+### getTransactionData · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L49)
 
 Retrieves data from the current transaction context.
 
@@ -532,7 +565,7 @@ Retrieves data from the current transaction context.
 
 - If called outside of a transaction context.
 
-### setTransactionData (function)
+### setTransactionData · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L43)
 
 Attach some arbitrary user data to the current transaction context, which is
 attached to the currently running (async) task.
@@ -558,8 +591,15 @@ await transact(async () => {
   const value = getTransactionData(MY_SYMBOL);
   console.log(value); // "myValue"
 });
+```
 
-### DatabaseError (constant)
+### DatabaseError · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
+
+The DatabaseError class is used to represent errors that occur during database operations.
+It extends the built-in Error class and has a machine readable error code string property.
+
+The lowlevel API will throw DatabaseError instances for all database-related errors.
+Invalid function arguments will throw TypeError.
 
 **Value:** `DatabaseErrorConstructor`
 

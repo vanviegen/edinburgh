@@ -218,7 +218,7 @@ export interface Model<SUB> {
  * Models represent database entities with typed fields, automatic serialization,
  * change tracking, and relationship management. All model classes should extend
  * this base class and be decorated with `@registerModel`.
- * 
+ *
  * @template SUB - The concrete model subclass (for proper typing).
  * 
  * @example

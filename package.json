@@ -37,14 +37,15 @@
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",
     "test:node": "npm run build && rm -rf dist.tests && npx tsc -p tsconfig.test.json && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
-    "prepack": "npm run build && npm run test",
-    "update-readme-tsdoc": "bun tools/update-readme-tsdoc.js"
+    "prepack": "npm run build && npm run test && npm run readme-tsdoc",
+    "readme-tsdoc": "readme-tsdoc --repo-url https://github.com/vanviegen/edinburgh"
   },
   "trustedDependencies": [
     "olmdb"
   ],
   "type": "module",
   "dependencies": {
-    "olmdb": "^0.2.11"
+    "olmdb": "^0.2.13",
+    "readme-tsdoc": "^1.1.4"
   }
 }
