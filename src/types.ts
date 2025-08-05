@@ -339,6 +339,10 @@ export class LiteralType<const T> extends TypeWrapper<T> {
         const value = json==="" ? undefined : JSON.parse(json);
         return new LiteralType(value);
     }
+
+    default(model: any): T {
+        return this.value;
+    }
 }
 
 const ID_SIZE = 7;

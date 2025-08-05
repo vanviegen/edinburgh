@@ -165,7 +165,8 @@ function initModels() {
                 MockModel.fields[key] = value;
 
                 // Set default value on the prototype
-                const def = value.default ?? value.type.default;
+                const defObj = value.default===undefined ? value.type : value;
+                const def = defObj.default;
                 if (typeof def === 'function') {
                     // The default is a function. We'll define a getter on the property in the model prototype,
                     // and once it is read, we'll run the function and set the value as a plain old property
@@ -173,7 +174,7 @@ function initModels() {
                     Object.defineProperty(MockModel.prototype, key, {    
                         get() {
                             // This will call set(), which will define the property on the instance.
-                            return (this[key] = def(this));
+                            return (this[key] = def.call(defObj, this));
                         },
                         set(val: any) {
                             Object.defineProperty(this, key, {
