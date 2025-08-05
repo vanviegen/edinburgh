@@ -49,7 +49,7 @@ class User extends E.Model<User> {
     isActive = field(E.boolean, {description: "Account status", default: true});
     posts = field(E.array(E.link(Post)), {description: "User's posts", default: () => []});
     
-    static byEmail = E.unique(User, ["email"]);
+    static byEmail = E.unique(User, "email");
 }
 
 @E.registerModel
@@ -826,5 +826,157 @@ test("Database operations and debugging", async () => {
             expect(user).toBeDefined();
             expect(user!.name).toBe(`Concurrent ${i}`);
         }
+    });
+});
+
+test("Range queries on primary indices", async () => {
+    function testRange() {
+        let values: number[] = [];
+        const items = CompositeKeyModel.pk.find(["electronics", "phones", "iPhone"], ["electronics", "tablets", "iPad"]);
+        
+        for(const item of items) {
+            values.push(item.value);
+        }
+        expect(values).toEqual([999, 1099, 1299]); // iPhone, Surface, iPad (in lexicographic order)
+    }
+
+    function testExclusiveRange() {
+        let values: number[] = [];
+        const items = CompositeKeyModel.pk.findUpTil(["electronics", "phones", "iPhone"], ["electronics", "tablets", "iPad"]);
+        for(const item of items) {
+            values.push(item.value);
+        }
+        expect(values).toEqual([999, 1099]); // iPhone, Surface (excludes iPad, lexicographic order)
+    }
+
+    // Create test data in one transaction
+    await E.transact(() => {
+        new CompositeKeyModel({category: "electronics", subcategory: "phones", name: "iPhone", value: 999});
+        new CompositeKeyModel({category: "electronics", subcategory: "phones", name: "Samsung", value: 799});
+        new CompositeKeyModel({category: "electronics", subcategory: "tablets", name: "iPad", value: 1299});
+        new CompositeKeyModel({category: "electronics", subcategory: "tablets", name: "Surface", value: 1099});
+        new CompositeKeyModel({category: "electronics", subcategory: "laptops", name: "MacBook", value: 1999});
+        new CompositeKeyModel({category: "electronics", subcategory: "watches", name: "AppleWatch", value: 599});
+    });
+
+    // Test in a separate transaction after models are saved
+    await E.transact(() => {
+        testRange();
+        testExclusiveRange();
+    });
+
+    // Test with null bounds (all electronics)
+    await E.transact(() => {
+        let allElectronics: number[] = [];
+        const items = CompositeKeyModel.pk.find(null, null);
+        for(const item of items) {
+            allElectronics.push(item.value);
+        }
+        expect(allElectronics).toEqual([1999, 799, 999, 1099, 1299, 599]); // lexicographic order
+    });
+
+    // Test single null bound (from start to iPad)
+    await E.transact(() => {
+        let fromStart: number[] = [];
+        const items = CompositeKeyModel.pk.find(null, ["electronics", "tablets", "iPad"]);
+        for(const item of items) {
+            fromStart.push(item.value);
+        }
+        expect(fromStart).toEqual([1999, 799, 999, 1099, 1299]); // MacBook, Samsung, iPhone, Surface, iPad
+    });
+
+    // Test single null bound (from iPad to end)
+    await E.transact(() => {
+        let toEnd: number[] = [];
+        const items = CompositeKeyModel.pk.find(["electronics", "tablets", "iPad"], null);
+        for(const item of items) {
+            toEnd.push(item.value);
+        }
+        expect(toEnd).toEqual([1299, 599]); // iPad, AppleWatch
+    });
+});
+
+test("Range queries on unique indices", async () => {
+    function testRange() {
+        let names: string[] = [];
+        const users = User.byEmail.find("b@test.com", "f@test.com");
+        for(const user of users) {
+            names.push(user.name);
+        }
+        expect(names.sort()).toEqual(["B", "C", "D", "E", "F"]);
+    }
+
+    function testExclusiveRange() {
+        let names: string[] = [];
+        const users = User.byEmail.findUpTil("b@test.com", "f@test.com");
+        for(const user of users) {
+            names.push(user.name);
+        }
+        expect(names.sort()).toEqual(["B", "C", "D", "E"]); // Excludes F
+    }
+
+    // Create test data in one transaction
+    await E.transact(() => {
+        new User({email: "a@test.com", name: "A"});
+        new User({email: "c@test.com", name: "C"});
+        new User({email: "d@test.com", name: "D"});
+        new User({email: "e@test.com", name: "E"});
+        new User({email: "g@test.com", name: "G"});
+        new User({email: "b@test.com", name: "B"});
+        new User({email: "f@test.com", name: "F"});
+        new User({email: "i@test.com", name: "I"});
+        new User({email: "h@test.com", name: "H"});
+    });
+
+    // Test in a separate transaction after models are saved
+    await E.transact(() => {
+        testRange();
+        testExclusiveRange();
+    });
+
+    // Test it again within a new transaction
+    await E.transact(() => {
+        testRange();
+        testExclusiveRange();
+    });
+
+    // Test with null bounds (all users)
+    await E.transact(() => {
+        let allNames: string[] = [];
+        const users = User.byEmail.find(null, null);
+        for(const user of users) {
+            allNames.push(user.name);
+        }
+        expect(allNames.sort()).toEqual(["A", "B", "C", "D", "E", "F", "G", "H", "I"]);
+    });
+
+    // Test single null bound (from start)
+    await E.transact(() => {
+        let fromStart: string[] = [];
+        const users = User.byEmail.find(null, "d@test.com");
+        for(const user of users) {
+            fromStart.push(user.name);
+        }
+        expect(fromStart.sort()).toEqual(["A", "B", "C", "D"]);
+    });
+
+    // Test single null bound (to end)
+    await E.transact(() => {
+        let toEnd: string[] = [];
+        const users = User.byEmail.find("f@test.com", null);
+        for(const user of users) {
+            toEnd.push(user.name);
+        }
+        expect(toEnd.sort()).toEqual(["F", "G", "H", "I"]);
+    });
+
+    // Test default second argument behavior (should equal first argument)
+    await E.transact(() => {
+        let exactMatch: string[] = [];
+        const users = User.byEmail.find("d@test.com"); // Second arg should default to "d@test.com"
+        for(const user of users) {
+            exactMatch.push(user.name);
+        }
+        expect(exactMatch.sort()).toEqual(["D"]);
     });
 });

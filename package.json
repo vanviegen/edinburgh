@@ -12,7 +12,6 @@
   "exports": {
     ".": {
       "bun": "./src/edinburgh.ts",
-      "types": "./dist/edinburgh.d.ts",
       "default": "./dist/edinburgh.js"
     }
   },

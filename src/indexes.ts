@@ -19,6 +19,66 @@ const INDEX_ID_PREFIX = -2;
 export type IndexType = 'primary' | 'unique' | 'secondary';
 
 /**
+ * Iterator for range queries on indexes.
+ * Handles common iteration logic for both primary and unique indexes.
+ * Implements both Iterator and Iterable interfaces for efficiency.
+ */
+class IndexRangeIterator<M extends typeof Model, F extends readonly (keyof InstanceType<M> & string)[]> implements Iterator<InstanceType<M>>, Iterable<InstanceType<M>> {
+    constructor(
+        private iterator: any,
+        private indexId: number,
+        private parentIndex: BaseIndex<M, F>
+    ) {}
+
+    [Symbol.iterator](): Iterator<InstanceType<M>> {
+        return this;
+    }
+
+    next(): IteratorResult<InstanceType<M>> {
+        const entry = this.iterator.next();
+        if (entry.done) {
+            this.iterator.close();
+            return { done: true, value: undefined };
+        }
+
+        // Extract the key without the index ID
+        const keyBytes = new Bytes(entry.value.key);
+        const entryIndexId = keyBytes.readNumber();
+        if (entryIndexId !== this.indexId) {
+            // We've moved past this index
+            this.iterator.close();
+            return { done: true, value: undefined };
+        }
+
+        // Deserialize the index key
+        const keyArgs = [] as any;
+        for (let i = 0; i < this.parentIndex.fieldNames.length; i++) {
+            const fieldName = this.parentIndex.fieldNames[i];
+            const fieldConfig = this.parentIndex.MyModel.fields[fieldName];
+            (fieldConfig as any).type.deserialize(keyArgs, i, keyBytes);
+        }
+
+        // Get the model - different logic for primary vs unique indexes
+        let model: InstanceType<M> | undefined;
+        if (this.parentIndex.type === 'primary') {
+            model = (this.parentIndex as PrimaryIndex<M, F>).get(...keyArgs as IndexTuple<M, F>);
+        } else if (this.parentIndex.type === 'unique') {
+            // For unique indexes, the value contains the primary key
+            const pk = this.parentIndex.MyModel._pk!;
+            const primaryKeyArgs = pk.deserializeKey(new Bytes(entry.value.value));
+            model = pk.get(...primaryKeyArgs);
+        }
+
+        if (!model) {
+            // This shouldn't happen, but skip if it does
+            return this.next();
+        }
+
+        return { done: false, value: model };
+    }
+}
+
+/**
  * Base class for database indexes for efficient lookups on model fields.
  * 
  * Indexes enable fast queries on specific field combinations and enforce uniqueness constraints.
@@ -161,6 +221,49 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     }
 
     /**
+     * Create a range iterator for this index.
+     * @param startArgs - Starting key arguments
+     * @param endArgs - Ending key arguments  
+     * @param inclusive - Whether the end key should be inclusive
+     * @returns An IndexRangeIterator for model instances
+     */
+    protected createRangeIterator(startArgs?: any, endArgs?: any, inclusive: boolean = true): IndexRangeIterator<M, F> {
+        // Handle single-field case by wrapping in array
+        if (this.fieldNames.length === 1 && startArgs !== null && startArgs !== undefined && !Array.isArray(startArgs)) {
+            startArgs = [startArgs];
+        }
+        if (this.fieldNames.length === 1 && endArgs !== null && endArgs !== undefined && !Array.isArray(endArgs)) {
+            endArgs = [endArgs];
+        }
+        
+        const indexId = this.getIndexId();
+        const startKey = startArgs ? this.getKeyFromArgs(startArgs) : new Bytes().writeNumber(indexId).getBuffer();
+        let endKey: Uint8Array | undefined;
+        
+        if (endArgs) {
+            const endKeyBytes = new Bytes().writeNumber(indexId);
+            this.serializeArgs(endArgs, endKeyBytes);
+            if (inclusive) {
+                // For inclusive end, add a single byte with value 255 to make it the next possible key
+                endKeyBytes.ensureCapacity(1);
+                endKeyBytes.buffer[endKeyBytes.writeByte++] = 255;
+            }
+            endKey = endKeyBytes.getBuffer();
+        } else {
+            // If endArgs is null, we want to scan to the end of this index
+            endKey = new Bytes().writeNumber(indexId + 1).getBuffer();
+        }
+
+        const iterator = olmdb.scan({
+            start: startKey,
+            end: endKey,
+            reverse: false
+        });
+
+        return new IndexRangeIterator(iterator, indexId, this);
+    }
+
+    /**
      * Check if indexing should be skipped for a model instance.
      * @param model - Model instance.
      * @returns true if indexing should be skipped.
@@ -171,6 +274,52 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
             if (fieldConfig.type.checkSkipIndex(model, fieldName)) return true;
         }
         return false;
+    }
+
+    /**
+     * Find model instances within a range of index key values (inclusive).
+     * This method supports both single-field and multi-field indices.
+     * 
+     * For single-field indices, you can pass the values directly:
+     *   find(startValue, endValue)
+     * 
+     * For multi-field indices, pass arrays:
+     *   find([field1Start, field2Start], [field1End, field2End])
+     * 
+     * @param startArgs - The starting index key values (inclusive). If null, starts from beginning.
+     * @param endArgs - The ending index key values (inclusive). If null, goes to end. If omitted, defaults to startArgs.
+     * @returns An iterable of model instances.
+     */
+    find(startArgs?: any, endArgs?: any): Iterable<InstanceType<M>> {
+        // Default endArgs to startArgs if not provided
+        if (arguments.length === 1) {
+            endArgs = startArgs;
+        }
+        
+        return this.createRangeIterator(startArgs, endArgs, true);
+    }
+
+    /**
+     * Find model instances within a range of index key values (exclusive of end).
+     * This method supports both single-field and multi-field indices.
+     * 
+     * For single-field indices, you can pass the values directly:
+     *   findUpTil(startValue, endValue)
+     * 
+     * For multi-field indices, pass arrays:
+     *   findUpTil([field1Start, field2Start], [field1End, field2End])
+     * 
+     * @param startArgs - The starting index key values (inclusive). If null, starts from beginning.
+     * @param endArgs - The ending index key values (exclusive). If null, goes to end. If omitted, defaults to startArgs.
+     * @returns An iterable of model instances.
+     */
+    findUpTil(startArgs?: any, endArgs?: any): Iterable<InstanceType<M>> {
+        // Default endArgs to startArgs if not provided
+        if (arguments.length === 1) {
+            endArgs = startArgs;
+        }
+        
+        return this.createRangeIterator(startArgs, endArgs, false);
     }
 
     /**
