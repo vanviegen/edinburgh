@@ -1,3 +1,6 @@
+---
+applyTo: '**'
+---
 # Instructions for AI Contributors
 
 ## Project Overview
