@@ -14,7 +14,7 @@ try {
 
 @E.registerModel
 class Person extends E.Model<Person> {
-    static pk = E.index(Person, ["name"], "primary");
+    static pk = E.primary(Person, ["name"]);
 
     name = field(E.string, {description: "Full name"});
     age = field(E.opt(E.number), {description: "Current age", default: 42});
@@ -22,8 +22,8 @@ class Person extends E.Model<Person> {
     test = field(E.or(E.string, E.number), {description: "Test field with union type", default: "example"});
     owned_data = field(E.array(E.link(Data, 'subjects')), {description: "Owned data", default: () => []});
 
-    static byCombi = E.index(Person, ["name","test"], "unique");
-    static byCar = E.index(Person, ["cars"], "unique");
+    static byCombi = E.unique(Person, ["name","test"]);
+    static byCar = E.unique(Person, ["cars"]);
 }
 
 @E.registerModel

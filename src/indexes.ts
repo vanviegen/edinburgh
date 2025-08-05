@@ -19,31 +19,25 @@ const INDEX_ID_PREFIX = -2;
 export type IndexType = 'primary' | 'unique' | 'secondary';
 
 /**
- * Database index for efficient lookups on model fields.
+ * Base class for database indexes for efficient lookups on model fields.
  * 
  * Indexes enable fast queries on specific field combinations and enforce uniqueness constraints.
- * Primary indexes store the actual model data, while unique indexes store references to the primary key.
  * 
  * @template M - The model class this index belongs to.
  * @template F - The field names that make up this index.
  */
-export class Index<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> {
+export abstract class BaseIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> {
     public MyModel: M;
+    public abstract type: IndexType;
     
     /**
      * Create a new index.
      * @param MyModel - The model class this index belongs to.
      * @param fieldNames - Array of field names that make up this index.
-     * @param type - The index type ("primary", "unique", or "secondary").
      */
-    constructor(MyModel: M, public fieldNames: F, public type: IndexType) {
+    constructor(MyModel: M, public fieldNames: F) {
         this.MyModel = MyModel = getMockModel(MyModel);
         (MyModel._indexes ||= []).push(this);
-
-        if (type === 'primary') {
-            if (MyModel._pk && MyModel._pk !== this) throw new DatabaseError(`Model ${MyModel.tableName} already has a primary key defined`, 'INIT_ERROR');
-            MyModel._pk = this;
-        }
     }
 
     cachedIndexId?: number;
@@ -93,7 +87,7 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
      * @param model - Model instance.
      * @param bytes - Bytes to write to.
      */
-    serializeModel(model: any, bytes: Bytes) {
+    serializeModel(model: InstanceType<M>, bytes: Bytes) {
         for (let i = 0; i < this.fieldNames.length; i++) {
             const fieldName = this.fieldNames[i];
             const fieldConfig = this.MyModel.fields[fieldName];
@@ -101,8 +95,8 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
         }
     }
 
-    getKeyFromModel(model: any, includeIndexId: boolean, checkSkip: true): Uint8Array | undefined;
-    getKeyFromModel(model: any, includeIndexId: boolean, checkSkip: false): Uint8Array;
+    getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: true): Uint8Array | undefined;
+    getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: false): Uint8Array;
 
     /**
      * Create database key from model instance.
@@ -111,7 +105,7 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
      * @param checkSkip - Whether to check if indexing should be skipped.
      * @returns Database key bytes or undefined if skipped.
      */
-    getKeyFromModel(model: any, includeIndexId: boolean, checkSkip: boolean): Uint8Array | undefined {
+    getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: boolean): Uint8Array | undefined {
         if (checkSkip && this.checkSkip(model)) return undefined;
         const bytes = new Bytes();
         if (includeIndexId) bytes.writeNumber(this.getIndexId());
@@ -124,7 +118,7 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
      * @param model - Model instance.
      * @returns Field values or undefined if should be skipped.
      */
-    modelToArgs(model: any): IndexTuple<M, F> | undefined {
+    modelToArgs(model: InstanceType<M>): IndexTuple<M, F> | undefined {
         return this.checkSkip(model) ? undefined: this.fieldNames.map((fieldName) => model[fieldName]) as unknown as IndexTuple<M, F>;
     }
 
@@ -167,20 +161,54 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Get a model instance by index key values.
-     * @param args - The index key values.
+     * Check if indexing should be skipped for a model instance.
+     * @param model - Model instance.
+     * @returns true if indexing should be skipped.
+     */
+    checkSkip(model: InstanceType<M>): boolean {
+        for (const fieldName of this.fieldNames) {
+            const fieldConfig = this.MyModel.fields[fieldName] as any;
+            if (fieldConfig.type.checkSkipIndex(model, fieldName)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Save index entry for a model instance.
+     * @param model - Model instance to save.
+     * @param originalKey - Original key if updating.
+     */
+    abstract save(model: InstanceType<M>, originalKey?: Uint8Array): void;
+}
+
+/**
+ * Primary index that stores the actual model data.
+ * 
+ * @template M - The model class this index belongs to.
+ * @template F - The field names that make up this index.
+ */
+export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
+    public readonly type = 'primary' as const;
+    
+    constructor(MyModel: M, fieldNames: F) {
+        super(MyModel, fieldNames);
+        if (MyModel._pk && MyModel._pk !== this) {
+            throw new DatabaseError(`Model ${MyModel.tableName} already has a primary key defined`, 'INIT_ERROR');
+        }
+        MyModel._pk = this;
+    }
+
+    /**
+     * Get a model instance by primary key values.
+     * @param args - The primary key values.
      * @returns The model instance if found, undefined otherwise.
      * 
      * @example
      * ```typescript
      * const user = User.pk.get("john_doe");
-     * const userByEmail = User.byEmail.get("john@example.com");
      * ```
      */
     get(...args: IndexTuple<M, F>): InstanceType<M> | undefined {
-        if (this.type === 'secondary') {    
-            throw new Error(`secondary indexes do not support get()`);
-        }
         let keyBuffer = this.getKeyFromArgs(args as IndexTuple<M, F>);
         if (logLevel >= 3) {
             console.log(`Getting primary ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${this.getIndexId()}) with key`, args, keyBuffer);
@@ -188,14 +216,6 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
 
         let valueBuffer = olmdb.get(keyBuffer);
         if (!valueBuffer) return;
-
-        if (this.type === 'unique') {
-            const pk = this.MyModel._pk!;
-            const valueArgs = pk.deserializeKey(new Bytes(valueBuffer))
-            const result = pk.get(...valueArgs);
-            if (!result) throw new DatabaseError(`Unique index ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] points at non-existing primary for key: ${args.join(', ')}`, 'CONSISTENCY_ERROR');
-            return result;
-        }
         
         // This is a primary index. So we can now deserialize all primary and non-primary fields into instance values.
         const result = new (this.MyModel as any)() as any;
@@ -218,43 +238,20 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
     }
 
     /**
-     * Save index entry for a model instance.
-     * @param model - Model instance to save.
-     * @param originalKey - Original key if updating.
-     */
-    save(model: any, originalKey?: Uint8Array) {
-        // Note: this can (and usually will) be called on the non-proxied model instance.
-        assert(this.MyModel.prototype === model.constructor.prototype);
-        if (this.type === 'primary') this.savePrimary(model, originalKey);
-        else if (this.type === 'unique') this.saveUnique(model, originalKey);
-        else throw new DatabaseError(`Index type '${this.type}' not implemented yet`, 'NOT_IMPLEMENTED');
-    }
-
-    /**
-     * Check if indexing should be skipped for a model instance.
-     * @param model - Model instance.
-     * @returns true if indexing should be skipped.
-     */
-    checkSkip(model: any): boolean {
-        for (const fieldName of this.fieldNames) {
-            const fieldConfig = this.MyModel.fields[fieldName] as any;
-            if (fieldConfig.type.checkSkipIndex(model, fieldName)) return true;
-        }
-        return false;
-    }
-
-    /**
      * Save primary index entry.
      * @param model - Model instance.
      * @param originalKey - Original key if updating.
      */
-    savePrimary(model: any, originalKey?: Uint8Array) {
+    save(model: InstanceType<M>, originalKey?: Uint8Array) {
+        // Note: this can (and usually will) be called on the non-proxied model instance.
+        assert(this.MyModel.prototype === model.constructor.prototype);
+        
         let newKey = this.getKeyFromModel(model, true, false); // Cannot be undefined for primary
         if (originalKey && Buffer.compare(newKey, originalKey)) throw new DatabaseError(`Cannot change primary key for ${this.MyModel.tableName}[${this.fieldNames.join(', ')}]: ${originalKey} -> ${newKey}`, 'PRIMARY_CHANGE');
 
         // Serialize all non-primary key fields
         let valBytes = new Bytes();
-        for (const [fieldName, fieldConfig] of Object.entries(model._fields)) {
+        for (const [fieldName, fieldConfig] of Object.entries((model as any)._fields)) {
             if (!this.fieldNames.includes(fieldName as any)) {
                 (fieldConfig as any).type.validateAndSerialize(model, fieldName, valBytes, model);
             }
@@ -268,13 +265,52 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
             console.log(`Saved primary ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${indexId}) with key`, this.deserializeKey(keyBytes), keyBytes.getBuffer());
         }
     }
+}
+
+/**
+ * Unique index that stores references to the primary key.
+ * 
+ * @template M - The model class this index belongs to.
+ * @template F - The field names that make up this index.
+ */
+export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
+    public readonly type = 'unique' as const;
+
+    /**
+     * Get a model instance by unique index key values.
+     * @param args - The unique index key values.
+     * @returns The model instance if found, undefined otherwise.
+     * 
+     * @example
+     * ```typescript
+     * const userByEmail = User.byEmail.get("john@example.com");
+     * ```
+     */
+    get(...args: IndexTuple<M, F>): InstanceType<M> | undefined {
+        let keyBuffer = this.getKeyFromArgs(args as IndexTuple<M, F>);
+        if (logLevel >= 3) {
+            console.log(`Getting unique ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${this.getIndexId()}) with key`, args, keyBuffer);
+        }
+
+        let valueBuffer = olmdb.get(keyBuffer);
+        if (!valueBuffer) return;
+
+        const pk = this.MyModel._pk!;
+        const valueArgs = pk.deserializeKey(new Bytes(valueBuffer))
+        const result = pk.get(...valueArgs);
+        if (!result) throw new DatabaseError(`Unique index ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] points at non-existing primary for key: ${args.join(', ')}`, 'CONSISTENCY_ERROR');
+        return result;
+    }
 
     /**
      * Save unique index entry.
      * @param model - Model instance.
      * @param originalKey - Original key if updating.
      */
-    saveUnique(model: any, originalKey?: Uint8Array) {
+    save(model: InstanceType<M>, originalKey?: Uint8Array) {
+        // Note: this can (and usually will) be called on the non-proxied model instance.
+        assert(this.MyModel.prototype === model.constructor.prototype);
+        
         let newKey = this.getKeyFromModel(model, true, true);
 
         if (originalKey) {
@@ -292,10 +328,10 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
 
         // Check that this is not a duplicate key
         if (olmdb.get(newKey)) {
-            throw new DatabaseError(`Unique constraint violation for ${model.constructor.tableName}[${this.fieldNames.join('+')}]`, 'UNIQUE_CONSTRAINT');
+            throw new DatabaseError(`Unique constraint violation for ${(model.constructor as any).tableName}[${this.fieldNames.join('+')}]`, 'UNIQUE_CONSTRAINT');
         }
         
-        let linkKey = model.constructor._pk!.getKeyFromModel(model, false, false);
+        let linkKey = (model.constructor as any)._pk!.getKeyFromModel(model, false, false);
         olmdb.put(newKey, linkKey);
 
         if (logLevel >= 2) {
@@ -305,30 +341,108 @@ export class Index<M extends typeof Model, const F extends readonly (keyof Insta
 }
 
 /**
- * Create an index on model fields.
+ * Secondary index for non-unique lookups (not yet implemented).
+ * 
+ * @template M - The model class this index belongs to.
+ * @template F - The field names that make up this index.
+ */
+export class SecondaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
+    public readonly type = 'secondary' as const;
+
+    /**
+     * Secondary indexes do not support get() method.
+     */
+    get(...args: IndexTuple<M, F>): never {
+        throw new Error(`secondary indexes do not support get()`);
+    }
+
+    /**
+     * Save secondary index entry (not yet implemented).
+     * @param model - Model instance.
+     * @param originalKey - Original key if updating.
+     */
+    save(model: InstanceType<M>, originalKey?: Uint8Array) {
+        throw new DatabaseError(`Index type 'secondary' not implemented yet`, 'NOT_IMPLEMENTED');
+    }
+}
+
+// Type alias for backward compatibility
+export type Index<M extends typeof Model, F extends readonly (keyof InstanceType<M> & string)[]> = 
+    PrimaryIndex<M, F> | UniqueIndex<M, F> | SecondaryIndex<M, F>;
+
+/**
+ * Create a primary index on model fields.
  * @template M - The model class.
  * @template F - The field name (for single field index).
  * @template FS - The field names array (for composite index).
  * @param MyModel - The model class to create the index for.
  * @param field - Single field name for simple indexes.
  * @param fields - Array of field names for composite indexes.
- * @param type - The index type ("primary", "unique", or "secondary").
- * @returns A new Index instance.
+ * @returns A new PrimaryIndex instance.
  * 
  * @example
  * ```typescript
  * class User extends E.Model<User> {
- *   static pk = E.index(User, ["id"], "primary");
- *   static byEmail = E.index(User, "email", "unique");
- *   static byNameAge = E.index(User, ["name", "age"], "secondary");
+ *   static pk = E.primary(User, ["id"]);
+ *   static pkSingle = E.primary(User, "id");
  * }
  * ```
  */
-export function index<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F, type?: IndexType) : Index<M, [F]>;
-export function index<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS, type?: IndexType) : Index<M, FS>;
+export function primary<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): PrimaryIndex<M, [F]>;
+export function primary<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): PrimaryIndex<M, FS>;
 
-export function index(MyModel: typeof Model, fields: any, type: IndexType = 'secondary') {
-    return new Index(MyModel, Array.isArray(fields) ? fields : [fields], type);
+export function primary(MyModel: typeof Model, fields: any): PrimaryIndex<any, any> {
+    return new PrimaryIndex(MyModel, Array.isArray(fields) ? fields : [fields]);
+}
+
+/**
+ * Create a unique index on model fields.
+ * @template M - The model class.
+ * @template F - The field name (for single field index).
+ * @template FS - The field names array (for composite index).
+ * @param MyModel - The model class to create the index for.
+ * @param field - Single field name for simple indexes.
+ * @param fields - Array of field names for composite indexes.
+ * @returns A new UniqueIndex instance.
+ * 
+ * @example
+ * ```typescript
+ * class User extends E.Model<User> {
+ *   static byEmail = E.unique(User, "email");
+ *   static byNameAge = E.unique(User, ["name", "age"]);
+ * }
+ * ```
+ */
+export function unique<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): UniqueIndex<M, [F]>;
+export function unique<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): UniqueIndex<M, FS>;
+
+export function unique(MyModel: typeof Model, fields: any): UniqueIndex<any, any> {
+    return new UniqueIndex(MyModel, Array.isArray(fields) ? fields : [fields]);
+}
+
+/**
+ * Create a secondary index on model fields (not yet implemented).
+ * @template M - The model class.
+ * @template F - The field name (for single field index).
+ * @template FS - The field names array (for composite index).
+ * @param MyModel - The model class to create the index for.
+ * @param field - Single field name for simple indexes.
+ * @param fields - Array of field names for composite indexes.
+ * @returns A new SecondaryIndex instance.
+ * 
+ * @example
+ * ```typescript
+ * class User extends E.Model<User> {
+ *   static byAge = E.index(User, "age");
+ *   static byTagsDate = E.index(User, ["tags", "createdAt"]);
+ * }
+ * ```
+ */
+export function index<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): SecondaryIndex<M, [F]>;
+export function index<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): SecondaryIndex<M, FS>;
+
+export function index(MyModel: typeof Model, fields: any): SecondaryIndex<any, any> {
+    return new SecondaryIndex(MyModel, Array.isArray(fields) ? fields : [fields]);
 }
 
 /**

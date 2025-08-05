@@ -27,6 +27,8 @@ export {
 // Re-export public API from indexes
 export {
   index,
+  primary,
+  unique,
   dump,
 } from "./indexes.js";
 

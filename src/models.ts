@@ -2,7 +2,7 @@ import { Bytes } from "./bytes.js";
 import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
 import { TypeWrapper, identifier, LinkType } from "./types.js";
-import { Index, TARGET_SYMBOL } from "./indexes.js";
+import { BaseIndex, TARGET_SYMBOL, PrimaryIndex } from "./indexes.js";
 import { assert, addErrorPath, logLevel } from "./utils.js";
 
 /**
@@ -154,7 +154,7 @@ function initModels() {
                 instance.id = { type: identifier }; 
             }
             // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
-            new Index(MockModel, ['id'], 'primary');
+            new PrimaryIndex(MockModel, ['id']);
         }
 
         for (const key in instance) {
@@ -237,9 +237,9 @@ export interface Model<SUB> {
  */
 export abstract class Model<SUB> {
     /** @internal Primary key index for this model. */
-    static _pk?: Index<any, any>;
+    static _pk?: PrimaryIndex<any, any>;
     /** @internal All indexes for this model. */
-    static _indexes?: Index<any, any>[];
+    static _indexes?: BaseIndex<any, any>[];
 
     /** The database table name (defaults to class name). */
     static tableName: string;
