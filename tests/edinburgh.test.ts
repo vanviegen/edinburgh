@@ -1,6 +1,5 @@
 import { test, expect, beforeEach } from "@jest/globals";
-import * as E from 'edinburgh';
-import * as olmdb from "olmdb";
+import * as E from '../src/edinburgh.js';
 const {field} = E;
 
 try {
@@ -53,6 +52,18 @@ class User extends E.Model<User> {
 }
 
 @E.registerModel
+class CompositeKeyModel extends E.Model<CompositeKeyModel> {
+    static pk = E.primary(CompositeKeyModel, ["category", "subcategory", "name"]);
+    
+    category = field(E.string, {description: "Main category"});
+    subcategory = field(E.string, {description: "Sub category"});
+    name = field(E.string, {description: "Item name"});
+    value = field(E.number, {description: "Item value"});
+    
+    static byValue = E.unique(CompositeKeyModel, ["value"]);
+}
+
+@E.registerModel
 class Post extends E.Model<Post> {
     static pk = E.primary(Post, ["id"]);
     
@@ -66,17 +77,6 @@ class Post extends E.Model<Post> {
     static byAuthor = E.unique(Post, ["author", "title"]);
 }
 
-@E.registerModel
-class CompositeKeyModel extends E.Model<CompositeKeyModel> {
-    static pk = E.primary(CompositeKeyModel, ["category", "subcategory", "name"]);
-    
-    category = field(E.string, {description: "Main category"});
-    subcategory = field(E.string, {description: "Sub category"});
-    name = field(E.string, {description: "Item name"});
-    value = field(E.number, {description: "Item value"});
-    
-    static byValue = E.unique(CompositeKeyModel, ["value"]);
-}
 
 function noNeedToRunThis() {
     // Verify that TypeScript errors pop up in all the right places and not in the wrong places.
@@ -112,14 +112,7 @@ function noNeedToRunThis() {
 
 }
 
-beforeEach(async () => {
-    // Clean up all existing pairs
-    await E.transact(() => {
-        for (const {key} of olmdb.scan()) {
-            olmdb.del(key);
-        }
-    });
-});
+beforeEach(E.deleteEverything);
 
 test("Checks for validity", async () => {
     const p = new Person();
@@ -830,65 +823,63 @@ test("Database operations and debugging", async () => {
 });
 
 test("Range queries on primary indices", async () => {
-    function testRange() {
-        let values: number[] = [];
-        const items = CompositeKeyModel.pk.find(["electronics", "phones", "iPhone"], ["electronics", "tablets", "iPad"]);
-        
-        for(const item of items) {
-            values.push(item.value);
-        }
-        expect(values).toEqual([999, 1099, 1299]); // iPhone, Surface, iPad (in lexicographic order)
-    }
-
-    function testExclusiveRange() {
-        let values: number[] = [];
-        const items = CompositeKeyModel.pk.findUpTil(["electronics", "phones", "iPhone"], ["electronics", "tablets", "iPad"]);
-        for(const item of items) {
-            values.push(item.value);
-        }
-        expect(values).toEqual([999, 1099]); // iPhone, Surface (excludes iPad, lexicographic order)
-    }
-
     // Create test data in one transaction
     await E.transact(() => {
+        // Insert something in an unrelated table with a lower indexId
+        const user = new User({email: "a@test.com", name: "A"});
         new CompositeKeyModel({category: "electronics", subcategory: "phones", name: "iPhone", value: 999});
         new CompositeKeyModel({category: "electronics", subcategory: "phones", name: "Samsung", value: 799});
         new CompositeKeyModel({category: "electronics", subcategory: "tablets", name: "iPad", value: 1299});
         new CompositeKeyModel({category: "electronics", subcategory: "tablets", name: "Surface", value: 1099});
         new CompositeKeyModel({category: "electronics", subcategory: "laptops", name: "MacBook", value: 1999});
         new CompositeKeyModel({category: "electronics", subcategory: "watches", name: "AppleWatch", value: 599});
+        // Insert something in an unrelated table with a higher indexId
+        new Post({title: "Post 1", content: "Content 1", author: user});
     });
 
     // Test in a separate transaction after models are saved
     await E.transact(() => {
-        testRange();
-        testExclusiveRange();
+        // Inclusive
+        let values: number[] = [];
+        let items = CompositeKeyModel.pk.find({from: ["electronics", "phones", "iPhone"], to: ["electronics", "tablets", "iPad"]});
+        for(const item of items) {
+            values.push(item.value);
+        }
+        expect(values).toEqual([999, 1099, 1299]); // iPhone, Surface, iPad (in lexicographic order)
+
+        // Exclusive
+        values = [];
+        items = CompositeKeyModel.pk.find({from: ["electronics", "phones", "iPhone"], before: ["electronics", "tablets", "iPad"]});
+        for(const item of items) {
+            values.push(item.value);
+        }
+        expect(values).toEqual([999, 1099]); // iPhone, Surface (excludes iPad, lexicographic order)        
     });
 
-    // Test with null bounds (all electronics)
+    // Test with no bounds (all electronics)
     await E.transact(() => {
         let allElectronics: number[] = [];
-        const items = CompositeKeyModel.pk.find(null, null);
+        const items = CompositeKeyModel.pk.find();
         for(const item of items) {
             allElectronics.push(item.value);
         }
         expect(allElectronics).toEqual([1999, 799, 999, 1099, 1299, 599]); // lexicographic order
     });
 
-    // Test single null bound (from start to iPad)
+    // Test single bound (from start to iPad)
     await E.transact(() => {
         let fromStart: number[] = [];
-        const items = CompositeKeyModel.pk.find(null, ["electronics", "tablets", "iPad"]);
+        const items = CompositeKeyModel.pk.find({to: ["electronics", "tablets", "iPad"]});
         for(const item of items) {
             fromStart.push(item.value);
         }
         expect(fromStart).toEqual([1999, 799, 999, 1099, 1299]); // MacBook, Samsung, iPhone, Surface, iPad
     });
 
-    // Test single null bound (from iPad to end)
+    // Test single bound (from iPad to end)
     await E.transact(() => {
         let toEnd: number[] = [];
-        const items = CompositeKeyModel.pk.find(["electronics", "tablets", "iPad"], null);
+        const items = CompositeKeyModel.pk.find({from: ["electronics", "tablets", "iPad"]});
         for(const item of items) {
             toEnd.push(item.value);
         }
@@ -899,7 +890,7 @@ test("Range queries on primary indices", async () => {
 test("Range queries on unique indices", async () => {
     function testRange() {
         let names: string[] = [];
-        const users = User.byEmail.find("b@test.com", "f@test.com");
+        const users = User.byEmail.find({from: "b@test.com", to: "f@test.com"});
         for(const user of users) {
             names.push(user.name);
         }
@@ -908,7 +899,7 @@ test("Range queries on unique indices", async () => {
 
     function testExclusiveRange() {
         let names: string[] = [];
-        const users = User.byEmail.findUpTil("b@test.com", "f@test.com");
+        const users = User.byEmail.find({from: "b@test.com", before: "f@test.com"});
         for(const user of users) {
             names.push(user.name);
         }
@@ -940,40 +931,40 @@ test("Range queries on unique indices", async () => {
         testExclusiveRange();
     });
 
-    // Test with null bounds (all users)
+    // Test with no bounds (all users)
     await E.transact(() => {
         let allNames: string[] = [];
-        const users = User.byEmail.find(null, null);
+        const users = User.byEmail.find({});
         for(const user of users) {
             allNames.push(user.name);
         }
         expect(allNames.sort()).toEqual(["A", "B", "C", "D", "E", "F", "G", "H", "I"]);
     });
 
-    // Test single null bound (from start)
+    // Test single bound (from start)
     await E.transact(() => {
         let fromStart: string[] = [];
-        const users = User.byEmail.find(null, "d@test.com");
+        const users = User.byEmail.find({to: "d@test.com"});
         for(const user of users) {
             fromStart.push(user.name);
         }
         expect(fromStart.sort()).toEqual(["A", "B", "C", "D"]);
     });
 
-    // Test single null bound (to end)
+    // Test single bound (to end)
     await E.transact(() => {
         let toEnd: string[] = [];
-        const users = User.byEmail.find("f@test.com", null);
+        const users = User.byEmail.find({from: "f@test.com"});
         for(const user of users) {
             toEnd.push(user.name);
         }
         expect(toEnd.sort()).toEqual(["F", "G", "H", "I"]);
     });
 
-    // Test default second argument behavior (should equal first argument)
+    // Test exact match behavior
     await E.transact(() => {
         let exactMatch: string[] = [];
-        const users = User.byEmail.find("d@test.com"); // Second arg should default to "d@test.com"
+        const users = User.byEmail.find({is: "d@test.com"});
         for(const user of users) {
             exactMatch.push(user.name);
         }

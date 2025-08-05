@@ -48,6 +48,14 @@ export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> 
 let uninitializedModels = new Set<typeof Model<unknown>>();
 export const modelRegistry: Record<string, typeof Model> = {};
 
+export function resetModelCaches() {
+    for(const model of Object.values(modelRegistry)) {
+        for(const index of model._indexes || []) {
+            index.cachedIndexId = undefined;
+        }
+    }
+}
+
 function isObjectEmpty(obj: object) {
     for (let key in obj) {
         if (obj.hasOwnProperty(key)) return false;

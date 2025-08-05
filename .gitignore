@@ -1,5 +1,5 @@
-dist
-dist.tests
+build
 node_modules
-.olmdb_test
 package-lock.json
+.olmdb*
+

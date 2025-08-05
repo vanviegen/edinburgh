@@ -661,6 +661,7 @@ const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (bytes:
     literal: LiteralType,
     boolean: boolean,
     id: identifier,
+    link: LinkType,
 };
 
 /**

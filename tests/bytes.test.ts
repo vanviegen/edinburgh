@@ -1,5 +1,5 @@
-import { Bytes } from '../dist/bytes.js';
-import { expect, test, describe, beforeEach } from "@jest/globals";
+import { Bytes } from "../src/bytes.js";
+import { expect, test, describe } from "@jest/globals";
 
 describe('constructor', () => {
     test('should create empty buffer by default', () => {

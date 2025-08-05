@@ -9,14 +9,12 @@ import { deserializeType, serializeType, TypeWrapper } from "./types.js";
 export const TARGET_SYMBOL = Symbol('target');
 
 // Index system types and utilities
-type IndexTuple<M extends typeof Model<any>, F extends readonly (keyof InstanceType<M> & string)[]> = {
+type IndexArgTypes<M extends typeof Model<any>, F extends readonly (keyof InstanceType<M> & string)[]> = {
     [I in keyof F]: InstanceType<M>[F[I]]
 }
 
 const MAX_INDEX_ID_PREFIX = -1;
 const INDEX_ID_PREFIX = -2;
-
-export type IndexType = 'primary' | 'unique' | 'secondary';
 
 /**
  * Iterator for range queries on indexes.
@@ -25,7 +23,7 @@ export type IndexType = 'primary' | 'unique' | 'secondary';
  */
 class IndexRangeIterator<M extends typeof Model, F extends readonly (keyof InstanceType<M> & string)[]> implements Iterator<InstanceType<M>>, Iterable<InstanceType<M>> {
     constructor(
-        private iterator: any,
+        private iterator: olmdb.DbIterator<any,any> | undefined,
         private indexId: number,
         private parentIndex: BaseIndex<M, F>
     ) {}
@@ -35,20 +33,17 @@ class IndexRangeIterator<M extends typeof Model, F extends readonly (keyof Insta
     }
 
     next(): IteratorResult<InstanceType<M>> {
+        if (!this.iterator) return { done: true, value: undefined };
         const entry = this.iterator.next();
         if (entry.done) {
             this.iterator.close();
             return { done: true, value: undefined };
         }
-
+        
         // Extract the key without the index ID
         const keyBytes = new Bytes(entry.value.key);
         const entryIndexId = keyBytes.readNumber();
-        if (entryIndexId !== this.indexId) {
-            // We've moved past this index
-            this.iterator.close();
-            return { done: true, value: undefined };
-        }
+        assert(entryIndexId === this.indexId);
 
         // Deserialize the index key
         const keyArgs = [] as any;
@@ -60,9 +55,9 @@ class IndexRangeIterator<M extends typeof Model, F extends readonly (keyof Insta
 
         // Get the model - different logic for primary vs unique indexes
         let model: InstanceType<M> | undefined;
-        if (this.parentIndex.type === 'primary') {
-            model = (this.parentIndex as PrimaryIndex<M, F>).get(...keyArgs as IndexTuple<M, F>);
-        } else if (this.parentIndex.type === 'unique') {
+        if (this.parentIndex instanceof PrimaryIndex) {
+            model = (this.parentIndex as PrimaryIndex<M, F>).get(...keyArgs as IndexArgTypes<M, F>);
+        } else if (this.parentIndex instanceof UniqueIndex) {
             // For unique indexes, the value contains the primary key
             const pk = this.parentIndex.MyModel._pk!;
             const primaryKeyArgs = pk.deserializeKey(new Bytes(entry.value.value));
@@ -78,6 +73,36 @@ class IndexRangeIterator<M extends typeof Model, F extends readonly (keyof Insta
     }
 }
 
+type ArrayOrOnlyItem<ARG_TYPES extends readonly any[]> = ARG_TYPES extends readonly [infer A] ? (A | Partial<ARG_TYPES>) : Partial<ARG_TYPES>;
+
+type FindOptions<ARG_TYPES extends readonly any[]> = (
+    (
+        {is: ArrayOrOnlyItem<ARG_TYPES>;} // Shortcut for setting `from` and `to` to the same value
+    |
+        (
+            (
+                {from: ArrayOrOnlyItem<ARG_TYPES>;}
+            |
+                {after: ArrayOrOnlyItem<ARG_TYPES>;}
+            |
+                {}
+            )
+        &
+            (
+                {to: ArrayOrOnlyItem<ARG_TYPES>;}
+            |
+                {before: ArrayOrOnlyItem<ARG_TYPES>;}
+            |
+                {}
+            )
+        )
+    ) &
+    {
+        reverse?: boolean;
+    }
+);
+
+
 /**
  * Base class for database indexes for efficient lookups on model fields.
  * 
@@ -88,7 +113,6 @@ class IndexRangeIterator<M extends typeof Model, F extends readonly (keyof Insta
  */
 export abstract class BaseIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> {
     public MyModel: M;
-    public abstract type: IndexType;
     
     /**
      * Create a new index.
@@ -107,8 +131,8 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @param bytes - Bytes to read from.
      * @returns Array of field values.
      */
-    deserializeKey(bytes: Bytes): IndexTuple<M, F> {
-        const result: IndexTuple<M, F> = [] as any;
+    deserializeKey(bytes: Bytes): IndexArgTypes<M, F> {
+        const result: IndexArgTypes<M, F> = [] as any;
         for (let i = 0; i < this.fieldNames.length; i++) {
             const fieldName = this.fieldNames[i];
             const fieldConfig = (this.MyModel.fields as any)[fieldName] as any;
@@ -119,14 +143,16 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
 
     /**
      * Serialize field values to bytes for index key.
-     * @param args - Field values to serialize.
+     * @param args - Field values to serialize (can be partial for range queries).
      * @param bytes - Bytes to write to.
      */
-    serializeArgs(args: IndexTuple<M, F>, bytes: Bytes) {
-        for (let i = 0; i < this.fieldNames.length; i++) {
+    serializeArgs(args: Partial<IndexArgTypes<M, F>> | readonly any[], bytes: Bytes) {
+        const argsArray = Array.isArray(args) ? args : Object.values(args);
+        assert(argsArray.length <= this.fieldNames.length);
+        for (let i = 0; i < argsArray.length; i++) {
             const fieldName = this.fieldNames[i];
             const fieldConfig = this.MyModel.fields[fieldName];
-            fieldConfig.type.validateAndSerialize(args, i, bytes);
+            fieldConfig.type.validateAndSerialize(argsArray, i, bytes);
         }
     }
 
@@ -135,7 +161,8 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @param args - Field values.
      * @returns Database key bytes.
      */
-    getKeyFromArgs(args: IndexTuple<M, F>): Uint8Array {
+    getKeyFromArgs(args: IndexArgTypes<M, F>): Uint8Array {
+        assert(args.length === this.fieldNames.length);
         let indexId = this.getIndexId();
         let keyBytes = new Bytes().writeNumber(indexId);
         this.serializeArgs(args, keyBytes);
@@ -178,8 +205,8 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @param model - Model instance.
      * @returns Field values or undefined if should be skipped.
      */
-    modelToArgs(model: InstanceType<M>): IndexTuple<M, F> | undefined {
-        return this.checkSkip(model) ? undefined: this.fieldNames.map((fieldName) => model[fieldName]) as unknown as IndexTuple<M, F>;
+    modelToArgs(model: InstanceType<M>): IndexArgTypes<M, F> | undefined {
+        return this.checkSkip(model) ? undefined: this.fieldNames.map((fieldName) => model[fieldName]) as unknown as IndexArgTypes<M, F>;
     }
 
     /**
@@ -190,7 +217,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         // Resolve an index to a number
         let indexId = this.cachedIndexId;
         if (indexId == null) {
-            const indexNameBytes = new Bytes().writeNumber(INDEX_ID_PREFIX).writeString(this.MyModel.tableName).writeString(this.type);
+            const indexNameBytes = new Bytes().writeNumber(INDEX_ID_PREFIX).writeString(this.MyModel.tableName).writeString(this.getTypeName());
             for(let name of this.fieldNames) {
                 indexNameBytes.writeString(name);
                 serializeType(this.MyModel.fields[name].type, indexNameBytes);
@@ -221,49 +248,6 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     }
 
     /**
-     * Create a range iterator for this index.
-     * @param startArgs - Starting key arguments
-     * @param endArgs - Ending key arguments  
-     * @param inclusive - Whether the end key should be inclusive
-     * @returns An IndexRangeIterator for model instances
-     */
-    protected createRangeIterator(startArgs?: any, endArgs?: any, inclusive: boolean = true): IndexRangeIterator<M, F> {
-        // Handle single-field case by wrapping in array
-        if (this.fieldNames.length === 1 && startArgs !== null && startArgs !== undefined && !Array.isArray(startArgs)) {
-            startArgs = [startArgs];
-        }
-        if (this.fieldNames.length === 1 && endArgs !== null && endArgs !== undefined && !Array.isArray(endArgs)) {
-            endArgs = [endArgs];
-        }
-        
-        const indexId = this.getIndexId();
-        const startKey = startArgs ? this.getKeyFromArgs(startArgs) : new Bytes().writeNumber(indexId).getBuffer();
-        let endKey: Uint8Array | undefined;
-        
-        if (endArgs) {
-            const endKeyBytes = new Bytes().writeNumber(indexId);
-            this.serializeArgs(endArgs, endKeyBytes);
-            if (inclusive) {
-                // For inclusive end, add a single byte with value 255 to make it the next possible key
-                endKeyBytes.ensureCapacity(1);
-                endKeyBytes.buffer[endKeyBytes.writeByte++] = 255;
-            }
-            endKey = endKeyBytes.getBuffer();
-        } else {
-            // If endArgs is null, we want to scan to the end of this index
-            endKey = new Bytes().writeNumber(indexId + 1).getBuffer();
-        }
-
-        const iterator = olmdb.scan({
-            start: startKey,
-            end: endKey,
-            reverse: false
-        });
-
-        return new IndexRangeIterator(iterator, indexId, this);
-    }
-
-    /**
      * Check if indexing should be skipped for a model instance.
      * @param model - Model instance.
      * @returns true if indexing should be skipped.
@@ -277,49 +261,102 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     }
 
     /**
-     * Find model instances within a range of index key values (inclusive).
-     * This method supports both single-field and multi-field indices.
+     * Find model instances using flexible range query options.
      * 
-     * For single-field indices, you can pass the values directly:
-     *   find(startValue, endValue)
+     * Supports exact matches, inclusive/exclusive range queries, and reverse iteration.
+     * For single-field indexes, you can pass values directly or in arrays.
+     * For multi-field indexes, pass arrays or partial arrays for prefix matching.
      * 
-     * For multi-field indices, pass arrays:
-     *   find([field1Start, field2Start], [field1End, field2End])
+     * @param opts - Query options object
+     * @param opts.is - Exact match (sets both `from` and `to` to same value)
+     * @param opts.from - Range start (inclusive)
+     * @param opts.after - Range start (exclusive)
+     * @param opts.to - Range end (inclusive)
+     * @param opts.before - Range end (exclusive)
+     * @param opts.reverse - Whether to iterate in reverse order
+     * @returns An iterable of model instances matching the query
      * 
-     * @param startArgs - The starting index key values (inclusive). If null, starts from beginning.
-     * @param endArgs - The ending index key values (inclusive). If null, goes to end. If omitted, defaults to startArgs.
-     * @returns An iterable of model instances.
+     * @example
+     * ```typescript
+     * // Exact match
+     * for (const user of User.byEmail.find({is: "john@example.com"})) {
+     *   console.log(user.name);
+     * }
+     * 
+     * // Range query (inclusive)
+     * for (const user of User.byEmail.find({from: "a@", to: "m@"})) {
+     *   console.log(user.email);
+     * }
+     * 
+     * // Range query (exclusive)
+     * for (const user of User.byEmail.find({after: "a@", before: "m@"})) {
+     *   console.log(user.email);
+     * }
+     * 
+     * // Open-ended ranges
+     * for (const user of User.byEmail.find({from: "m@"})) { // m@ and later
+     *   console.log(user.email);
+     * }
+     * 
+     * for (const user of User.byEmail.find({to: "m@"})) { // up to and including m@
+     *   console.log(user.email);
+     * }
+     * 
+     * // Reverse iteration
+     * for (const user of User.byEmail.find({reverse: true})) {
+     *   console.log(user.email); // Z to A order
+     * }
+     * 
+     * // Multi-field index prefix matching
+     * for (const item of CompositeModel.pk.find({from: ["electronics", "phones"]})) {
+     *   console.log(item.name); // All electronics/phones items
+     * }
+     * 
+     * // For single-field indexes, you can use the value directly
+     * for (const user of User.byEmail.find({is: "john@example.com"})) {
+     *   console.log(user.name);
+     * }
+     * ```
      */
-    find(startArgs?: any, endArgs?: any): Iterable<InstanceType<M>> {
-        // Default endArgs to startArgs if not provided
-        if (arguments.length === 1) {
-            endArgs = startArgs;
-        }
+    find(opts: FindOptions<IndexArgTypes<M, F>> = {}): Iterable<InstanceType<M>> {
+        const indexId = this.getIndexId();
         
-        return this.createRangeIterator(startArgs, endArgs, true);
-    }
+        let startKey: Bytes | undefined = new Bytes().writeNumber(indexId);
+        let endKey: Bytes | undefined = startKey.copy();
 
-    /**
-     * Find model instances within a range of index key values (exclusive of end).
-     * This method supports both single-field and multi-field indices.
-     * 
-     * For single-field indices, you can pass the values directly:
-     *   findUpTil(startValue, endValue)
-     * 
-     * For multi-field indices, pass arrays:
-     *   findUpTil([field1Start, field2Start], [field1End, field2End])
-     * 
-     * @param startArgs - The starting index key values (inclusive). If null, starts from beginning.
-     * @param endArgs - The ending index key values (exclusive). If null, goes to end. If omitted, defaults to startArgs.
-     * @returns An iterable of model instances.
-     */
-    findUpTil(startArgs?: any, endArgs?: any): Iterable<InstanceType<M>> {
-        // Default endArgs to startArgs if not provided
-        if (arguments.length === 1) {
-            endArgs = startArgs;
+        if ('is' in opts) {
+            // Exact match - set both start and end to the same value
+            this.serializeArgs(toArray(opts.is), startKey);
+            endKey = startKey.copy().increment();
+        } else {
+            // Range query
+            if ('from' in opts) {
+                this.serializeArgs(toArray(opts.from), startKey);
+            } else if ('after' in opts) {
+                this.serializeArgs(toArray(opts.after), startKey);
+                if (!startKey.increment()) {
+                    // There can be nothing 'after' - return an empty iterator
+                    return new IndexRangeIterator(undefined, indexId, this);
+                }
+            }
+            
+            if ('to' in opts) {
+                this.serializeArgs(toArray(opts.to), endKey);
+                endKey.increment();
+            } else if ('before' in opts) {
+                this.serializeArgs(toArray(opts.before), endKey);
+            } else {
+                endKey = endKey.increment(); // Next indexId
+            }
         }
-        
-        return this.createRangeIterator(startArgs, endArgs, false);
+
+        const iterator = olmdb.scan({
+            start: startKey?.getBuffer(),
+            end: endKey?.getBuffer(),
+            reverse: opts.reverse || false,
+        });
+
+        return new IndexRangeIterator(iterator, indexId, this);
     }
 
     /**
@@ -328,6 +365,13 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @param originalKey - Original key if updating.
      */
     abstract save(model: InstanceType<M>, originalKey?: Uint8Array): void;
+
+    abstract getTypeName(): string;
+}
+
+function toArray<T>(args: T): T extends readonly any[] ? T : [T] {
+    // Use type assertion to satisfy TypeScript while maintaining runtime correctness
+    return (Array.isArray(args) ? args : [args]) as T extends readonly any[] ? T : [T];
 }
 
 /**
@@ -337,7 +381,6 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
  * @template F - The field names that make up this index.
  */
 export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
-    public readonly type = 'primary' as const;
     
     constructor(MyModel: M, fieldNames: F) {
         super(MyModel, fieldNames);
@@ -357,8 +400,8 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
      * const user = User.pk.get("john_doe");
      * ```
      */
-    get(...args: IndexTuple<M, F>): InstanceType<M> | undefined {
-        let keyBuffer = this.getKeyFromArgs(args as IndexTuple<M, F>);
+    get(...args: IndexArgTypes<M, F>): InstanceType<M> | undefined {
+        let keyBuffer = this.getKeyFromArgs(args as IndexArgTypes<M, F>);
         if (logLevel >= 3) {
             console.log(`Getting primary ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${this.getIndexId()}) with key`, args, keyBuffer);
         }
@@ -414,6 +457,10 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
             console.log(`Saved primary ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${indexId}) with key`, this.deserializeKey(keyBytes), keyBytes.getBuffer());
         }
     }
+
+    getTypeName(): string {
+        return 'primary';
+    }
 }
 
 /**
@@ -435,8 +482,8 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
      * const userByEmail = User.byEmail.get("john@example.com");
      * ```
      */
-    get(...args: IndexTuple<M, F>): InstanceType<M> | undefined {
-        let keyBuffer = this.getKeyFromArgs(args as IndexTuple<M, F>);
+    get(...args: IndexArgTypes<M, F>): InstanceType<M> | undefined {
+        let keyBuffer = this.getKeyFromArgs(args as IndexArgTypes<M, F>);
         if (logLevel >= 3) {
             console.log(`Getting unique ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] (id=${this.getIndexId()}) with key`, args, keyBuffer);
         }
@@ -484,8 +531,12 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         olmdb.put(newKey, linkKey);
 
         if (logLevel >= 2) {
-            console.log(`Saved unique index ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] with key`, this.deserializeKey(new Bytes(newKey)));
+            console.log(`Saved unique index ${this.MyModel.tableName}[${this.fieldNames.join(', ')}] with key ${newKey}`);
         }
+    }
+
+    getTypeName(): string {
+        return 'unique';
     }
 }
 
@@ -501,7 +552,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     /**
      * Secondary indexes do not support get() method.
      */
-    get(...args: IndexTuple<M, F>): never {
+    get(...args: IndexArgTypes<M, F>): never {
         throw new Error(`secondary indexes do not support get()`);
     }
 
@@ -512,6 +563,10 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
      */
     save(model: InstanceType<M>, originalKey?: Uint8Array) {
         throw new DatabaseError(`Index type 'secondary' not implemented yet`, 'NOT_IMPLEMENTED');
+    }
+
+    getTypeName(): string {
+        return 'secondary';
     }
 }
 
@@ -609,11 +664,13 @@ export function dump() {
         if (indexId === MAX_INDEX_ID_PREFIX) {
             console.log("Max index id", vb.readNumber());
         } else if (indexId === INDEX_ID_PREFIX) {
+            console.log(`Define index key=${kb} value=${vb}`);
             const name = kb.readString();
             const type = kb.readString();
             const fields: Record<string, TypeWrapper<any>> = {};
             while(kb.readAvailable()) {
                 const name = kb.readString();
+                console.log(`  Field ${name}`);
                 fields[name] = deserializeType(kb, 0);
             }
             const fieldDescription = Object.entries(fields).map(([name, type]) => `${name}:${type}`);
@@ -628,7 +685,7 @@ export function dump() {
             }
             console.log(`Row for ${type} ${indexId} with key ${JSON.stringify(rowKey)}`, vb);
         } else {
-            console.log(`Unhandled ${indexId} index`, kb.readString(), vb.getBuffer());
+            console.log(`Unhandled ${indexId} index key=${kb} value=${vb}`);
         }
     }
 }

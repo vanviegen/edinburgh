@@ -12,13 +12,19 @@
   "exports": {
     ".": {
       "bun": "./src/edinburgh.ts",
-      "default": "./dist/edinburgh.js"
+      "types": "./build/edinburgh.d.ts",
+      "default": "./build/edinburgh.js"
+    },
+    "./bytes": {
+      "bun": "./src/bytes.ts",
+      "types": "./build/bytes.d.ts",
+      "default": "./build/bytes.js"
     }
   },
   "description": "Very fast object persistence for TypeScript, supporting optimistic transactions, on-demand reference loading, automatic back-references and indexes.",
   "files": [
     "src",
-    "dist"
+    "build/src"
   ],
   "keywords": [
     "orm",
@@ -32,10 +38,10 @@
   ],
   "license": "ISC",
   "scripts": {
-    "build": "rm -rf dist && tsc",
+    "build": "rm -rf build && tsc",
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",
-    "test:node": "npm run build && rm -rf dist.tests && npx tsc -p tsconfig.test.json && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
+    "test:node": "npm run build && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
     "prepack": "npm run build && npm run test && npm run readme-tsdoc",
     "readme-tsdoc": "readme-tsdoc --repo-url https://github.com/vanviegen/edinburgh"
   },

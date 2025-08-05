@@ -126,7 +126,6 @@ export class Bytes {
      * @returns This Bytes instance for chaining.
      */
     writeBits(value: number, bits: number, flip: boolean=false): Bytes {
-        // console.log(`Writing ${value} with ${bits} bits (flip: ${flip})`);
         if (bits < 0 || bits > 30) {
             throw new Error('Invalid bit count');
         }
@@ -463,6 +462,39 @@ export class Bytes {
      * @returns A new Bytes instance with the same content.
      */
     copy() {
-        return new Bytes(this.getBuffer());
+        const result = new Bytes(this.buffer.slice(0));
+        result.writeByte = this.writeByte;
+        result.writeBit = this.writeBit;
+        return result;
+    }
+
+    /** 
+     * Increment the last bit of the buffer. If it was already 1 set it to 0 and
+     * increment the previous bit, and so on. If all bits were 1, return undefined.
+     */
+    increment(): Bytes | undefined {
+        let startBit = this.writeBit;
+        for(let byte=this.writeByte; byte >= 0; byte--) {
+            for(let bit=startBit; bit < 8; bit++) {
+                const shift = 1 << bit;
+                if (this.buffer[byte] & shift) {
+                    // Bit was 1, set to 0 and continue
+                    this.buffer[byte] &= ~shift;
+                } else {
+                    // Bit was 0, set to 1 and return
+                    this.buffer[byte] |= shift;
+                    return this;
+                }
+            }
+            startBit = 0;
+        }
+        return undefined; // All bits were 1 (and are now 0)
+    }
+
+    toString(): string {
+        // Convert this.getBuffer() as utf8 to a string, escaping non-printable characters:
+        return Array.from(this.getBuffer())
+            .map(b => b < 32 || b > 126 ? `\\x${b.toString(16).padStart(2, '0')}` : String.fromCharCode(b))
+            .join('');
     }
 }
