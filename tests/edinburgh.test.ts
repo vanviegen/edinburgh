@@ -971,3 +971,146 @@ test("Range queries on unique indices", async () => {
         expect(exactMatch.sort()).toEqual(["D"]);
     });
 });
+
+test("Secondary index implementation", async () => {
+    // Create a test model with secondary indexes
+    @E.registerModel
+    class Product extends E.Model<Product> {
+        static pk = E.primary(Product, ["id"]);
+        
+        id = field(E.identifier, {description: "Product ID"});
+        name = field(E.string, {description: "Product name"});
+        price = field(E.number, {description: "Product price"});
+        category = field(E.string, {description: "Product category"});
+        inStock = field(E.boolean, {description: "In stock status", default: true});
+        
+        // Secondary indexes
+        static byPrice = E.index(Product, "price");
+        static byCategory = E.index(Product, "category");
+        static byCategoryPrice = E.index(Product, ["category", "price"]);
+        static byStock = E.index(Product, "inStock");
+    }
+
+    // Test that secondary indexes don't have get() method (compile-time check)
+    // This should not compile: Product.byPrice.get(1000);
+    
+    // Create test data in first transaction
+    await E.transact(() => {
+        new Product({name: "Laptop", price: 1000, category: "electronics"});
+        new Product({name: "Phone", price: 800, category: "electronics"});
+        new Product({name: "Tablet", price: 600, category: "electronics"});
+        new Product({name: "Chair", price: 200, category: "furniture"});
+        new Product({name: "Desk", price: 500, category: "furniture"});
+        new Product({name: "Book", price: 20, category: "books", inStock: false});
+        new Product({name: "Notebook", price: 15, category: "books"});
+    });
+
+    // Test single-field secondary index queries in separate transaction
+    await E.transact(() => {
+        // Find products by price
+        const expensiveProducts: string[] = [];
+        for (const product of Product.byPrice.find({from: 500})) {
+            expensiveProducts.push(product.name);
+        }
+        expect(expensiveProducts.sort()).toEqual(["Desk", "Laptop", "Phone", "Tablet"]);
+
+        // Find products in specific price range
+        const midRangeProducts: string[] = [];
+        for (const product of Product.byPrice.find({from: 200, to: 600})) {
+            midRangeProducts.push(product.name);
+        }
+        expect(midRangeProducts.sort()).toEqual(["Chair", "Desk", "Tablet"]);
+
+        // Find products by category
+        const electronicsProducts: string[] = [];
+        for (const product of Product.byCategory.find({is: "electronics"})) {
+            electronicsProducts.push(product.name);
+        }
+        expect(electronicsProducts.sort()).toEqual(["Laptop", "Phone", "Tablet"]);
+
+        // Find out of stock products
+        const outOfStockProducts: string[] = [];
+        for (const product of Product.byStock.find({is: false})) {
+            outOfStockProducts.push(product.name);
+        }
+        expect(outOfStockProducts).toEqual(["Book"]);
+    });
+
+    // Test multi-field secondary index queries
+    await E.transact(() => {
+        // Find electronics under $700
+        const cheapElectronics: string[] = [];
+        for (const product of Product.byCategoryPrice.find({from: ["electronics"], to: ["electronics", 700]})) {
+            cheapElectronics.push(product.name);
+        }
+        expect(cheapElectronics.sort()).toEqual(["Tablet"]);
+
+        // Find all furniture
+        const furnitureProducts: Array<{name: string, price: number}> = [];
+        for (const product of Product.byCategoryPrice.find({from: ["furniture"], to: ["furniture", Number.MAX_SAFE_INTEGER]})) {
+            furnitureProducts.push({name: product.name, price: product.price});
+        }
+        expect(furnitureProducts.sort((a, b) => a.price - b.price)).toEqual([
+            {name: "Chair", price: 200},
+            {name: "Desk", price: 500}
+        ]);
+
+        // Find books with exact category match
+        const bookProducts: string[] = [];
+        for (const product of Product.byCategoryPrice.find({is: ["books"]})) {
+            bookProducts.push(product.name);
+        }
+        expect(bookProducts.sort()).toEqual(["Book", "Notebook"]);
+    });
+
+    // Test range queries with reverse iteration
+    await E.transact(() => {
+        const productsByPriceDesc: string[] = [];
+        for (const product of Product.byPrice.find({reverse: true})) {
+            productsByPriceDesc.push(`${product.name}(${product.price})`);
+        }
+        expect(productsByPriceDesc).toEqual([
+            "Laptop(1000)", "Phone(800)", "Tablet(600)", 
+            "Desk(500)", "Chair(200)", "Book(20)", "Notebook(15)"
+        ]);
+    });
+
+    // Test that duplicate values work correctly (non-unique nature)
+    await E.transact(() => {
+        // Add another product with same price
+        new Product({name: "Monitor", price: 600, category: "electronics"});
+    });
+    
+    await E.transact(() => {
+        // Both products with price 600 should be found
+        const products600: string[] = [];
+        for (const product of Product.byPrice.find({is: 600})) {
+            products600.push(product.name);
+        }
+        expect(products600.sort()).toEqual(["Monitor", "Tablet"]);
+    });
+
+    // Test exclusive range queries
+    await E.transact(() => {
+        const expensiveButNotMost: string[] = [];
+        for (const product of Product.byPrice.find({after: 500, before: 1000})) {
+            expensiveButNotMost.push(product.name);
+        }
+        expect(expensiveButNotMost.sort()).toEqual(["Monitor", "Phone", "Tablet"]);
+    });
+
+    // Test empty results
+    await E.transact(() => {
+        const noResults: string[] = [];
+        for (const product of Product.byCategory.find({is: "nonexistent"})) {
+            noResults.push(product.name);
+        }
+        expect(noResults).toEqual([]);
+
+        const noResultsRange: string[] = [];
+        for (const product of Product.byPrice.find({from: 2000, to: 3000})) {
+            noResultsRange.push(product.name);
+        }
+        expect(noResultsRange).toEqual([]);
+    });
+});

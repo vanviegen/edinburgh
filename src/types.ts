@@ -426,14 +426,14 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
         let value = Reflect.get(obj, prop, WANT_PK_ARRAY) as any[] | Model<InstanceType<T>>;
         if (value instanceof Array) {
             // It's a pk array, and the object has not been loaded. We can just serialize it.
-            pk.serializeArgs(value, bytes);
+            pk._serializeArgs(value, bytes);
             if (!this.reverse) return;
             pkArray = value;
         } else {
             // It's a model instance that has been loaded
             pk.serializeModel(value, bytes);
             if (!this.reverse) return;
-            pkArray = pk.modelToArgs(value);
+            pkArray = pk._modelToArgs(value);
         }
         const jsonSet = model._reverseLinksToBeDeleted?.get(this);
 

@@ -371,7 +371,7 @@ export abstract class Model<SUB> {
         const unproxiedModel = ((this as any)[TARGET_SYMBOL] || this) as Model<SUB>;
         unproxiedModel._deleteReverseLinks();
 
-        olmdb.del(this.constructor._pk!.getKeyFromModel(unproxiedModel, true, false));
+        olmdb.del(this.constructor._pk!._getKeyFromModel(unproxiedModel, true, false));
         this.preventPersist();
     }
 
@@ -499,7 +499,7 @@ export const modificationTracker: ProxyHandler<any> = {
             const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
             modifiedInstances.add(model);
             if (state === 2) {
-                model._state = model.constructor._indexes!.map(idx => idx.getKeyFromModel(model, true, false));
+                model._state = model.constructor._indexes!.map(idx => idx._getKeyFromModel(model, true, false));
             } else {
                 model._state = 1;
             }
