@@ -46,7 +46,7 @@ class IndexRangeIterator<M extends typeof Model, F extends readonly (keyof Insta
         assert(entryIndexId === this.indexId);
 
         // Use polymorphism to get the model from the entry
-        const model = this.parentIndex._getModelFromEntry(keyBytes, entry.value.value);
+        const model = this.parentIndex._getModelFromEntry(keyBytes, new Bytes(entry.value.value));
 
         if (!model) {
             // This shouldn't happen, but skip if it does
@@ -54,6 +54,18 @@ class IndexRangeIterator<M extends typeof Model, F extends readonly (keyof Insta
         }
 
         return { done: false, value: model };
+    }
+
+    count(): number {
+        let result = 0;
+        for (const _ of this) result++;
+        return result;
+    }
+
+    fetch(): InstanceType<M> | undefined {
+        for (const model of this) {
+            return model; // Return the first model found
+        }
     }
 }
 
@@ -132,7 +144,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @returns Model instance or undefined.
      * @internal
      */
-    abstract _getModelFromEntry(keyBytes: Bytes, valueBytes: Uint8Array): InstanceType<M> | undefined;
+    abstract _getModelFromEntry(keyBytes: Bytes, valueBytes: Bytes): InstanceType<M> | undefined;
 
     /**
      * Serialize field values to bytes for index key.
@@ -176,19 +188,14 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         }
     }
 
-    _getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: true): Uint8Array | undefined;
-    _getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: false): Uint8Array;
-
     /**
      * Create database key from model instance.
      * @param model - Model instance.
      * @param includeIndexId - Whether to include index ID in key.
-     * @param checkSkip - Whether to check if indexing should be skipped.
      * @returns Database key bytes or undefined if skipped.
      * @internal
      */
-    _getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean, checkSkip: boolean): Uint8Array | undefined {
-        if (checkSkip && this.checkSkip(model)) return undefined;
+    _getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean): Uint8Array {
         const bytes = new Bytes();
         if (includeIndexId) bytes.writeNumber(this.getIndexId());
         this.serializeModel(model, bytes);
@@ -314,7 +321,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * }
      * ```
      */
-    find(opts: FindOptions<IndexArgTypes<M, F>> = {}): Iterable<InstanceType<M>> {
+    find(opts: FindOptions<IndexArgTypes<M, F>> = {}): IndexRangeIterator<M,F> {
         const indexId = this.getIndexId();
         
         let startKey: Bytes | undefined = new Bytes().writeNumber(indexId);
@@ -347,12 +354,12 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         }
 
         // For reverse scans, swap start/end keys since OLMDB expects it
-        const scanStart = opts.reverse ? endKey?.getBuffer() : startKey?.getBuffer();
-        const scanEnd = opts.reverse ? startKey?.getBuffer() : endKey?.getBuffer();
+        const scanStart = opts.reverse ? endKey : startKey;
+        const scanEnd = opts.reverse ? startKey : endKey;
 
         const iterator = olmdb.scan({
-            start: scanStart,
-            end: scanEnd,
+            start: scanStart?.getBuffer(),
+            end: scanEnd?.getBuffer(),
             reverse: opts.reverse || false,
         });
         
@@ -410,23 +417,24 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
         if (!valueBuffer) return;
         
         // This is a primary index. So we can now deserialize all primary and non-primary fields into instance values.
-        const result = new (this.MyModel as any)() as any;
+        const model = new (this.MyModel as any)() as InstanceType<M>;
         // We'll want to set all loaded values on the unproxied target object.
-        const values = (result as any)[TARGET_SYMBOL];
+        const unproxied = (model as any)[TARGET_SYMBOL];
+        unproxied._state = 2; // Loaded from disk, unmodified
 
         const valueBytes = new Bytes(valueBuffer);
         let primaryKeyIndex = 0;
         for (const [fieldName, fieldConfig] of Object.entries(this.MyModel.fields)) {
             if (this.fieldNames.includes(fieldName as any)) { // Value is part of primary key
-                values[fieldName as string] = args[primaryKeyIndex];
+                unproxied[fieldName as string] = args[primaryKeyIndex];
                 primaryKeyIndex++;
             } else {
                 // We're passing in the proxied model
-                (fieldConfig as any).type.deserialize(values, fieldName, valueBytes, result);
+                fieldConfig.type.deserialize(unproxied, fieldName, valueBytes, model);
             }
         }
 
-        return result;
+        return model;
     }
 
     /**
@@ -436,10 +444,25 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
      * @returns Model instance or undefined.
      * @internal
      */
-    _getModelFromEntry(keyBytes: Bytes, valueBytes: Uint8Array): InstanceType<M> | undefined {
-        // For primary indexes, deserialize the key to get the primary key args
-        const keyArgs = this.deserializeKey(keyBytes);
-        return this.get(...keyArgs);
+    _getModelFromEntry(keyBytes: Bytes, valueBytes: Bytes): InstanceType<M> | undefined {
+        const model = new (this.MyModel as any)() as InstanceType<M>;
+        // We'll want to set all loaded values on the unproxied target object.
+        const unproxied = (model as any)[TARGET_SYMBOL];
+        unproxied._state = 2; // Loaded from disk, unmodified
+
+        for (let i = 0; i < this.fieldNames.length; i++) {
+            const fieldName = this.fieldNames[i];
+            const fieldConfig = (this.MyModel.fields as any)[fieldName] as any;
+            fieldConfig.type.deserialize(unproxied, fieldName, keyBytes);
+        }
+
+        for (const [fieldName, fieldConfig] of Object.entries(this.MyModel.fields)) {
+            if (this.fieldNames.includes(fieldName as any)) continue; // Value is part of primary key
+            // We're passing in the proxied model
+            fieldConfig.type.deserialize(unproxied, fieldName, valueBytes, model);
+        }
+
+        return model;
     }
 
     /**
@@ -451,14 +474,14 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
         // Note: this can (and usually will) be called on the non-proxied model instance.
         assert(this.MyModel.prototype === model.constructor.prototype);
         
-        let newKey = this._getKeyFromModel(model, true, false); // Cannot be undefined for primary
+        let newKey = this._getKeyFromModel(model, true);
         if (originalKey && Buffer.compare(newKey, originalKey)) throw new DatabaseError(`Cannot change primary key for ${this.MyModel.tableName}[${this.fieldNames.join(', ')}]: ${originalKey} -> ${newKey}`, 'PRIMARY_CHANGE');
 
         // Serialize all non-primary key fields
         let valBytes = new Bytes();
-        for (const [fieldName, fieldConfig] of Object.entries((model as any)._fields)) {
+        for (const [fieldName, fieldConfig] of Object.entries(model._fields)) {
             if (!this.fieldNames.includes(fieldName as any)) {
-                (fieldConfig as any).type.validateAndSerialize(model, fieldName, valBytes, model);
+                fieldConfig.type.validateAndSerialize(model, fieldName, valBytes, model);
             }
         }
         
@@ -518,10 +541,10 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
      * @returns Model instance or undefined.
      * @internal
      */
-    _getModelFromEntry(keyBytes: Bytes, valueBytes: Uint8Array): InstanceType<M> | undefined {
+    _getModelFromEntry(keyBytes: Bytes, valueBytes: Bytes): InstanceType<M> | undefined {
         // For unique indexes, the value contains the primary key
         const pk = this.MyModel._pk!;
-        const primaryKeyArgs = pk.deserializeKey(new Bytes(valueBytes));
+        const primaryKeyArgs = pk.deserializeKey(valueBytes);
         return pk.get(...primaryKeyArgs);
     }
 
@@ -533,8 +556,8 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
     save(model: InstanceType<M>, originalKey?: Uint8Array) {
         // Note: this can (and usually will) be called on the non-proxied model instance.
         assert(this.MyModel.prototype === model.constructor.prototype);
-        
-        let newKey = this._getKeyFromModel(model, true, true);
+
+        let newKey = this.checkSkip(model) ? undefined : this._getKeyFromModel(model, true);
 
         if (originalKey) {
             if (newKey && Buffer.compare(newKey, originalKey) === 0) {
@@ -554,7 +577,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
             throw new DatabaseError(`Unique constraint violation for ${(model.constructor as any).tableName}[${this.fieldNames.join('+')}]`, 'UNIQUE_CONSTRAINT');
         }
         
-        let linkKey = (model.constructor as any)._pk!._getKeyFromModel(model, false, false);
+        let linkKey = (model.constructor as any)._pk!._getKeyFromModel(model, false);
         olmdb.put(newKey, linkKey);
 
         if (logLevel >= 2) {
@@ -587,8 +610,8 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     save(model: InstanceType<M>, originalKey?: Uint8Array) {
         // Note: this can (and usually will) be called on the non-proxied model instance.
         assert(this.MyModel.prototype === model.constructor.prototype);
-        
-        let newKey = this.createSecondaryKey(model);
+
+        let newKey = this._getKeyFromModel(model, true);
 
         if (originalKey) {
             if (newKey && Buffer.compare(newKey, originalKey) === 0) {
@@ -618,22 +641,21 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
      * @returns Model instance or undefined.
      * @internal
      */
-    _getModelFromEntry(keyBytes: Bytes, valueBytes: Uint8Array): InstanceType<M> | undefined {
+    _getModelFromEntry(keyBytes: Bytes, valueBytes: Bytes): InstanceType<M> | undefined {
         // For secondary indexes, the primary key is stored after the index fields in the key
         
-        // First, deserialize and skip past the index fields
+        // First skip past the index fields
+        const temp = [] as any[];
         for (let i = 0; i < this.fieldNames.length; i++) {
             const fieldName = this.fieldNames[i];
             const fieldConfig = this.MyModel.fields[fieldName];
-            const temp = [] as any;
-            (fieldConfig as any).type.deserialize(temp, 0, keyBytes);
+            fieldConfig.type.deserialize(temp, 0, keyBytes);
         }
         
         // Now deserialize the primary key from the remaining bytes
         const pk = this.MyModel._pk!;
         const primaryKeyArgs = pk.deserializeKey(keyBytes);
-        const result = pk.get(...primaryKeyArgs);
-        return result;
+        return pk.get(...primaryKeyArgs);
     }
 
     /**
@@ -641,11 +663,9 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
      * @param model - Model instance.
      * @returns Database key bytes or undefined if skipped.
      */
-    private createSecondaryKey(model: InstanceType<M>): Uint8Array | undefined {
-        if (this.checkSkip(model)) return undefined;
-        
+    _getKeyFromModel(model: InstanceType<M>, includeIndexId: boolean): Uint8Array {
         const bytes = new Bytes();
-        bytes.writeNumber(this.getIndexId());
+        if (includeIndexId) bytes.writeNumber(this.getIndexId());
         
         // Write the index fields
         this.serializeModel(model, bytes);
@@ -748,42 +768,40 @@ export function index(MyModel: typeof Model, fields: any): SecondaryIndex<any, a
  * This is primarily useful for development and debugging purposes.
  */
 export function dump() {
-    let indexesById = new Map<number, {type: string, fields: Record<string, TypeWrapper<any>>}>();
+    let indexesById = new Map<number, {name: string, type: string, fields: Record<string, TypeWrapper<any>>}>();
+    console.log("--- Database dump ---")
     for(const {key,value} of olmdb.scan()) {
         const kb = new Bytes(key);
-        let vb = new Bytes(value);
+        const vb = new Bytes(value);
         const indexId = kb.readNumber();
         if (indexId === MAX_INDEX_ID_PREFIX) {
-            console.log("Max index id", vb.readNumber());
+            console.log("* Max index id", vb.readNumber());
         } else if (indexId === INDEX_ID_PREFIX) {
-            console.log(`Define index key=${kb} value=${vb}`);
             const name = kb.readString();
             const type = kb.readString();
             const fields: Record<string, TypeWrapper<any>> = {};
             while(kb.readAvailable()) {
                 const name = kb.readString();
-                console.log(`  Field ${name}`);
                 fields[name] = deserializeType(kb, 0);
             }
             const fieldDescription = Object.entries(fields).map(([name, type]) => `${name}:${type}`);
             const indexId = vb.readNumber();
-            console.log(`Definition for ${type} ${indexId} for ${name}[${fieldDescription.join(',')}]`);
-            indexesById.set(indexId, {type, fields});
+            console.log(`* Definition for ${type} ${indexId} for ${name}[${fieldDescription.join(',')}]`);
+            indexesById.set(indexId, {name, type, fields});
         } else if (indexId > 0 && indexesById.has(indexId)) {
             const index = indexesById.get(indexId)!;
-            const {type, fields} = index;
+            const {name, type, fields} = index;
             const rowKey: any = {};
             for(const [fieldName, fieldType] of Object.entries(fields)) {
                 fieldType.deserialize(rowKey, fieldName, kb);
             }
-            if (index instanceof SecondaryIndex) {
-                // For secondary keys, the 'value' is hidden in the OLMDB key (and the OLMDB value
-                // is just a meaningless byte).
-                vb = index.MyModel._pk!.deserializeKey(kb);
-            }
-            console.log(`Row for ${type} ${indexId} with key ${JSON.stringify(rowKey)}`, vb);
+            const Model = modelRegistry[name]!;
+            // TODO: once we're storing schemas (serializeType) in the db, we can deserialize here
+            let displayValue = (type === 'secondary') ? Model._pk!.deserializeKey(kb) : vb;
+            console.log(`* Row for ${type} ${indexId} with key ${JSON.stringify(rowKey)}`, displayValue);
         } else {
-            console.log(`Unhandled ${indexId} index key=${kb} value=${vb} (first 10 bytes: ${key.slice(0,10)})`);
+            console.log(`* Unhandled ${indexId} index key=${kb} value=${vb}`);
         }
     }
+    console.log("--- End of database dump ---")
 }

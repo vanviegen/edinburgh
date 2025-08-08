@@ -50,7 +50,7 @@
   ],
   "type": "module",
   "dependencies": {
-    "olmdb": "^0.2.13",
+    "olmdb": "^0.2.16",
     "readme-tsdoc": "^1.1.4"
   }
 }

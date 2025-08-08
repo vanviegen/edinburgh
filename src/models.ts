@@ -1,7 +1,7 @@
 import { Bytes } from "./bytes.js";
 import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
-import { TypeWrapper, identifier, LinkType } from "./types.js";
+import { TypeWrapper, identifier, LinkType, or } from "./types.js";
 import { BaseIndex, TARGET_SYMBOL, PrimaryIndex } from "./indexes.js";
 import { assert, addErrorPath, logLevel } from "./utils.js";
 
@@ -254,6 +254,12 @@ export abstract class Model<SUB> {
     static tableName: string;
     /** Field configuration metadata. */
     static fields: Record<string, FieldConfig<unknown>>;
+
+    /*
+     * IMPORTANT: We cannot use instance property initializers here, because we will be
+     * initializing the class through a fake constructor that will skip these. This is
+     * intentional, as we don't want to run the initializers for the fields.
+     */
     
     /** @internal Field configuration for this instance. */
     _fields!: Record<string, FieldConfig<unknown>>;
@@ -263,13 +269,13 @@ export abstract class Model<SUB> {
 
     /** 
      * @internal State tracking for this model instance:
-     * - 0: new instance, unmodified
+     * - undefined: new instance, unmodified
      * - 1: new instance, modified (and in modifiedInstances)
      * - 2: loaded from disk, unmodified
      * - 3: persistence disabled
      * - array: loaded from disk, modified (and in modifiedInstances), array values are original index buffers
      */
-    _state: Array<Uint8Array> | 0 | 1 | 2 | 3 = 0;
+    _state: undefined | 1 | 2 | 3 | Array<Uint8Array>;
 
     constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
         // This constructor will only be called once, from `initModels`. All other instances will
@@ -348,10 +354,11 @@ export abstract class Model<SUB> {
      */
     preventPersist() {
         const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
-        modifiedInstances.delete((this as any)[TARGET_SYMBOL] || this);
+        const unproxiedModel = (this as any)[TARGET_SYMBOL] || this;
+        modifiedInstances.delete(unproxiedModel);
 
-        delete this._reverseLinksToBeDeleted;
-        this._state = 3; // no persist
+        delete unproxiedModel._reverseLinksToBeDeleted;
+        unproxiedModel._state = 3; // no persist
         return this;
     }
 
@@ -369,9 +376,16 @@ export abstract class Model<SUB> {
      */
     delete() {
         const unproxiedModel = ((this as any)[TARGET_SYMBOL] || this) as Model<SUB>;
-        unproxiedModel._deleteReverseLinks();
+        
+        if (this._state === 2 || typeof this._state === 'object') {
+            unproxiedModel._deleteReverseLinks();
 
-        olmdb.del(this.constructor._pk!._getKeyFromModel(unproxiedModel, true, false));
+            for(const index of unproxiedModel.constructor._indexes!) {
+                const key = index._getKeyFromModel(unproxiedModel, true);
+                olmdb.del(key);
+            }
+        }
+
         this.preventPersist();
     }
 
@@ -470,7 +484,7 @@ export const modificationTracker: ProxyHandler<any> = {
         }
 
         let state = model._state;
-        if (state !== 0 && state !== 2) {
+        if (state !== undefined && state !== 2) {
             // We don't need to track changes for this model (anymore). So we can just return the unproxied object.
             // As we doing the modificationProxyCache lookup first, the identity of returned objects will not change:
             // once a proxied object is returned, the same property will always return a proxied object.
@@ -489,17 +503,22 @@ export const modificationTracker: ProxyHandler<any> = {
         let model;
         if (target instanceof Model) {
             model = target;
+            if (!model._fields[prop as string]) {
+                // No need to track properties that are not model fields.
+                (target as any)[prop] = value;
+                return true;
+            }
         } else {
             model = modificationOwnerMap.get(target);
             assert(model);
         }
-
+        
         let state = model._state;
-        if (state === 0 || state === 2) {
+        if (state === undefined || state === 2) {
             const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
             modifiedInstances.add(model);
             if (state === 2) {
-                model._state = model.constructor._indexes!.map(idx => idx._getKeyFromModel(model, true, false));
+                model._state = model.constructor._indexes!.map(idx => idx._getKeyFromModel(model, true));
             } else {
                 model._state = 1;
             }

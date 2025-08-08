@@ -528,7 +528,10 @@ test("Model state management and persistence", async () => {
 
     // Test that the user was created successfully
     await E.transact(() => {
-        const loaded = User.load(userId);
+        let loaded = User.load(userId);
+        expect(loaded).toBeDefined();
+        expect(loaded!.name).toBe("State Test");
+        loaded = User.byEmail.get("state@test.com");
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("State Test");
     });
@@ -541,8 +544,26 @@ test("Model state management and persistence", async () => {
 
     // Verify deletion
     await E.transact(() => {
-        const loaded = User.load(userId);
+        let loaded = User.load(userId);
         expect(loaded).toBeUndefined();
+        loaded = User.byEmail.get("state@test.com");
+        expect(loaded).toBeUndefined();
+    });
+
+    // Recreate the user (making sure secondary key was fully deleted)
+    userId = await E.transact(() => {
+        const user = new User({email: "state@test.com", name: "State Test"});
+        return user.id;
+    });
+
+    // Test that the user was created successfully
+    await E.transact(() => {
+        let loaded = User.load(userId);
+        expect(loaded).toBeDefined();
+        expect(loaded!.name).toBe("State Test");
+        loaded = User.byEmail.get("state@test.com");
+        expect(loaded).toBeDefined();
+        expect(loaded!.name).toBe("State Test");
     });
 });
 
@@ -989,6 +1010,7 @@ test("Secondary index implementation", async () => {
         static byCategory = E.index(Product, "category");
         static byCategoryPrice = E.index(Product, ["category", "price"]);
         static byStock = E.index(Product, "inStock");
+        static byName = E.unique(Product, "name");
     }
 
     // Test that secondary indexes don't have get() method (compile-time check)
@@ -1073,6 +1095,40 @@ test("Secondary index implementation", async () => {
             "Laptop(1000)", "Phone(800)", "Tablet(600)", 
             "Desk(500)", "Chair(200)", "Book(20)", "Notebook(15)"
         ]);
+    });
+
+    // Modify an item's price: 800 -> 799, updating one index and leaving the rest unchanged
+    await E.transact(() => {
+        let cnt = 0;
+        for (const product of Product.byPrice.find({is: 800})) {
+            product.price--;
+            cnt++;
+        }
+        expect(cnt).toBe(1);
+    });
+
+    // Verify both the changed and unchanged indices are still okay
+    await E.transact(() => {
+        expect(Product.byName.get("Phone")!.price).toBe(799);
+        let count = 0;
+        for (const product of Product.byPrice.find({from: 790, to: 810})) {
+            expect(product.price).toBe(799);
+            expect(product.name).toBe("Phone");
+            count++;
+        }
+        expect(count).toBe(1);
+
+        expect(Product.byCategoryPrice.find({is: ["electronics", 799]}).count()).toBe(1);
+        expect(Product.byCategoryPrice.find({is: ["electronics", 800]}).count()).toBe(0);
+
+        count = 0;
+        for (const product of Product.byPrice.find({from: 790, to: 810})) {
+            expect(product.price).toBe(799);
+            expect(product.name).toBe("Phone");
+            count++;
+        }
+        expect(count).toBe(1);
+
     });
 
     // Test that duplicate values work correctly (non-unique nature)

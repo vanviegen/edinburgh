@@ -4,7 +4,7 @@
     "": {
       "name": "edinburgh",
       "dependencies": {
-        "olmdb": "^0.2.13",
+        "olmdb": "^0.2.16",
         "readme-tsdoc": "^1.1.4",
       },
       "devDependencies": {
@@ -546,7 +546,7 @@
 
     "npm-run-path": ["npm-run-path@4.0.1", "", { "dependencies": { "path-key": "^3.0.0" } }, "sha512-S48WzZW777zhNIrn7gxOlISNAqi9ZC/uQFnRdbeIHhZhCA6UqpkOT8T1G7BvfdgP4Er8gF4sUbaS0i7QvIfCWw=="],
 
-    "olmdb": ["olmdb@0.2.13", "", { "dependencies": { "node-gyp": "^11.2.0", "readme-tsdoc": "^1.0.0" } }, "sha512-hLM8L+ZEzawNw6OraAI1TC0h8D4zGnH8NFOF7r98+kaztzM5GJOqkpMNO3yH7oio4NAh7uGSVwkNzRBXP5k8Nw=="],
+    "olmdb": ["olmdb@0.2.16", "", { "dependencies": { "node-gyp": "^11.2.0", "readme-tsdoc": "^1.1.4" } }, "sha512-HFkxMANpyZhaeknEEzmBDcRQJRXOO3YGa7XETjqw3PAcYkR77vNUYRLza9fPbfIRJSrxReQblExQzxMcU2s1Ww=="],
 
     "once": ["once@1.4.0", "", { "dependencies": { "wrappy": "1" } }, "sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w=="],
 
@@ -765,8 +765,6 @@
     "minipass-pipeline/minipass": ["minipass@3.3.6", "", { "dependencies": { "yallist": "^4.0.0" } }, "sha512-DxiNidxSEK+tHG6zOIklvNOwm3hvCrbUrdtzY74U6HKTJxvIDfOUL5W5P2Ghd3DTkhhKPYGqeNUIh5qcM4YBfw=="],
 
     "minipass-sized/minipass": ["minipass@3.3.6", "", { "dependencies": { "yallist": "^4.0.0" } }, "sha512-DxiNidxSEK+tHG6zOIklvNOwm3hvCrbUrdtzY74U6HKTJxvIDfOUL5W5P2Ghd3DTkhhKPYGqeNUIh5qcM4YBfw=="],
-
-    "olmdb/readme-tsdoc": ["readme-tsdoc@1.0.0", "", { "dependencies": { "typescript": "^5.0.0" }, "bin": { "readme-tsdoc": "src/cli.js" } }, "sha512-+WDanPh5SUdp1RNTrtFQDOhJPg21iJ4CNNR65Pcz/EP86UnKwOsWBRMCFjHifqkB+kkb0l/MYVc6vcW//mj15A=="],
 
     "p-locate/p-limit": ["p-limit@2.3.0", "", { "dependencies": { "p-try": "^2.0.0" } }, "sha512-//88mFWSJx8lxCzwdAABTJL2MyWB12+eIY7MDL2SqLmAkeKU9qxRvWuSyTjm3FUmpBEMuFfckAIqEaVGUDxb6w=="],
 
