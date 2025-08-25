@@ -16,6 +16,7 @@ export {
     number,
     boolean,
     identifier,
+    undef,
     // Type factory functions
     opt,
     or,

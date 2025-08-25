@@ -98,7 +98,7 @@ export interface TypeWrapper<T> {
 /**
  * @internal Type wrapper for string values.
  */
-export class StringType extends TypeWrapper<string> {
+class StringType extends TypeWrapper<string> {
     kind = 'string';
     
     serialize(obj: any, prop: string, bytes: Bytes, model?: any) {
@@ -120,7 +120,7 @@ export class StringType extends TypeWrapper<string> {
 /**
  * @internal Type wrapper for number values.
  */
-export class NumberType extends TypeWrapper<number> {
+class NumberType extends TypeWrapper<number> {
     kind = 'number';
     
     serialize(obj: any, prop: string, bytes: Bytes, model?: any) {
@@ -143,7 +143,7 @@ export class NumberType extends TypeWrapper<number> {
 /**
  * @internal Type wrapper for boolean values.
  */
-export class BooleanType extends TypeWrapper<boolean> {
+class BooleanType extends TypeWrapper<boolean> {
     kind = 'boolean';
     
     serialize(obj: any, prop: string, bytes: Bytes, model?: any) {
@@ -166,7 +166,7 @@ export class BooleanType extends TypeWrapper<boolean> {
  * @internal Type wrapper for array values with optional length constraints.
  * @template T - The type of array elements.
  */
-export class ArrayType<T> extends TypeWrapper<T[]> {
+class ArrayType<T> extends TypeWrapper<T[]> {
     kind = 'array';
     
     /**
@@ -229,7 +229,7 @@ export class ArrayType<T> extends TypeWrapper<T[]> {
  * @internal Type wrapper for union/discriminated union types.
  * @template T - The union type this wrapper represents.
  */
-export class OrType<const T> extends TypeWrapper<T> {
+class OrType<const T> extends TypeWrapper<T> {
     kind = 'or';
     
     /**
@@ -303,7 +303,7 @@ export class OrType<const T> extends TypeWrapper<T> {
  * @internal Type wrapper for literal values (constants).
  * @template T - The literal type this wrapper represents.
  */
-export class LiteralType<const T> extends TypeWrapper<T> {
+class LiteralType<const T> extends TypeWrapper<T> {
     kind = 'literal';
     
     /**
@@ -350,7 +350,7 @@ const ID_SIZE = 7;
 /**
  * @internal Type wrapper for auto-generated unique identifier strings.
  */
-export class IdentifierType extends TypeWrapper<string> {
+class IdentifierType extends TypeWrapper<string> {
     kind = 'id';
 
     serialize(obj: any, prop: string|number, bytes: Bytes): void {
@@ -398,7 +398,7 @@ export class IdentifierType extends TypeWrapper<string> {
 
 const WANT_PK_ARRAY = {};
 
-export type KeysOfType<T, TProp> = { [P in keyof T]: T[P] extends TProp? P : never}[keyof T];
+type KeysOfType<T, TProp> = { [P in keyof T]: T[P] extends TProp? P : never}[keyof T];
 
 /**
  * @internal Type wrapper for model relationships (foreign keys).
@@ -527,17 +527,16 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
     }
 }
 
-// Pre-defined type instances for convenience
-/** Predefined string type instance. */
+/** Constant representing the string type. */
 export const string = new StringType();
 
-/** Predefined number type instance. */
+/** Constant representing the number type. */
 export const number = new NumberType();
 
-/** Predefined boolean type instance. */
+/** Constant representing the boolean type. */
 export const boolean = new BooleanType();
 
-/** Predefined identifier type instance. */
+/** Constant representing the identifier type. */
 export const identifier = new IdentifierType();
 
 /**
@@ -572,7 +571,8 @@ export function or<const T extends (TypeWrapper<unknown>|BasicType)[]>(...choice
     return new OrType<UnwrapTypes<T>>(choices.map(wrapIfLiteral) as any);
 }
 
-const undef = new LiteralType(undefined);
+/** Constant representing the 'undefined' type. */
+export const undef = new LiteralType(undefined);
 
 /**
  * Create an optional type wrapper (allows undefined).
