@@ -506,8 +506,6 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
  * @template F - The field names that make up this index.
  */
 export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
-    public readonly type = 'unique' as const;
-
     /**
      * Get a model instance by unique index key values.
      * @param args - The unique index key values.
@@ -600,8 +598,6 @@ const SECONDARY_VALUE = new Uint8Array([1]); // Single byte value for secondary 
  * @template F - The field names that make up this index.
  */
 export class SecondaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
-    public readonly type = 'secondary' as const;
-
     /**
      * Save secondary index entry.
      * @param model - Model instance.

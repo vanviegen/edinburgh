@@ -431,25 +431,6 @@ export abstract class Model<SUB> {
     }
 }
 
-// Update the identifier default to use proper database check
-(identifier as any).default = function(model: Model<any>): string {
-    // Generate a random ID, and if it already exists in the database, retry.
-    let id: string;
-    do {
-        // Combine a timestamp with randomness, to create locality of reference as well as a high chance of uniqueness.
-        // Bits 9...42 are the date (wrapping about four times a year)
-        // Bit 0...14 are random bits (partly overlapping with the date, adding up to 31ms of jitter)
-        let num = Math.floor(+new Date() * (1<<9) + Math.random() * (1<<14));
-
-        id = '';
-        for(let i = 0; i < 7; i++) {
-            id = Bytes.BASE64_CHARS[num & 0x3f] + id;
-            num = Math.floor(num / 64);
-        }
-    } while (olmdb.get(new Bytes().writeNumber(model.constructor._pk!.cachedIndexId!).writeBase64(id).getBuffer()));
-    return id;
-};
-
 // We use recursive proxies to track modifications made to, say, arrays within models. In
 // order to know which model a nested object belongs to, we maintain a WeakMap that maps
 // objects to their owner (unproxied) model.

@@ -1,4 +1,5 @@
 import { Bytes } from "./bytes.js";
+import * as olmdb from "olmdb";
 import { DatabaseError } from "olmdb";
 import { Model, modelRegistry, getMockModel } from "./models.js";
 import { assert, addErrorPath } from "./utils.js";
@@ -376,8 +377,7 @@ class IdentifierType extends TypeWrapper<string> {
         return new IdentifierType();
     }
 
-    default(model: any): string {
-        // This will be implemented by importing olmdb in the models file
+    default(model: Model<any>): string {
         // Generate a random ID, and if it already exists in the database, retry.
         let id: string;
         do {
@@ -387,11 +387,11 @@ class IdentifierType extends TypeWrapper<string> {
             let num = Math.floor(+new Date() * (1<<9) + Math.random() * (1<<14));
 
             id = '';
-            for(let i = 0; i < ID_SIZE; i++) {
+            for(let i = 0; i < 7; i++) {
                 id = Bytes.BASE64_CHARS[num & 0x3f] + id;
                 num = Math.floor(num / 64);
             }
-        } while (false); // Will be replaced with proper database check in models.ts
+        } while (olmdb.get(new Bytes().writeNumber(model.constructor._pk!.cachedIndexId!).writeBase64(id).getBuffer()));
         return id;
     }
 }
@@ -424,15 +424,16 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
         // If obj[prop] is getter(), it will return the primary key array (based on WANT_PK_ARRAY
         // being the receiver). Otherwise, it will just return the value, which is a model instance.
         let value = Reflect.get(obj, prop, WANT_PK_ARRAY) as any[] | Model<InstanceType<T>>;
+        const reverseProp = this.reverse;
         if (value instanceof Array) {
             // It's a pk array, and the object has not been loaded. We can just serialize it.
             pk._serializeArgs(value, bytes);
-            if (!this.reverse) return;
+            if (!reverseProp) return;
             pkArray = value;
         } else {
             // It's a model instance that has been loaded
             pk.serializeModel(value, bytes);
-            if (!this.reverse) return;
+            if (!reverseProp) return;
             pkArray = pk._modelToArgs(value);
         }
         const jsonSet = model._reverseLinksToBeDeleted?.get(this);
@@ -449,17 +450,17 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
         // This is a new link, so we need to add it to the reverse link map.
 
         // First check if the reverse link property on the target model is an array of links to this model.
-        const targetType = this.TargetModel.fields[prop].type;
+        const targetType = this.TargetModel.fields[reverseProp!].type;
         if (!(targetType instanceof ArrayType)
             || !(targetType.inner instanceof LinkType)
             || (targetType.inner as LinkType<T>).TargetModel !== model.constructor
             || (targetType.inner as LinkType<T>).reverse) {
-            throw new DatabaseError(`Reverse link property ${prop} on model ${this.TargetModel.tableName} should be a ${model.constructor.tableName}-links array without a reverse links`, 'INIT_ERROR');
+            throw new DatabaseError(`Reverse link property ${reverseProp} on model ${this.TargetModel.tableName} should be a ${model.constructor.tableName}-links array without a reverse links`, 'INIT_ERROR');
         }
 
         const targetInstance = pk.get(...pkArray!);
         assert(targetInstance);
-        targetInstance[prop].push(obj);
+        targetInstance[reverseProp!].push(obj);
         // The above will (through the Proxy) also add targetInstance back to modifiedInstances, so in case
         // it was already serialized before us, it will be serialized again. Not great, but good enough for now.
     }
