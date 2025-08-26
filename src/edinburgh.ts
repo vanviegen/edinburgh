@@ -33,6 +33,8 @@ export {
     dump,
 } from "./indexes.js";
 
+export { BaseIndex, UniqueIndex, PrimaryIndex } from './indexes.js';
+
 // Re-export from OLMDB
 export { init, onCommit, onRevert, getTransactionData, setTransactionData, DatabaseError } from "olmdb";
 

@@ -391,7 +391,7 @@ class IdentifierType extends TypeWrapper<string> {
                 id = Bytes.BASE64_CHARS[num & 0x3f] + id;
                 num = Math.floor(num / 64);
             }
-        } while (olmdb.get(new Bytes().writeNumber(model.constructor._pk!.cachedIndexId!).writeBase64(id).getBuffer()));
+        } while (olmdb.get(new Bytes().writeNumber(model.constructor._pk!._cachedIndexId!).writeBase64(id).getBuffer()));
         return id;
     }
 }
@@ -411,9 +411,8 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
     /**
      * Create a new LinkType.
      * @param TargetModel - The model class this link points to.
-     * @param reverse - Optional reverse link field name for bidirectional relationships.
      */
-    constructor(TargetModel: T, public reverse?: string & KeysOfType<InstanceType<T>, Model<any>[]>) {
+    constructor(TargetModel: T) {
         super();
         this.TargetModel = getMockModel(TargetModel);
     }
@@ -424,63 +423,18 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
         // If obj[prop] is getter(), it will return the primary key array (based on WANT_PK_ARRAY
         // being the receiver). Otherwise, it will just return the value, which is a model instance.
         let value = Reflect.get(obj, prop, WANT_PK_ARRAY) as any[] | Model<InstanceType<T>>;
-        const reverseProp = this.reverse;
         if (value instanceof Array) {
             // It's a pk array, and the object has not been loaded. We can just serialize it.
             pk._serializeArgs(value, bytes);
-            if (!reverseProp) return;
-            pkArray = value;
         } else {
             // It's a model instance that has been loaded
-            pk.serializeModel(value, bytes);
-            if (!reverseProp) return;
-            pkArray = pk._modelToArgs(value);
+            pk._serializeModel(value, bytes);
         }
-        const jsonSet = model._reverseLinksToBeDeleted?.get(this);
-
-        if (jsonSet) {
-            const pkJson = JSON.stringify(pkArray);
-            if (jsonSet.has(pkJson)) {
-                // Indicate that this link still exists, so it doesn't need to be removed from the reverse link map.
-                // Nor do we need to add it.
-                jsonSet.delete(pkJson);
-                return;
-            }
-        }
-        // This is a new link, so we need to add it to the reverse link map.
-
-        // First check if the reverse link property on the target model is an array of links to this model.
-        const targetType = this.TargetModel.fields[reverseProp!].type;
-        if (!(targetType instanceof ArrayType)
-            || !(targetType.inner instanceof LinkType)
-            || (targetType.inner as LinkType<T>).TargetModel !== model.constructor
-            || (targetType.inner as LinkType<T>).reverse) {
-            throw new DatabaseError(`Reverse link property ${reverseProp} on model ${this.TargetModel.tableName} should be a ${model.constructor.tableName}-links array without a reverse links`, 'INIT_ERROR');
-        }
-
-        const targetInstance = pk.get(...pkArray!);
-        assert(targetInstance);
-        targetInstance[reverseProp!].push(obj);
-        // The above will (through the Proxy) also add targetInstance back to modifiedInstances, so in case
-        // it was already serialized before us, it will be serialized again. Not great, but good enough for now.
     }
     
     deserialize(obj: any, prop: string, bytes: Bytes, sourceModel: Model<unknown>) {
         const pk = this.TargetModel._pk!;
-        const pkArray = pk.deserializeKey(bytes);
-
-        if (this.reverse) {
-            // We're keeping track of all reverse links, such that when we save() the model
-            // later, we know which ones to remove.
-            const linksWithRev = sourceModel._reverseLinksToBeDeleted ||= new Map();
-            let linkSet = linksWithRev.get(this);
-            if (!linkSet) linksWithRev.set(this, linkSet = new Set());
-            // We need some way to serialize pkArray such that it can be used uniquely in a Set.
-            // JSON kind of sucks (we loose 'undefined' values, number keys, and some other things),
-            // but it's a lot easier than alternatives and relatively fast.
-            linkSet.add(JSON.stringify(pkArray));
-        }
-
+        const pkArray = pk._deserializeKey(bytes);
         const TargetModel = this.TargetModel;
 
         // Define a getter to load the model on first access
@@ -612,7 +566,6 @@ export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?:
  * Create a link type wrapper for model relationships.
  * @template T - The target model class.
  * @param TargetModel - The model class this link points to.
- * @param reverse - Optional reverse link field name for bidirectional relationships.
  * @returns A link type instance.
  * 
  * @example
@@ -626,8 +579,8 @@ export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?:
  * }
  * ```
  */
-export function link<const T extends typeof Model<any>>(TargetModel: T, reverse?: string & KeysOfType<InstanceType<T>, Model<any>[]>) {
-    return new LinkType<T>(TargetModel, reverse);
+export function link<const T extends typeof Model<any>>(TargetModel: T) {
+    return new LinkType<T>(TargetModel);
 }
 
 

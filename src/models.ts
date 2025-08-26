@@ -51,7 +51,7 @@ export const modelRegistry: Record<string, typeof Model> = {};
 export function resetModelCaches() {
     for(const model of Object.values(modelRegistry)) {
         for(const index of model._indexes || []) {
-            index.cachedIndexId = undefined;
+            index._cachedIndexId = undefined;
         }
     }
 }
@@ -200,7 +200,7 @@ function initModels() {
         }
 
         if (logLevel >= 1) {
-            console.log(`Registered model ${MockModel.tableName}[${MockModel._pk!.fieldNames.join(',')}] with fields: ${Object.keys(MockModel.fields).join(' ')}`);
+            console.log(`Registered model ${MockModel.tableName}[${MockModel._pk!._fieldNames.join(',')}] with fields: ${Object.keys(MockModel.fields).join(' ')}`);
         }
     }
 }
@@ -264,9 +264,6 @@ export abstract class Model<SUB> {
     /** @internal Field configuration for this instance. */
     _fields!: Record<string, FieldConfig<unknown>>;
 
-    /** @internal Tracking for reverse links that need deletion. */
-    _reverseLinksToBeDeleted?: Map<LinkType<any>, Set<string>>;
-
     /** 
      * @internal State tracking for this model instance:
      * - undefined: new instance, unmodified
@@ -295,32 +292,12 @@ export abstract class Model<SUB> {
         const indexes = this.constructor._indexes!;
         const originalKeys = typeof unproxiedModel._state === 'object' ? unproxiedModel._state : undefined;
         for (let i=0; i<indexes.length; i++) {
-            indexes[i].save(unproxiedModel, originalKeys?.[i]);
+            indexes[i]._save(unproxiedModel, originalKeys?.[i]);
         }
 
-        // Delete reverse links for which source links have been removed.
-        unproxiedModel._deleteReverseLinks();
-        
         unproxiedModel._state = 2; // Loaded from disk, unmodified
     }
 
-    /** @internal Handle deletion of reverse links */
-    _deleteReverseLinks() {
-        if (!this._reverseLinksToBeDeleted) return;
-        console.log(`Deleting reverse links for model ${this.constructor.name}`);
-        for(const [linkType,jsonSet] of this._reverseLinksToBeDeleted) {
-            for(const json of jsonSet) {
-                const pkArray = JSON.parse(json) as any[];
-                const reverseModel = linkType.TargetModel._pk!.get(...pkArray) as Model<unknown> | undefined;
-                assert(reverseModel);
-                const arr = (reverseModel as any)[linkType.reverse!];
-                const i = arr.indexOf(this);
-                assert(i >= 0);
-                arr.splice(i, 1);
-            }
-        }
-        delete this._reverseLinksToBeDeleted;
-    }
 
     /**
      * Load a model instance by primary key.
@@ -357,7 +334,6 @@ export abstract class Model<SUB> {
         const unproxiedModel = (this as any)[TARGET_SYMBOL] || this;
         modifiedInstances.delete(unproxiedModel);
 
-        delete unproxiedModel._reverseLinksToBeDeleted;
         unproxiedModel._state = 3; // no persist
         return this;
     }
@@ -365,8 +341,7 @@ export abstract class Model<SUB> {
     /**
      * Delete this model instance from the database.
      * 
-     * Removes the instance and all its index entries from the database,
-     * handles reverse link cleanup, and prevents further persistence.
+     * Removes the instance and all its index entries from the database and prevents further persistence.
      * 
      * @example
      * ```typescript
@@ -378,8 +353,6 @@ export abstract class Model<SUB> {
         const unproxiedModel = ((this as any)[TARGET_SYMBOL] || this) as Model<SUB>;
         
         if (this._state === 2 || typeof this._state === 'object') {
-            unproxiedModel._deleteReverseLinks();
-
             for(const index of unproxiedModel.constructor._indexes!) {
                 const key = index._getKeyFromModel(unproxiedModel, true);
                 olmdb.del(key);
