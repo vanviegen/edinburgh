@@ -18,7 +18,7 @@ class Person extends E.Model<Person> {
     age = field(E.opt(E.number), {description: "Current age", default: 42});
     cars = field(E.array(E.opt(E.string)), {description: "Owned car types"});
     test = field(E.or(E.string, E.number), {description: "Test field with union type", default: "example"});
-    owned_data = field(E.array(E.link(Data, 'subjects')), {description: "Owned data", default: () => []});
+    owned_data = field(E.array(E.link(Data)), {description: "Owned data", default: () => []});
 
     static byCombi = E.unique(Person, ["name","test"]);
     static byCar = E.unique(Person, ["cars"]);
@@ -1169,6 +1169,226 @@ test("Secondary index implementation", async () => {
         }
         expect(noResultsRange).toEqual([]);
     });
+});
+
+test("onSave callback basic functionality", async () => {
+    const callbackEvents: any[] = [];
+    
+    // Set up the callback
+    E.setOnSaveCallback((model, newKey, oldKey) => {
+        callbackEvents.push({
+            model,
+            newKey,
+            oldKey
+        });
+    });
+
+    let userId: string;
+    
+    // Test CREATE operation
+    userId = await E.transact(() => {
+        const user = new User({email: "callback@test.com", name: "Callback Test"});
+        return user.id;
+    });
+    
+    // Verify create callback was called
+    expect(callbackEvents).toHaveLength(1);
+    expect(callbackEvents[0].model).toBeInstanceOf(User);
+    expect(callbackEvents[0].model.email).toBe("callback@test.com");
+    expect(callbackEvents[0].newKey).toBeDefined();
+    expect(callbackEvents[0].oldKey).toBeUndefined();
+    
+    // Clear events for next test
+    callbackEvents.length = 0;
+    
+    // Test UPDATE operation
+    await E.transact(() => {
+        const user = User.load(userId);
+        user!.name = "Updated Name";
+    });
+    
+    // Verify update callback was called
+    expect(callbackEvents).toHaveLength(1);
+    expect(callbackEvents[0].model.name).toBe("Updated Name");
+    expect(callbackEvents[0].newKey).toBeDefined();
+    expect(callbackEvents[0].oldKey).toBeDefined();
+    // For updates, the keys should be the same (same primary key)
+    expect(callbackEvents[0].newKey).toEqual(callbackEvents[0].oldKey);
+    
+    // Clear events for next test
+    callbackEvents.length = 0;
+    
+    // Test DELETE operation
+    await E.transact(() => {
+        const user = User.load(userId);
+        user!.delete();
+    });
+    
+    // Verify delete callback was called
+    expect(callbackEvents).toHaveLength(1);
+    expect(callbackEvents[0].model.email).toBe("callback@test.com");
+    expect(callbackEvents[0].newKey).toBeUndefined();
+    expect(callbackEvents[0].oldKey).toBeDefined();
+    
+    // Clear callback for cleanup
+    E.setOnSaveCallback(undefined);
+});
+
+test("onSave callback with transaction rollback", async () => {
+    const callbackEvents: any[] = [];
+    
+    E.setOnSaveCallback((model, newKey, oldKey) => {
+        callbackEvents.push({ model, newKey, oldKey });
+    });
+    
+    // Test that callback is NOT called when transaction rolls back due to exception
+    try {
+        await E.transact(() => {
+            new User({email: "rollback@test.com", name: "Rollback Test"});
+            // Force rollback with exception
+            throw new Error("Forced rollback");
+        });
+    } catch (error: any) {
+        expect(error.message).toBe("Forced rollback");
+    }
+    
+    // Verify callback was NOT called
+    expect(callbackEvents).toHaveLength(0);
+    
+    // Verify the user was not actually created
+    await E.transact(() => {
+        const user = User.byEmail.get("rollback@test.com");
+        expect(user).toBeUndefined();
+    });
+    
+    E.setOnSaveCallback(undefined);
+});
+
+test("onSave callback with unique constraint failures", async () => {
+    const callbackEvents: any[] = [];
+    
+    E.setOnSaveCallback((model, newKey, oldKey) => {
+        callbackEvents.push({ model, newKey, oldKey });
+    });
+    
+    // First create a user successfully
+    await E.transact(() => {
+        new User({email: "unique@test.com", name: "First User"});
+    });
+    
+    // Verify first creation callback was called
+    expect(callbackEvents).toHaveLength(1);
+    callbackEvents.length = 0; // Clear for next test
+    
+    // Test that callback is NOT called when transaction rolls back due to unique constraint violation
+    try {
+        await E.transact(() => {
+            // Try to create another user with same email (should violate unique constraint)
+            new User({email: "unique@test.com", name: "Duplicate User"});
+        });
+        expect(true).toBe(false); // Should not reach here
+    } catch (error: any) {
+        expect(error.code).toBe("UNIQUE_CONSTRAINT");
+    }
+    
+    // Verify callback was NOT called for the failed transaction
+    expect(callbackEvents).toHaveLength(0);
+    
+    // Verify only the first user exists
+    await E.transact(() => {
+        const user = User.byEmail.get("unique@test.com");
+        expect(user).toBeDefined();
+        expect(user!.name).toBe("First User");
+    });
+    
+    E.setOnSaveCallback(undefined);
+});
+
+test("onSave callback with multiple models", async () => {
+    const callbackEvents: any[] = [];
+    
+    E.setOnSaveCallback((model, newKey, oldKey) => {
+        callbackEvents.push({
+            model,
+            newKey,
+            oldKey
+        });
+    });
+    
+    let userId: string, postId: string;
+    
+    // Test multiple creates in one transaction
+    await E.transact(() => {
+        const user = new User({email: "multi@test.com", name: "Multi Test"});
+        const post = new Post({
+            title: "Test Post",
+            content: "Test content", 
+            author: user
+        });
+        userId = user.id;
+        postId = post.id;
+    });
+    
+    // Verify both callbacks were called
+    expect(callbackEvents).toHaveLength(2);
+    
+    // Verify the models are the right types
+    const userEvent = callbackEvents.find(e => e.model instanceof User);
+    const postEvent = callbackEvents.find(e => e.model instanceof Post);
+    expect(userEvent).toBeDefined();
+    expect(postEvent).toBeDefined();
+    expect(userEvent!.model.email).toBe("multi@test.com");
+    expect(postEvent!.model.title).toBe("Test Post");
+    
+    // Clear events for next test
+    callbackEvents.length = 0;
+    
+    // Test multiple updates in one transaction
+    await E.transact(() => {
+        const user = User.load(userId);
+        const post = Post.load(postId);
+        user!.name = "Updated Multi Test";
+        post!.title = "Updated Test Post";
+    });
+    
+    // Verify both update callbacks were called
+    expect(callbackEvents).toHaveLength(2);
+    
+    // Clear events for next test
+    callbackEvents.length = 0;
+    
+    // Test mixed operations in one transaction
+    await E.transact(() => {
+        const user = User.load(userId);
+        const post = Post.load(postId);
+        
+        // Delete the post
+        post!.delete();
+        
+        // Update the user
+        user!.name = "Final Update";
+        
+        // Create a new user
+        new User({email: "mixed@test.com", name: "Mixed Test"});
+    });
+    
+    // Verify all three callbacks were called
+    expect(callbackEvents).toHaveLength(3);
+    
+    // Verify the operations by checking the key patterns
+    expect(callbackEvents[0].newKey).toBeUndefined(); // delete
+    expect(callbackEvents[0].model instanceof Post).toBe(true);
+    
+    expect(callbackEvents[1].newKey).toBeDefined(); // update 
+    expect(callbackEvents[1].oldKey).toBeDefined();
+    expect(callbackEvents[1].model instanceof User).toBe(true);
+    expect(callbackEvents[1].model.email).toBe("multi@test.com");
+    
+    expect(callbackEvents[2].oldKey).toBeUndefined(); // create
+    expect(callbackEvents[2].model instanceof User).toBe(true);
+    expect(callbackEvents[2].model.email).toBe("mixed@test.com");
+    
+    E.setOnSaveCallback(undefined);
 });
 
 

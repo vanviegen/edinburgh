@@ -6,6 +6,7 @@ export {
     Model,
     registerModel,
     field,
+    setOnSaveCallback
 } from "./models.js";
 
 

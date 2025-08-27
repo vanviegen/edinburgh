@@ -115,9 +115,10 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @param MyModel - The model class this index belongs to.
      * @param _fieldNames - Array of field names that make up this index.
      */
-    constructor(MyModel: M, public _fieldNames: F) {
+    constructor(MyModel: M, public _fieldNames: F, isPrimary: boolean=false) {
         this._MyModel = MyModel = getMockModel(MyModel);
-        (MyModel._indexes ||= []).push(this);
+        // The primary key should be [0] in _indexes
+        (MyModel._indexes ||= [])[isPrimary ? 'unshift' : 'push'](this);
     }
 
     _cachedIndexId?: number;
@@ -371,7 +372,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @param model - Model instance to save.
      * @param originalKey - Original key if updating.
      */
-    abstract _save(model: InstanceType<M>, originalKey?: Uint8Array): void;
+    abstract _save(model: InstanceType<M>, originalKey?: Uint8Array): Uint8Array | undefined;
 
     abstract _getTypeName(): string;
 }
@@ -390,7 +391,7 @@ function toArray<T>(args: T): T extends readonly any[] ? T : [T] {
 export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
     
     constructor(MyModel: M, fieldNames: F) {
-        super(MyModel, fieldNames);
+        super(MyModel, fieldNames, true);
         if (MyModel._pk && MyModel._pk !== this) {
             throw new DatabaseError(`Model ${MyModel.tableName} already has a primary key defined`, 'INIT_ERROR');
         }
@@ -470,7 +471,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
      * @param model - Model instance.
      * @param originalKey - Original key if updating.
      */
-    _save(model: InstanceType<M>, originalKey?: Uint8Array) {
+    _save(model: InstanceType<M>, originalKey?: Uint8Array): Uint8Array {
         // Note: this can (and usually will) be called on the non-proxied model instance.
         assert(this._MyModel.prototype === model.constructor.prototype);
         
@@ -492,6 +493,8 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
             let indexId = keyBytes.readNumber();
             console.log(`Saved primary ${this._MyModel.tableName}[${this._fieldNames.join(', ')}] (id=${indexId}) with key`, this._deserializeKey(keyBytes), keyBytes.getBuffer());
         }
+        
+        return newKey;
     }
 
     _getTypeName(): string {
@@ -551,7 +554,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
      * @param model - Model instance.
      * @param originalKey - Original key if updating.
      */
-    _save(model: InstanceType<M>, originalKey?: Uint8Array) {
+    _save(model: InstanceType<M>, originalKey?: Uint8Array): Uint8Array | undefined {
         // Note: this can (and usually will) be called on the non-proxied model instance.
         assert(this._MyModel.prototype === model.constructor.prototype);
 
@@ -560,7 +563,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         if (originalKey) {
             if (newKey && Buffer.compare(newKey, originalKey) === 0) {
                 // No change in index key, nothing to do
-                return;
+                return newKey;
             }
             olmdb.del(originalKey);
         }
@@ -581,6 +584,8 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         if (logLevel >= 2) {
             console.log(`Saved unique index ${this._MyModel.tableName}[${this._fieldNames.join(', ')}] with key ${newKey}`);
         }
+        
+        return newKey;
     }
 
     _getTypeName(): string {
@@ -603,7 +608,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
      * @param model - Model instance.
      * @param originalKey - Original key if updating.
      */
-    _save(model: InstanceType<M>, originalKey?: Uint8Array) {
+    _save(model: InstanceType<M>, originalKey?: Uint8Array): Uint8Array | undefined {
         // Note: this can (and usually will) be called on the non-proxied model instance.
         assert(this._MyModel.prototype === model.constructor.prototype);
 
@@ -628,6 +633,8 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
         if (logLevel >= 2) {
             console.log(`Saved secondary index ${this._MyModel.tableName}[${this._fieldNames.join(', ')}] with key ${newKey}`);
         }
+
+        return newKey;
     }
 
     /**

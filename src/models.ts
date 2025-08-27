@@ -1,7 +1,6 @@
-import { Bytes } from "./bytes.js";
 import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
-import { TypeWrapper, identifier, LinkType, or } from "./types.js";
+import { TypeWrapper, identifier } from "./types.js";
 import { BaseIndex, TARGET_SYMBOL, PrimaryIndex } from "./indexes.js";
 import { assert, addErrorPath, logLevel } from "./utils.js";
 
@@ -61,6 +60,38 @@ function isObjectEmpty(obj: object) {
         if (obj.hasOwnProperty(key)) return false;
     }
     return true;
+}
+
+type OnSaveType = (model: InstanceType<typeof Model>, newKey: Uint8Array | undefined, oldKey: Uint8Array | undefined) => void;
+let onSave: OnSaveType | undefined;
+/**
+ * Set a callback function to be called after a model is saved and committed.
+ *
+ * @param callback The callback function to set. As arguments, it receives the model instance, the new key (undefined in case of a delete), and the old key (undefined in case of a create).
+ */
+export function setOnSaveCallback(callback: OnSaveType | undefined) {
+    onSave = callback;
+}
+const onSaveQueue: [InstanceType<typeof Model>, Uint8Array | undefined, Uint8Array | undefined][] = [];
+function onSaveRevert() {
+    onSaveQueue.length = 0;
+}
+function onSaveCommit() {
+    if (onSave) {
+        for(let arr of onSaveQueue) {
+            onSave(...arr);
+        }
+    }
+    onSaveQueue.length = 0;
+}
+function queueOnSave(arr: [InstanceType<typeof Model>, Uint8Array | undefined, Uint8Array | undefined]) {
+    if (onSave) {
+        if (!onSaveQueue.length) {
+            olmdb.onCommit(onSaveCommit);
+            olmdb.onRevert(onSaveRevert);
+        }
+        onSaveQueue.push(arr);
+    }
 }
 
 /**
@@ -247,7 +278,7 @@ export interface Model<SUB> {
 export abstract class Model<SUB> {
     /** @internal Primary key index for this model. */
     static _pk?: PrimaryIndex<any, any>;
-    /** @internal All indexes for this model. */
+    /** @internal All indexes for this model, the primary key being first. */
     static _indexes?: BaseIndex<any, any>[];
 
     /** The database table name (defaults to class name). */
@@ -291,9 +322,12 @@ export abstract class Model<SUB> {
         // Handle unique indexes
         const indexes = this.constructor._indexes!;
         const originalKeys = typeof unproxiedModel._state === 'object' ? unproxiedModel._state : undefined;
-        for (let i=0; i<indexes.length; i++) {
+        const newPk = indexes[0]._save(unproxiedModel, originalKeys?.[0]);
+        for (let i=1; i<indexes.length; i++) {
             indexes[i]._save(unproxiedModel, originalKeys?.[i]);
         }
+
+        queueOnSave([this, newPk, originalKeys?.[0]]);
 
         unproxiedModel._state = 2; // Loaded from disk, unmodified
     }
@@ -356,6 +390,7 @@ export abstract class Model<SUB> {
             for(const index of unproxiedModel.constructor._indexes!) {
                 const key = index._getKeyFromModel(unproxiedModel, true);
                 olmdb.del(key);
+                if (index instanceof PrimaryIndex) queueOnSave([this, undefined, key]);
             }
         }
 
