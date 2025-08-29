@@ -4,14 +4,14 @@
     "": {
       "name": "edinburgh",
       "dependencies": {
-        "olmdb": "^0.2.17",
-        "readme-tsdoc": "^1.1.4",
+        "olmdb": "^0.2.18",
       },
       "devDependencies": {
         "@jest/globals": "^30.0.3",
         "@types/bun": "^1.2.16",
         "@types/node": "^22.10.6",
         "jest": "^30.0.5",
+        "readme-tsdoc": "^1.1.4",
         "typescript": "^5.8.3",
       },
     },
@@ -544,7 +544,7 @@
 
     "npm-run-path": ["npm-run-path@4.0.1", "", { "dependencies": { "path-key": "^3.0.0" } }, "sha512-S48WzZW777zhNIrn7gxOlISNAqi9ZC/uQFnRdbeIHhZhCA6UqpkOT8T1G7BvfdgP4Er8gF4sUbaS0i7QvIfCWw=="],
 
-    "olmdb": ["olmdb@0.2.17", "", { "dependencies": { "node-gyp": "^11.2.0", "readme-tsdoc": "^1.1.4" } }, "sha512-ZPkhQ3/BgPBzCaun6oP7rZUQL2enRso1HSDdVWKv659m1/8oUZ8/uK2L48HRkL/xEgphiBYXigL0cdX7np9mdQ=="],
+    "olmdb": ["olmdb@0.2.18", "", { "dependencies": { "node-gyp": "^11.2.0", "readme-tsdoc": "^1.1.4" } }, "sha512-lMMYusf7n6Vxj+uFsPDEnRfLDJAacAu7LPCbDPZcdzacchjeevNOWbaXd2ippp1bQs2PbQ3PMaQ74GOBR+xsUg=="],
 
     "once": ["once@1.4.0", "", { "dependencies": { "wrappy": "1" } }, "sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w=="],
 
