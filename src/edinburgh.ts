@@ -1,14 +1,15 @@
 import * as olmdb from "olmdb";
-import { Model, MODIFIED_INSTANCES_SYMBOL, resetModelCaches } from "./models.js";
+import { Model, INSTANCES_SYMBOL, resetModelCaches } from "./models.js";
+import { INSTANCES_BY_PK_SYMBOL } from "./indexes.js";
 
 // Re-export public API from models
 export {
     Model,
     registerModel,
     field,
-    setOnSaveCallback
 } from "./models.js";
 
+import type { ChangedModel } from "./models.js";
 
 // Re-export public API from types (only factory functions and instances)
 export {
@@ -39,7 +40,6 @@ export { BaseIndex, UniqueIndex, PrimaryIndex } from './indexes.js';
 // Re-export from OLMDB
 export { init, onCommit, onRevert, getTransactionData, setTransactionData, DatabaseError } from "olmdb";
 
-
 /**
 * Executes a function within a database transaction context.
 * 
@@ -63,7 +63,7 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
 * @example
 * ```typescript
 * const paid = await E.transact(() => {
-*   const user = User.load("john_doe");
+*   const user = User.pk.get("john_doe");
 *   // This is concurrency-safe - the function will rerun if it is raced by another transaction
 *   if (user.credits > 0) {
 *     user.credits--;
@@ -80,34 +80,67 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
 * });
 * ```
 */
-export function transact<T>(fn: () => T): Promise<T> {
-    return olmdb.transact(() => {
-        const modifiedInstances = new Set<Model<any>>();
-        olmdb.setTransactionData(MODIFIED_INSTANCES_SYMBOL, modifiedInstances);
-        
-        const savedInstances: Set<Model<any>> = new Set();
-        try {
-            const result = fn();
-            // Save all modified instances before committing.
-            while(modifiedInstances.size > 0) {
-                // Back referencing can cause models to be scheduled for save() a second time,
-                // which is why we require the outer loop.
-                for (const instance of modifiedInstances) {
-                    instance._save();
-                    savedInstances.add(instance);
-                    modifiedInstances.delete(instance);
-                }
-            }
+export async function transact<T>(fn: () => T): Promise<T> {
+    try {
+        const onSaveQueue: ChangedModel[] | undefined = onSaveCallback ? [] : undefined;
+        return await olmdb.transact(async (): Promise<T> => {
+            const instances = new Set<Model<any>>();
+            olmdb.setTransactionData(INSTANCES_SYMBOL, instances);
+            olmdb.setTransactionData(INSTANCES_BY_PK_SYMBOL, new Map());
             
-            return result;
-        } catch (error) {
-            // Discard changes on all saved and still unsaved instances
-            for (const instance of savedInstances) instance.preventPersist();
-            for (const instance of modifiedInstances) instance.preventPersist();
-            throw error;
-        }
-    });
+            const savedInstances: Set<Model<any>> = new Set();
+            try {
+                const result = await fn();
+                // Save all modified instances before committing.
+                while(instances.size > 0) {
+                    // Back referencing can cause models to be scheduled for save() a second time,
+                    // which is why we require the outer loop.
+                    for (const instance of instances) {
+                        instance._onCommit(onSaveQueue);
+                        savedInstances.add(instance);
+                        instances.delete(instance);
+                    }
+                }
+                if (onSaveQueue?.length) {
+                    olmdb.onCommit((commitId: number) => {
+                        if (onSaveCallback) onSaveCallback(commitId, onSaveQueue);
+                    });
+                }
+                
+                return result;
+            } catch (error) {
+                // Discard changes on all saved and still unsaved instances
+                for (const instance of savedInstances) instance.preventPersist();
+                for (const instance of instances) instance.preventPersist();
+                throw error;
+            }
+        });
+    } catch (e: Error | any) {
+        // This hackery is required to provide useful stack traces. Without this,
+        // both Bun and Node (even with --async-stack-traces) don't show which
+        // line called the transact(), which is pretty important info when validation
+        // fails, for instance. Though the line numbers in Bun still don't really
+        // make sense. Probably this bug: https://github.com/oven-sh/bun/issues/15859
+        e.stack += "\nat async:\n" + new Error().stack?.replace(/^.*?\n/, '');
+        throw e;
+    }
 }
+
+let onSaveCallback: ((commitId: number, items: ChangedModel[]) => void) | undefined;
+
+/**
+ * Set a callback function to be called after a model is saved and committed.
+ *
+ * @param callback The callback function to set. It gets called after each successful
+ * `transact()` commit that has changes, with the following arguments:
+ *   - A sequential number. Higher numbers have been committed after lower numbers.
+ *   - An array of model instances that have been modified, created, or deleted.
+ *     You can used its {@link Model.changed} property to figure out what changed.
+ */
+export function setOnSaveCallback(callback: ((commitId: number, items: ChangedModel[]) => void) | undefined) {
+    onSaveCallback = callback;
+}
+
 
 export async function deleteEverything(): Promise<void> {
     await olmdb.transact(() => {

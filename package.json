@@ -3,11 +3,10 @@
   "version": "0.1.3",
   "author": "Frank van Viegen",
   "devDependencies": {
-    "@jest/globals": "^30.0.3",
     "@types/bun": "^1.2.16",
     "@types/node": "^22.10.6",
-    "jest": "^30.0.5",
     "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
     "readme-tsdoc": "^1.1.4"
   },
   "exports": {
@@ -41,8 +40,9 @@
   "scripts": {
     "build": "rm -rf build && tsc",
     "test": "npm run test:bun && npm run test:node",
-    "test:bun": "bun test",
-    "test:node": "npm run build && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
+    "test:watch": "bun x vitest --bail 1 --watch --silent=passed-only",
+    "test:bun": "bun test --bail",
+    "test:node": "bun x vitest --bail 1 --watch=false --silent=passed-only",
     "prepack": "npm run build && npm run test && npm run readme-tsdoc",
     "readme-tsdoc": "readme-tsdoc --repo-url https://github.com/vanviegen/edinburgh"
   },
@@ -51,6 +51,6 @@
   ],
   "type": "module",
   "dependencies": {
-    "olmdb": "^0.2.18"
+    "olmdb": "^0.2.19"
   }
 }

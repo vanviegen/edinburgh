@@ -1,8 +1,9 @@
-import { DatabaseError } from "olmdb";
 import * as olmdb from "olmdb";
+import { DatabaseError } from "olmdb";
 import { TypeWrapper, identifier } from "./types.js";
-import { BaseIndex, TARGET_SYMBOL, PrimaryIndex } from "./indexes.js";
-import { assert, addErrorPath, logLevel } from "./utils.js";
+import { BaseIndex as BaseIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
+import { addErrorPath, logLevel, tryDelayedInits, delayedInits } from "./utils.js";
+import { on } from "events";
 
 /**
  * Configuration interface for model fields.
@@ -44,62 +45,30 @@ export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> 
 }
 
 // Model registration and initialization
-let uninitializedModels = new Set<typeof Model<unknown>>();
 export const modelRegistry: Record<string, typeof Model> = {};
 
 export function resetModelCaches() {
     for(const model of Object.values(modelRegistry)) {
-        for(const index of model._indexes || []) {
+        for(const index of model._secondaries || []) {
             index._cachedIndexId = undefined;
         }
+        delete model._primary?._cachedIndexId;
     }
 }
 
 function isObjectEmpty(obj: object) {
-    for (let key in obj) {
-        if (obj.hasOwnProperty(key)) return false;
+    for (let _ of Object.keys(obj)) {
+        return false;
     }
     return true;
 }
 
-type OnSaveType = (model: InstanceType<typeof Model>, newKey: Uint8Array | undefined, oldKey: Uint8Array | undefined) => void;
-let onSave: OnSaveType | undefined;
-/**
- * Set a callback function to be called after a model is saved and committed.
- *
- * @param callback The callback function to set. As arguments, it receives the model instance, the new key (undefined in case of a delete), and the old key (undefined in case of a create).
- */
-export function setOnSaveCallback(callback: OnSaveType | undefined) {
-    onSave = callback;
-}
-const onSaveQueue: [InstanceType<typeof Model>, Uint8Array | undefined, Uint8Array | undefined][] = [];
-function onSaveRevert() {
-    onSaveQueue.length = 0;
-}
-function onSaveCommit() {
-    if (onSave) {
-        for(let arr of onSaveQueue) {
-            onSave(...arr);
-        }
-    }
-    onSaveQueue.length = 0;
-}
-function queueOnSave(arr: [InstanceType<typeof Model>, Uint8Array | undefined, Uint8Array | undefined]) {
-    if (onSave) {
-        if (!onSaveQueue.length) {
-            olmdb.onCommit(onSaveCommit);
-            olmdb.onRevert(onSaveRevert);
-        }
-        onSaveQueue.push(arr);
-    }
+export type ChangedModel = Model<unknown> & {
+    changed: Record<any, any> | "updated" | "deleted";
 }
 
 /**
  * Register a model class with the Edinburgh ORM system.
- * 
- * This decorator function transforms the model class to use a proxy-based constructor
- * that enables change tracking and automatic field initialization. It also extracts
- * field metadata and sets up default values on the prototype.
  * 
  * @template T - The model class type.
  * @param MyModel - The model class to register.
@@ -125,8 +94,6 @@ export function registerModel<T extends typeof Model<unknown>>(MyModel: T): T {
         }
     }
 
-    // Initialize an empty `fields` object, and set it on both constructors, as well as on the prototype.
-    MockModel.fields = MockModel.prototype._fields = {};
     MockModel.tableName ||= MyModel.name; // Set the table name to the class name if not already set
 
     // Register the constructor by name
@@ -134,10 +101,10 @@ export function registerModel<T extends typeof Model<unknown>>(MyModel: T): T {
     modelRegistry[MockModel.tableName] = MockModel;
 
     // Attempt to instantiate the class and gather field metadata
-    uninitializedModels.add(MyModel);
-    initModels();
+    delayedInits.add(MyModel);
+    tryDelayedInits();
 
-    return MockModel;
+    return MockModel;   
 }
 
 export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
@@ -145,17 +112,16 @@ export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     if (AnyOrgModel._isMock) return OrgModel;
     if (AnyOrgModel._mock) return AnyOrgModel._mock;
 
-    const MockModel = function (this: any, initial?: Record<string,any>) {
-        if (uninitializedModels.has(this.constructor)) {
+    const name =  OrgModel.tableName || OrgModel.name;
+    const MockModel = function(this: any, initial?: Record<string,any>) {
+        if (delayedInits.has(this.constructor)) {
             throw new DatabaseError("Cannot instantiate while linked models haven't been registered yet", 'INIT_ERROR');
         }
         if (initial && !isObjectEmpty(initial)) {
             Object.assign(this, initial);
-            const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
-            modifiedInstances.add(this);
         }
-
-        return new Proxy(this, modificationTracker);
+        const instances = olmdb.getTransactionData(INSTANCES_SYMBOL) as Set<Model<any>>;
+        instances.add(this);
     } as any as T;
 
     // We want .constructor to point at our fake constructor function.
@@ -169,78 +135,11 @@ export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     return MockModel;
 }
 
-function initModels() {
-    for(const OrgModel of uninitializedModels) {
-        const MockModel = getMockModel(OrgModel);
-        // Create an instance (the only one to ever exist) of the actual class,
-        // in order to gather field config data. 
-        let instance;
-        try {
-            instance = new (OrgModel as any)(INIT_INSTANCE_SYMBOL);
-        } catch(e) {
-            if (!(e instanceof ReferenceError)) throw e;
-            // ReferenceError: Cannot access 'SomeLinkedClass' before initialization.
-            // We'll try again after the next class has successfully initialized.
-            continue;
-        }
-
-        uninitializedModels.delete(OrgModel);
-
-        // If no primary key exists, create one using 'id' field
-        if (!MockModel._pk) {
-            // If no `id` field exists, add it automatically
-            if (!instance.id) {
-                instance.id = { type: identifier }; 
-            }
-            // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
-            new PrimaryIndex(MockModel, ['id']);
-        }
-
-        for (const key in instance) {
-            const value = instance[key] as FieldConfig<unknown>;
-            // Check if this property contains field metadata
-            if (value && value.type instanceof TypeWrapper) {
-                // Set the configuration on the constructor's `fields` property
-                MockModel.fields[key] = value;
-
-                // Set default value on the prototype
-                const defObj = value.default===undefined ? value.type : value;
-                const def = defObj.default;
-                if (typeof def === 'function') {
-                    // The default is a function. We'll define a getter on the property in the model prototype,
-                    // and once it is read, we'll run the function and set the value as a plain old property
-                    // on the instance object.
-                    Object.defineProperty(MockModel.prototype, key, {    
-                        get() {
-                            // This will call set(), which will define the property on the instance.
-                            return (this[key] = def.call(defObj, this));
-                        },
-                        set(val: any) {
-                            Object.defineProperty(this, key, {
-                                value: val,
-                                configurable: true,
-                                writable: true
-                            })
-                        },
-                        configurable: true,    
-                    });
-                } else if (def !== undefined) {
-                    (MockModel.prototype as any)[key] = def;
-                }
-            }
-        }
-
-        if (logLevel >= 1) {
-            console.log(`Registered model ${MockModel.tableName}[${MockModel._pk!._fieldNames.join(',')}] with fields: ${Object.keys(MockModel.fields).join(' ')}`);
-        }
-    }
-}
-
 // Model base class and related symbols/state
 const INIT_INSTANCE_SYMBOL = Symbol();
 
 /** @internal Symbol used to attach modified instances to running transaction */
-export const MODIFIED_INSTANCES_SYMBOL = Symbol('modifiedInstances');
+export const INSTANCES_SYMBOL = Symbol('instances');
 
 /** @internal Symbol used to access the underlying model from a proxy */
 
@@ -275,16 +174,19 @@ export interface Model<SUB> {
  * }
  * ```
  */
+
+
 export abstract class Model<SUB> {
-    /** @internal Primary key index for this model. */
-    static _pk?: PrimaryIndex<any, any>;
-    /** @internal All indexes for this model, the primary key being first. */
-    static _indexes?: BaseIndex<any, any>[];
+    static _primary: PrimaryIndex<any, any>;
+
+    /** @internal All non-primary indexes for this model. */
+    static _secondaries?: BaseIndex<any, readonly (keyof any & string)[]>[];
 
     /** The database table name (defaults to class name). */
     static tableName: string;
+
     /** Field configuration metadata. */
-    static fields: Record<string, FieldConfig<unknown>>;
+    static fields: Record<string | symbol | number, FieldConfig<unknown>>;
 
     /*
      * IMPORTANT: We cannot use instance property initializers here, because we will be
@@ -292,18 +194,26 @@ export abstract class Model<SUB> {
      * intentional, as we don't want to run the initializers for the fields.
      */
     
-    /** @internal Field configuration for this instance. */
-    _fields!: Record<string, FieldConfig<unknown>>;
-
     /** 
-     * @internal State tracking for this model instance:
-     * - undefined: new instance, unmodified
-     * - 1: new instance, modified (and in modifiedInstances)
-     * - 2: loaded from disk, unmodified
-     * - 3: persistence disabled
-     * - array: loaded from disk, modified (and in modifiedInstances), array values are original index buffers
+     * @internal
+     * - !_oldValues: New instance, not yet saved.
+     * - _oldValues && _primaryKey: Loaded (possibly only partial, still lazy) from disk, _oldValues contains (partial) old values
      */
-    _state: undefined | 1 | 2 | 3 | Array<Uint8Array>;
+    _oldValues: Partial<Model<SUB>> | undefined;
+    _primaryKey: Uint8Array | undefined;
+
+    /**
+     * This property can be used in `setOnSave` callbacks to determine how a model instance has changed.
+     * If the value is undefined, the instance has been created. If it's "deleted" the instance has
+     * been deleted. If its an object, the instance has been modified and the object contains the old values.
+     * 
+     * Note: this property should **not** be accessed *during* a `transact()` -- it's state is an implementation
+     * detail that may change semantics at any minor release.
+     */
+    changed?: Record<any,any> | "deleted" | "created";
+
+    // Reference the static `fields` property; the mock constructor copies it here for performance
+    _fields!: Record<string | symbol | number, FieldConfig<unknown>>;
 
     constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
         // This constructor will only be called once, from `initModels`. All other instances will
@@ -313,46 +223,178 @@ export abstract class Model<SUB> {
         }
     }
 
-    _save() {
-        // For performance, we'll work on the unproxied object, as we know we don't require change tracking for save.
-        const unproxiedModel = ((this as any)[TARGET_SYMBOL] || this) as Model<SUB>;
-
-        unproxiedModel.validate(true);
-
-        // Handle unique indexes
-        const indexes = this.constructor._indexes!;
-        const originalKeys = typeof unproxiedModel._state === 'object' ? unproxiedModel._state : undefined;
-        const newPk = indexes[0]._save(unproxiedModel, originalKeys?.[0]);
-        for (let i=1; i<indexes.length; i++) {
-            indexes[i]._save(unproxiedModel, originalKeys?.[i]);
+    static _delayedInit(): boolean {
+        const MockModel = getMockModel(this);
+        // Create an instance (the only one to ever exist) of the actual class,
+        // in order to gather field config data. 
+        let instance;
+        try {
+            instance = new (this as any)(INIT_INSTANCE_SYMBOL);
+        } catch(e) {
+            if (!(e instanceof ReferenceError)) throw e;
+            // ReferenceError: Cannot access 'SomeLinkedClass' before initialization.
+            // We'll try again after the next class has successfully initialized.
+            return false;
         }
 
-        queueOnSave([this, newPk, originalKeys?.[0]]);
+        // If no primary key exists, create one using 'id' field
+        if (!MockModel._primary) {
+            // If no `id` field exists, add it automatically
+            if (!instance.id) {
+                instance.id = { type: identifier }; 
+            }
+            // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
+            new PrimaryIndex(MockModel, ['id']);
+        }
 
-        unproxiedModel._state = 2; // Loaded from disk, unmodified
+        MockModel.fields = MockModel.prototype._fields = {};
+        for (const key in instance) {
+            const value = instance[key] as FieldConfig<unknown>;
+            // Check if this property contains field metadata
+            if (value && value.type instanceof TypeWrapper) {
+                // Set the configuration on the constructor's `fields` property
+                MockModel.fields[key] = value;
+
+                // Set default value on the prototype
+                const defObj = value.default===undefined ? value.type : value;
+                const def = defObj.default;
+                if (typeof def === 'function') {
+                    // The default is a function. We'll define a getter on the property in the model prototype,
+                    // and once it is read, we'll run the function and set the value as a plain old property
+                    // on the instance object.
+                    Object.defineProperty(MockModel.prototype, key, {    
+                        get() {
+                            // This will call set(), which will define the property on the instance.
+                            return (this[key] = def.call(defObj, this));
+                        },
+                        set(val: any) {
+                            Object.defineProperty(this, key, {
+                                value: val,
+                                configurable: true,
+                                writable: true,
+                                enumerable: true,
+                            })
+                        },
+                        configurable: true,    
+                    });
+                } else if (def !== undefined) {
+                    (MockModel.prototype as any)[key] = def;
+                }
+            }
+        }
+
+        if (logLevel >= 1) {
+            console.log(`Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
+        }
+
+        return true;
     }
 
+    _setLoadedField(fieldName: string, value: any) {
+        const orgValues = this._oldValues ||= Object.create(Object.getPrototypeOf(this));
+        if (orgValues.hasOwnProperty(fieldName)) return; // Already loaded earlier (as part of index key?)
+
+        const fieldType = (this._fields[fieldName] as FieldConfig<unknown>).type;
+        this[fieldName as keyof Model<SUB>] = value;
+        orgValues[fieldName] = fieldType.clone(value);
+    }
 
     /**
-     * Load a model instance by primary key.
-     * @param args - Primary key field values.
-     * @returns The model instance if found, undefined otherwise.
-     * 
-     * @example
-     * ```typescript
-     * const user = User.load("user123");
-     * const post = Post.load("post456", "en");
-     * ```
+     * @returns The primary key for this instance, or undefined if not yet saved.
      */
-    static load<SUB>(this: typeof Model<SUB>, ...args: any[]): SUB | undefined {
-        return this._pk!.get(...args);
+    getPrimaryKey(): Uint8Array | undefined {
+        return this._primaryKey;
+    }
+
+    _getCreatePrimaryKey(): Uint8Array {
+        return this._primaryKey ||= this.constructor._primary!._instanceToKeySingleton(this);
+    }
+
+    isLazyField(field: keyof this) {
+        const descr = this.constructor._primary!._lazyDescriptors[field];
+        return !!(descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, field)?.get);
+    }
+
+    _onCommit(onSaveQueue: ChangedModel[] | undefined) {
+        const oldValues = this._oldValues;
+        let changed : Record<any, any> | "created" | "deleted";
+
+        if (oldValues)  {
+            // We're doing an update. Note that we may still be in a lazy state, and we don't want to load
+            // the whole object just to see if something changed.
+
+            //  Delete all items from this.changed that have not actually changed.
+            const fields = this._fields;
+            changed = {};
+            for(const fieldName of Object.keys(oldValues) as Iterable<keyof Model<SUB>>) {
+                const oldValue = oldValues[fieldName];
+                if (!(fields[fieldName] as FieldConfig<unknown>).type.equals(this[fieldName], oldValue)) {
+                    changed[fieldName] = oldValue;
+                }
+            }
+            if (isObjectEmpty(changed)) return; // No changes, nothing to do
+
+            // Make sure primary has not been changed
+            for (const field of this.constructor._primary!._fieldTypes.keys()) {
+                if (changed.hasOwnProperty(field)) {
+                    throw new DatabaseError(`Cannot modify primary key field: ${field}`, "CHANGE_PRIMARY");
+                }
+            }
+
+            // We have changes. Now it's okay for any lazy fields to be loaded (which the validate will trigger).
+
+            // Raise any validation errors
+            this.validate(true);
+
+            // Update the primary index
+            this.constructor._primary!._write(this);
+
+            // Update any secondaries with changed fields
+            for (const index of this.constructor._secondaries || []) {
+                for (const field of index._fieldTypes.keys()) {
+                    if (changed.hasOwnProperty(field)) {
+                        // We need to update this index - first delete the old one
+                        index._delete(oldValues);
+                        index._write(this)
+                        break;
+                    }
+                }
+            }
+        } else if (this._primaryKey) { // Deleted instance
+            this.constructor._primary._delete(this);
+            for(const index of this.constructor._secondaries || []) {
+                index._delete(this);
+            }
+            changed = "deleted";
+        } else {
+            // New instance
+            // Raise any validation errors
+            this.validate(true);
+
+            // Make sure the primary key does not already exist
+            if (olmdb.get(this._getCreatePrimaryKey())) {
+                throw new DatabaseError("Unique constraint violation", "UNIQUE_CONSTRAINT");
+            }
+
+            // Insert the primary index
+            this.constructor._primary!._write(this);
+
+            // Insert all secondaries
+            for (const index of this.constructor._secondaries || []) {
+                index._write(this);
+            }
+
+            changed = "created";
+        }
+
+        if (onSaveQueue) {
+            this.changed = changed;
+            onSaveQueue.push(this as ChangedModel);
+        }
     }
 
     /**
      * Prevent this instance from being persisted to the database.
-     * 
-     * Removes the instance from the modified instances set and disables
-     * automatic persistence at transaction commit.
      * 
      * @returns This model instance for chaining.
      * 
@@ -364,12 +406,19 @@ export abstract class Model<SUB> {
      * ```
      */
     preventPersist() {
-        const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
-        const unproxiedModel = (this as any)[TARGET_SYMBOL] || this;
-        modifiedInstances.delete(unproxiedModel);
-
-        unproxiedModel._state = 3; // no persist
+        const instances = olmdb.getTransactionData(INSTANCES_SYMBOL) as Set<Model<any>>;
+        instances.delete(this);
         return this;
+    }
+
+    /**
+     * Find all instances of this model in the database, ordered by primary key.
+     * @param opts - Optional parameters.
+     * @param opts.reverse - If true, iterate in reverse order.
+     * @returns An iterator.
+     */
+    static findAll<T extends typeof Model<unknown>>(this: T, opts?: {reverse?: boolean}): IndexRangeIterator<T> {
+        return this._primary!.find(opts);
     }
 
     /**
@@ -384,17 +433,8 @@ export abstract class Model<SUB> {
      * ```
      */
     delete() {
-        const unproxiedModel = ((this as any)[TARGET_SYMBOL] || this) as Model<SUB>;
-        
-        if (this._state === 2 || typeof this._state === 'object') {
-            for(const index of unproxiedModel.constructor._indexes!) {
-                const key = index._getKeyFromModel(unproxiedModel, true);
-                olmdb.del(key);
-                if (index instanceof PrimaryIndex) queueOnSave([this, undefined, key]);
-            }
-        }
-
-        this.preventPersist();
+        if (!this._primaryKey) throw new DatabaseError("Cannot delete unsaved instance", "NOT_SAVED");
+        this._oldValues = undefined;
     }
 
     /**
@@ -411,14 +451,15 @@ export abstract class Model<SUB> {
      * }
      * ```
      */
-    validate(raise: boolean = false): DatabaseError[] {
-        const errors: DatabaseError[] = [];
+    validate(raise: boolean = false): Error[] {
+        const errors: Error[] = [];
         
         for (const [key, fieldConfig] of Object.entries(this._fields)) {
-            for (const error of fieldConfig.type.getErrors(this, key)) {
-                addErrorPath(error, key);
-                if (raise) throw error;
-                errors.push(error);
+            let e = fieldConfig.type.getError((this as any)[key]);
+            if (e) {
+                e = addErrorPath(e, this.constructor.tableName+"."+key);
+                if (raise) throw e;
+                errors.push(e as Error);
             }
         }
         return errors;
@@ -438,82 +479,3 @@ export abstract class Model<SUB> {
         return this.validate().length === 0;
     }
 }
-
-// We use recursive proxies to track modifications made to, say, arrays within models. In
-// order to know which model a nested object belongs to, we maintain a WeakMap that maps
-// objects to their owner (unproxied) model.
-const modificationOwnerMap = new WeakMap<object, Model<any>>();
-
-// A cache for the proxies around nested objects, so that we don't need to recreate them
-// every time we access a property on a nested object (and so that their identity remains
-// the same).
-const modificationProxyCache = new WeakMap<object, any>();
-
-// Single proxy handler for both models and nested objects
-export const modificationTracker: ProxyHandler<any> = {
-    get(target, prop) {
-        if (prop === TARGET_SYMBOL) return target;
-        const value = target[prop];
-        if (!value || typeof value !== 'object' || (value instanceof Model)) return value;
-
-        // Check cache first
-        let proxy = modificationProxyCache.get(value);
-        if (proxy) return proxy;
-
-        let model;
-        if (target instanceof Model) {
-            if (!target._fields[prop as string]) {
-                // No need to track properties that are not model fields.
-                return value;
-            }
-            model = target;
-        } else {
-            model = modificationOwnerMap.get(target);
-            assert(model);
-        }
-
-        let state = model._state;
-        if (state !== undefined && state !== 2) {
-            // We don't need to track changes for this model (anymore). So we can just return the unproxied object.
-            // As we doing the modificationProxyCache lookup first, the identity of returned objects will not change:
-            // once a proxied object is returned, the same property will always return a proxied object.
-            return value;
-        }
-        
-        if (modificationOwnerMap.get(value)) {
-            throw new DatabaseError("Object cannot be embedded in multiple model instances", 'VALUE_ERROR');
-        }
-        modificationOwnerMap.set(value, model);
-        proxy = new Proxy(value, modificationTracker);
-        modificationProxyCache.set(value, proxy);
-        return proxy;
-    },
-    set(target, prop, value) {
-        let model;
-        if (target instanceof Model) {
-            model = target;
-            if (!model._fields[prop as string]) {
-                // No need to track properties that are not model fields.
-                (target as any)[prop] = value;
-                return true;
-            }
-        } else {
-            model = modificationOwnerMap.get(target);
-            assert(model);
-        }
-        
-        let state = model._state;
-        if (state === undefined || state === 2) {
-            const modifiedInstances = olmdb.getTransactionData(MODIFIED_INSTANCES_SYMBOL) as Set<Model<any>>;
-            modifiedInstances.add(model);
-            if (state === 2) {
-                model._state = model.constructor._indexes!.map(idx => idx._getKeyFromModel(model, true));
-            } else {
-                model._state = 1;
-            }
-        }
-
-        target[prop] = value;
-        return true;
-    }
-};

@@ -4,216 +4,188 @@ import { DatabaseError } from "olmdb";
 import { Model, modelRegistry, getMockModel } from "./models.js";
 import { assert, addErrorPath } from "./utils.js";
 
+
 /**
- * @internal Abstract base class for all type wrappers in the Edinburgh ORM system.
- * 
- * This is an implementation detail and should not be referenced directly in user code.
- * Type wrappers define how values are serialized to/from the database and how they are validated.
- * Each type wrapper must implement serialization, deserialization, and validation logic.
- * 
- * @template T - The TypeScript type this wrapper represents.
- */
+* @internal Abstract base class for all type wrappers in the Edinburgh ORM system.
+* 
+* This is an implementation detail and should not be referenced directly in user code.
+* Type wrappers define how values are serialized to/from the database and how they are validated.
+* Each type wrapper must implement serialization, deserialization, and validation logic.
+* 
+* @template T - The TypeScript type this wrapper represents.
+*/
 export abstract class TypeWrapper<const T> {
     /** @internal Used for TypeScript type inference - this field is required for the type system */
     _T!: T;
     
     /** A string identifier for this type, used during serialization */
     abstract kind: string;
-
+    
     constructor() {}
     
     /**
-     * Serialize a value from an object property to bytes.
-     * @param obj - The object containing the value.
-     * @param prop - The property name or index.
-     * @param bytes - The Bytes instance to write to.
-     * @param model - Optional model instance for context.
-     */
-    abstract serialize(obj: any, prop: string|number, bytes: Bytes, model?: any): void;
+    * Serialize a value from an object property to bytes.
+    * @param value - The value to serialize.
+    * @param bytes - The Bytes instance to write to.
+    */
+    abstract serialize(value: T, bytes: Bytes): void;
+
+    /**
+    * Deserialize a value from bytes into an object property.
+    * @param bytes - The Bytes instance to read from.
+    */
+    abstract deserialize(bytes: Bytes): T;
+
+    /**
+    * Validate a value.
+    * @param value - The value to validate.
+    * @returns - A DatabaseError if validation fails.
+    */
+    abstract getError(value: T): DatabaseError | void;
     
     /**
-     * Deserialize a value from bytes into an object property.
-     * @param obj - The object to set the value on.
-     * @param prop - The property name or index.
-     * @param bytes - The Bytes instance to read from.
-     * @param model - Optional model instance for context.
-     */
-    abstract deserialize(obj: any, prop: string|number, bytes: Bytes, model?: any): void;
-    
-    /**
-     * Validate a value and return any validation errors.
-     * @param obj - The object containing the value.
-     * @param prop - The property name or index.
-     * @returns Array of validation errors (empty if valid).
-     */
-    abstract getErrors(obj: any, prop: string | number): DatabaseError[];
-    
-    /**
-     * Validate a value and serialize it, throwing on validation errors.
-     * @param obj - The object containing the value.
-     * @param prop - The property name or index.
-     * @param bytes - The Bytes instance to write to.
-     * @param model - Optional model instance for context.
-     * @throws {DatabaseError} If validation fails.
-     */
-    validateAndSerialize(obj: any, prop: string|number, bytes: Bytes, model?: any): void {
-        const errors = this.getErrors(obj, prop);
-        if (errors.length) throw errors[0];
-        this.serialize(obj, prop, bytes, model);
-    }
-    
-    /**
-     * Serialize type metadata to bytes (for schema serialization).
-     * @param bytes - The Bytes instance to write to.
-     */
+    * Serialize type metadata to bytes (for schema serialization).
+    * @param bytes - The Bytes instance to write to.
+    */
     serializeType(bytes: Bytes) {}
     
     /**
-     * Check if indexing should be skipped for this field value.
-     * @param obj - The object containing the value.
-     * @param prop - The property name or index.
-     * @returns true if indexing should be skipped.
-     */
-    checkSkipIndex(obj: any, prop: string | number): boolean {
+    * Check if indexing should be skipped for this field value.
+    * @param obj - The object containing the value.
+    * @param prop - The property name or index.
+    * @returns true if indexing should be skipped.
+    */
+    containsNull(value: T): boolean {
         return false;
     }
-
+    
     toString(): string {
         return `${this.kind}`;
     }
+
+    clone(value: T): T {
+        return value;
+    }
+
+    equals(value1: T, value2: T): boolean {
+        return value1 === value2;
+    }
 }
 
-/**
- * Optional interface for type wrappers that can provide default values.
- * @template T - The TypeScript type this wrapper represents.
- */
+
 export interface TypeWrapper<T> {
     /**
-     * Generate a default value for this type.
-     * @param model - The model instance.
-     * @returns The default value.
-     */
+    * Generate a default value for this type.
+    * @param model - The model instance.
+    * @returns The default value.
+    */
     default?(model: any): T;
 }
 
-/**
- * @internal Type wrapper for string values.
- */
+
 class StringType extends TypeWrapper<string> {
     kind = 'string';
     
-    serialize(obj: any, prop: string, bytes: Bytes, model?: any) {
-        bytes.writeString(obj[prop]);
+    serialize(value: string, bytes: Bytes) {
+        bytes.writeString(value);
     }
     
-    deserialize(obj: any, prop: string | number, bytes: Bytes, model?: any): void {
-        obj[prop] = bytes.readString();
+    deserialize(bytes: Bytes): string {
+        return bytes.readString();
     }
-    
-    getErrors(obj: any, prop: string | number): DatabaseError[] {
-        if (typeof obj[prop] !== 'string') {
-            return [new DatabaseError(`Expected string, got ${typeof obj[prop]}`, 'INVALID_TYPE')];
+
+    getError(value: string) {
+        if (typeof value !== 'string') {
+            return new DatabaseError(`Expected string, got ${typeof value}`, 'INVALID_TYPE');
         }
-        return [];
     }
 }
 
-/**
- * @internal Type wrapper for number values.
- */
+
 class NumberType extends TypeWrapper<number> {
     kind = 'number';
-    
-    serialize(obj: any, prop: string, bytes: Bytes, model?: any) {
-        bytes.writeNumber(obj[prop]);
+
+    serialize(value: number, bytes: Bytes) {
+        bytes.writeNumber(value);
     }
-    
-    deserialize(obj: any, prop: string | number, bytes: Bytes, model?: any): void {
-        obj[prop] = bytes.readNumber();
+
+    deserialize(bytes: Bytes): number {
+        return bytes.readNumber();
     }
-    
-    getErrors(obj: any, prop: string | number): DatabaseError[] {
-        const value = obj[prop];
+
+    getError(value: number) {
         if (typeof value !== 'number' || isNaN(value)) {
-            return [new DatabaseError(`Expected number, got ${typeof value}`, 'INVALID_TYPE')];
+            return new DatabaseError(`Expected number, got ${typeof value}`, 'INVALID_TYPE');
         }
-        return [];
     }
 }
 
-/**
- * @internal Type wrapper for boolean values.
- */
+
 class BooleanType extends TypeWrapper<boolean> {
     kind = 'boolean';
-    
-    serialize(obj: any, prop: string, bytes: Bytes, model?: any) {
-        bytes.writeBits(obj[prop] ? 1 : 0, 1);
+
+    serialize(value: boolean, bytes: Bytes) {
+        bytes.writeBits(value ? 1 : 0, 1);
     }
-    
-    deserialize(obj: any, prop: string | number, bytes: Bytes, model?: any): void {
-        obj[prop] = bytes.readBits(1) === 1;
+
+    deserialize(bytes: Bytes): boolean {
+        return bytes.readBits(1) === 1;
     }
-    
-    getErrors(obj: any, prop: string | number): DatabaseError[] {
-        if (typeof obj[prop] !== 'boolean') {
-            return [new DatabaseError(`Expected boolean, got ${typeof obj[prop]}`, 'INVALID_TYPE')];
+
+    getError(value: boolean) {
+        if (typeof value !== 'boolean') {
+            return new DatabaseError(`Expected boolean, got ${typeof value}`, 'INVALID_TYPE');
         }
-        return [];
     }
 }
 
 /**
- * @internal Type wrapper for array values with optional length constraints.
- * @template T - The type of array elements.
- */
+* @internal Type wrapper for array values with optional length constraints.
+* @template T - The type of array elements.
+*/
 class ArrayType<T> extends TypeWrapper<T[]> {
     kind = 'array';
     
     /**
-     * Create a new ArrayType.
-     * @param inner - Type wrapper for array elements.
-     * @param opts - Array constraints (min/max length).
-     */
+    * Create a new ArrayType.
+    * @param inner - Type wrapper for array elements.
+    * @param opts - Array constraints (min/max length).
+    */
     constructor(public inner: TypeWrapper<T>, public opts: {min?: number, max?: number} = {}) {
         super();
     }
-
-    serialize(obj: any, prop: string, bytes: Bytes, model?: any) {
-        const value = obj[prop] as T[];
+    
+    serialize(value: T[], bytes: Bytes) {
         bytes.writeNumber(value.length);
         for(let i=0; i<value.length; i++) {
-            this.inner.serialize(value, i, bytes, model);
+            this.inner.serialize(value[i], bytes);
         }
     }
     
-    deserialize(obj: any, prop: string | number, bytes: Bytes, model?: any): void {
+    deserialize(bytes: Bytes): T[] {
         const length = bytes.readNumber();
         const result: T[] = [];
         for (let i = 0; i < length; i++) {
-            this.inner.deserialize(result, i, bytes, model);
+            result.push(this.inner.deserialize(bytes));
         }
-        obj[prop] = result;
+        return result;
     }
-    
-    getErrors(obj: any, prop: string | number): DatabaseError[] {
-        const value = obj[prop];
+
+    getError(value: T[]) {
         if (!Array.isArray(value)) {
-            return [new DatabaseError(`Expected array, got ${typeof value}`, 'INVALID_TYPE')];
+            return new DatabaseError(`Expected array, got ${typeof value}`, 'INVALID_TYPE');
         }
-        const errors: DatabaseError[] = [];
+
         if (this.opts.min !== undefined && value.length < this.opts.min) {
-            errors.push(new DatabaseError(`Array length ${value.length} is less than minimum ${this.opts.min}`, 'OUT_OF_BOUNDS'));
+            return new DatabaseError(`Array length ${value.length} is less than minimum ${this.opts.min}`, 'OUT_OF_BOUNDS');
         }
         if (this.opts.max !== undefined && value.length > this.opts.max) {
-            errors.push(new DatabaseError(`Array length ${value.length} is greater than maximum ${this.opts.max}`, 'OUT_OF_BOUNDS'));
+            return new DatabaseError(`Array length ${value.length} is greater than maximum ${this.opts.max}`, 'OUT_OF_BOUNDS');
         }
         for (let i = 0; i < value.length; i++) {
-            for(let itemError of this.inner.getErrors(value, i)) {
-                errors.push(addErrorPath(itemError, i));
-            }
+            let error = this.inner.getError(value[i]);
+            if (error) return addErrorPath(error, i);
         }
-        return errors;
     }
     
     serializeType(bytes: Bytes): void {
@@ -224,63 +196,151 @@ class ArrayType<T> extends TypeWrapper<T[]> {
         const inner = deserializeType(bytes, featureFlags);
         return new ArrayType(inner);
     }
+
+    clone(value: T[]): T[] {
+        return value.map(this.inner.clone.bind(this.inner));
+    }
+
+    equals(a: T[], b: T[]): boolean {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (!this.inner.equals(a[i], b[i])) return false;
+        }
+        return true;
+    }
+
 }
 
 /**
- * @internal Type wrapper for union/discriminated union types.
- * @template T - The union type this wrapper represents.
- */
+* @internal Type wrapper for array values with optional length constraints.
+* @template T - The type of array elements.
+*/
+export class SetType<T> extends TypeWrapper<Set<T>> {
+    kind = 'set';
+
+    /**
+    * Create a new SetType.
+    * @param inner - Type wrapper for set elements.
+    */
+    constructor(public inner: TypeWrapper<T>, public opts: {min?: number, max?: number} = {}) {
+        super();
+    }
+
+    serialize(value: Set<T>, bytes: Bytes) {
+        bytes.writeNumber(value.size);
+        for (const item of value) {
+            this.inner.serialize(item, bytes);
+        }
+    }
+
+    deserialize(bytes: Bytes): Set<T> {
+        const length = bytes.readNumber();
+        const result = new Set<T>();
+        for (let i = 0; i < length; i++) {
+            result.add(this.inner.deserialize(bytes));
+        }
+        return result;
+    }
+
+    getError(value: Set<T>) {
+        if (!(value instanceof Set)) {
+            return new DatabaseError(`Expected Set, got ${typeof value}`, 'INVALID_TYPE');
+        }
+
+        if (this.opts.min !== undefined && value.size < this.opts.min) {
+            return new DatabaseError(`Set size ${value.size} is less than minimum ${this.opts.min}`, 'OUT_OF_BOUNDS');
+        }
+        if (this.opts.max !== undefined && value.size > this.opts.max) {
+            return new DatabaseError(`Set size ${value.size} is greater than maximum ${this.opts.max}`, 'OUT_OF_BOUNDS');
+        }
+
+        try {
+            for (const item of value) {
+                this.inner.getError(item);
+            }
+        } catch (err) {
+            throw addErrorPath(err, 'item');
+        }
+    }
+    
+    serializeType(bytes: Bytes): void {
+        serializeType(this.inner, bytes);
+    }
+    
+    static deserializeType(bytes: Bytes, featureFlags: number): SetType<any> {
+        const inner = deserializeType(bytes, featureFlags);
+        return new SetType(inner);
+    }
+
+    default(): Set<T> {
+        return new Set<T>();
+    }
+
+    clone(value: Set<T>): Set<T> {
+        const cloned = new Set<T>();
+        for (const item of value) {
+            cloned.add(this.inner.clone(item));
+        }
+        return cloned;
+    }
+
+    equals(a: Set<T>, b: Set<T>): boolean {
+        if (a.size !== b.size) return false;
+        for(const v of a) {
+            if (!b.has(v)) return false;
+        }
+        return true;
+    }
+}
+
+
+/**
+* @internal Type wrapper for union/discriminated union types.
+* @template T - The union type this wrapper represents.
+*/
 class OrType<const T> extends TypeWrapper<T> {
     kind = 'or';
     
     /**
-     * Create a new OrType.
-     * @param choices - Array of type wrappers representing the union choices.
-     */
+    * Create a new OrType.
+    * @param choices - Array of type wrappers representing the union choices.
+    */
     constructor(public choices: TypeWrapper<T>[]) {
         super();
     }
     
-    _getChoiceIndex(obj: any, prop: string | number): number {
+    _getChoiceIndex(value: any): number {
         for (const [i, choice] of this.choices.entries()) {
-            if (choice.getErrors(obj, prop).length === 0) {
-                return i;
-            }
+            if (!choice.getError(value)) return i;
         }
-        throw new DatabaseError(`Value does not match any union type: ${obj[prop]}`, 'INVALID_TYPE');
+        throw new DatabaseError(`Value does not match any union type: ${value}`, 'INVALID_TYPE');
     }
     
-    serialize(obj: any, prop: string, bytes: Bytes, model?: any) {
-        const choiceIndex = this._getChoiceIndex(obj, prop);
+    serialize(value: T, bytes: Bytes) {
+        const choiceIndex = this._getChoiceIndex(value);
         bytes.writeUIntN(choiceIndex, this.choices.length-1);
-        this.choices[choiceIndex].serialize(obj, prop, bytes, model);
+        this.choices[choiceIndex].serialize(value, bytes);
     }
     
-    deserialize(obj: any, prop: string | number, bytes: Bytes, model?: any): void {
+    deserialize(bytes: Bytes) {
         const index = bytes.readUIntN(this.choices.length-1);
         if (index < 0 || index >= this.choices.length) {
             throw new DatabaseError(`Could not deserialize invalid union index ${index}`, 'DESERIALIZATION_ERROR');
         }
         const type = this.choices[index];
-        type.deserialize(obj, prop, bytes, model);
+        return type.deserialize(bytes);
     }
     
-    getErrors(obj: any, prop: string | number): DatabaseError[] {
-        const errors: DatabaseError[] = [];
-        for (let i = 0; i < this.choices.length; i++) {
-            const type = this.choices[i];
-            const subErrors = type.getErrors(obj, prop);
-            if (subErrors.length === 0) return [];
-            for (let err of subErrors) {
-                errors.push(addErrorPath(err, `opt${i+1}`));
-            }
+    getError(value: any) {
+        for (const choice of this.choices.values()) {
+            if (!choice.getError(value)) return;
         }
-        return errors;
+        return new DatabaseError(`Value does not match any union type: ${value}`, 'INVALID_TYPE');
     }
     
-    checkSkipIndex(obj: any, prop: string | number): boolean {
-        const choiceIndex = this._getChoiceIndex(obj, prop);
-        return this.choices[choiceIndex].checkSkipIndex(obj, prop);
+    containsNull(value: T): boolean {
+        const choiceIndex = this._getChoiceIndex(value);
+        return this.choices[choiceIndex].containsNull(value);
     }
     
     serializeType(bytes: Bytes): void {
@@ -298,41 +358,54 @@ class OrType<const T> extends TypeWrapper<T> {
         }
         return new OrType(choices);
     }
+    
+    clone(value: T): T {
+        const choiceIndex = this._getChoiceIndex(value);
+        return this.choices[choiceIndex].clone(value);
+    }
+
+    equals(a: T, b: T): boolean {
+        const ca = this._getChoiceIndex(a);
+        const cb = this._getChoiceIndex(b);
+        return ca === cb && this.choices[ca].equals(a, b);
+    }
 }
 
 /**
- * @internal Type wrapper for literal values (constants).
- * @template T - The literal type this wrapper represents.
- */
+* @internal Type wrapper for literal values (constants).
+* @template T - The literal type this wrapper represents.
+*/
 class LiteralType<const T> extends TypeWrapper<T> {
     kind = 'literal';
     
     /**
-     * Create a new LiteralType.
-     * @param value - The literal value this type represents.
-     */
+    * Create a new LiteralType.
+    * @param value - The literal value this type represents.
+    */
     constructor(public value: T) {
         super();
     }
     
-    serialize(obj: any, prop: string | number, bytes: Bytes, model?: any) {
+    serialize(value: T, bytes: Bytes) {
         // Literal values don't need to be serialized since they're constants
     }
     
-    deserialize(obj: any, prop: string | number, bytes: Bytes, model?: any): void {
-        obj[prop] = this.value;
+    deserialize(bytes: Bytes) {
+        return this.value;
     }
     
-    getErrors(obj: any, prop: string | number): DatabaseError[] {
-        return this.value===obj[prop] ? [] : [new DatabaseError(`Invalid literal value ${obj[prop]} instead of ${this.value}`, 'INVALID_TYPE')];
+    getError(value: any) {
+        if (this.value!==value) {
+            return new DatabaseError(`Invalid literal value ${value} instead of ${this.value}`, 'INVALID_TYPE');
+        }
     }
     
     serializeType(bytes: Bytes): void {
         bytes.writeString(this.value===undefined ? "" : JSON.stringify(this.value));
     }
-
-    checkSkipIndex(obj: any, prop: string | number): boolean {
-        return obj[prop] == null;
+    
+    containsNull(value: T): boolean {
+        return value == null;
     }
     
     static deserializeType(bytes: Bytes, featureFlags: number): LiteralType<any> {
@@ -340,8 +413,8 @@ class LiteralType<const T> extends TypeWrapper<T> {
         const value = json==="" ? undefined : JSON.parse(json);
         return new LiteralType(value);
     }
-
-    default(model: any): T {
+    
+    default(): T {
         return this.value;
     }
 }
@@ -349,25 +422,22 @@ class LiteralType<const T> extends TypeWrapper<T> {
 const ID_SIZE = 7;
 
 /**
- * @internal Type wrapper for auto-generated unique identifier strings.
- */
+* @internal Type wrapper for auto-generated unique identifier strings.
+*/
 class IdentifierType extends TypeWrapper<string> {
     kind = 'id';
-
-    serialize(obj: any, prop: string|number, bytes: Bytes): void {
-        const value = obj[prop];
+    
+    serialize(value: string, bytes: Bytes): void {
         assert(value.length === ID_SIZE);
         bytes.writeBase64(value);
     }
-    
-    deserialize(obj: any, prop: string | number, bytes: Bytes): void {
-        obj[prop] = bytes.readBase64(ID_SIZE);
+
+    deserialize(bytes: Bytes) {
+        return bytes.readBase64(ID_SIZE);
     }
     
-    getErrors(obj: any, prop: string | number): DatabaseError[] {
-        const value = obj[prop];
-        if (typeof value !== 'string' || value.length !== ID_SIZE) return [new DatabaseError(`Invalid ID format: ${value}`, 'VALUE_ERROR')];
-        return [];
+    getError(value: any) {
+        if (typeof value !== 'string' || value.length !== ID_SIZE) return new DatabaseError(`Invalid ID format: ${value}`, 'VALUE_ERROR');
     }
     
     serializeType(bytes: Bytes): void {
@@ -376,7 +446,7 @@ class IdentifierType extends TypeWrapper<string> {
     static deserializeType(bytes: Bytes, featureFlags: number): IdentifierType {
         return new IdentifierType();
     }
-
+    
     default(model: Model<any>): string {
         // Generate a random ID, and if it already exists in the database, retry.
         let id: string;
@@ -385,89 +455,46 @@ class IdentifierType extends TypeWrapper<string> {
             // Bits 9...42 are the date (wrapping about four times a year)
             // Bit 0...14 are random bits (partly overlapping with the date, adding up to 31ms of jitter)
             let num = Math.floor(+new Date() * (1<<9) + Math.random() * (1<<14));
-
+            
             id = '';
             for(let i = 0; i < 7; i++) {
                 id = Bytes.BASE64_CHARS[num & 0x3f] + id;
                 num = Math.floor(num / 64);
             }
-        } while (olmdb.get(new Bytes().writeNumber(model.constructor._pk!._cachedIndexId!).writeBase64(id).getBuffer()));
+        } while (olmdb.get(new Bytes().writeNumber(model.constructor._primary!._cachedIndexId!).writeBase64(id).getBuffer()));
         return id;
     }
 }
 
-const WANT_PK_ARRAY = {};
-
-type KeysOfType<T, TProp> = { [P in keyof T]: T[P] extends TProp? P : never}[keyof T];
-
 /**
- * @internal Type wrapper for model relationships (foreign keys).
- * @template T - The target model class type.
- */
-export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceType<T>> {
+* @internal Type wrapper for model relationships (foreign keys).
+* @template T - The target model class type.
+*/
+export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<InstanceType<T>> {
     kind = 'link';
     TargetModel: T;
-
+    
     /**
-     * Create a new LinkType.
-     * @param TargetModel - The model class this link points to.
-     */
+    * Create a new LinkType.
+    * @param TargetModel - The model class this link points to.
+    */
     constructor(TargetModel: T) {
         super();
         this.TargetModel = getMockModel(TargetModel);
     }
-
-    serialize(obj: any, prop: string | number, bytes: Bytes, model: Model<InstanceType<T>>): void {
-        let pkArray;
-        const pk = this.TargetModel._pk!;
-        // If obj[prop] is getter(), it will return the primary key array (based on WANT_PK_ARRAY
-        // being the receiver). Otherwise, it will just return the value, which is a model instance.
-        let value = Reflect.get(obj, prop, WANT_PK_ARRAY) as any[] | Model<InstanceType<T>>;
-        if (value instanceof Array) {
-            // It's a pk array, and the object has not been loaded. We can just serialize it.
-            pk._serializeArgs(value, bytes);
-        } else {
-            // It's a model instance that has been loaded
-            pk._serializeModel(value, bytes);
-        }
+    
+    serialize(model: InstanceType<T>, bytes: Bytes) {
+        bytes.writeBlob(model._getCreatePrimaryKey());
     }
     
-    deserialize(obj: any, prop: string, bytes: Bytes, sourceModel: Model<unknown>) {
-        const pk = this.TargetModel._pk!;
-        const pkArray = pk._deserializeKey(bytes);
-        const TargetModel = this.TargetModel;
-
-        // Define a getter to load the model on first access
-        Object.defineProperty(obj, prop, {
-            get: function() {
-                // Special case to return the primary key array instead of load the model, used by serialize.
-                if (this === WANT_PK_ARRAY) return pkArray; 
-                const targetModel = TargetModel._pk!.get(...pkArray); // load by primary key Uint8Array
-                if (!targetModel) {
-                    throw new DatabaseError(`Linked ${TargetModel.tableName} instance ${pkArray.join(', ')} not found`, 'BROKEN_LINK');
-                }
-                this[prop] = targetModel; // Cause set() to be called, so our property will be come a regular value
-                return targetModel;
-            },
-            set: function(newValue) {
-                // Convert back to a regular value property
-                Object.defineProperty(this, prop, {
-                    value: newValue,
-                    writable: true,
-                    enumerable: true,
-                    configurable: true
-                });
-            },
-            enumerable: true,
-            configurable: true
-        });
+    deserialize(bytes: Bytes) {
+        return this.TargetModel._primary!.getLazy(bytes.readBlob());
     }
-
-    getErrors(obj: any, prop: string | number): DatabaseError[] {
-        if (!(obj[prop] instanceof this.TargetModel)) {
-            return [new DatabaseError(`Expected instance of ${this.TargetModel.tableName}, got ${typeof obj[prop]}`, 'VALUE_ERROR')];
+    
+    getError(value: InstanceType<T>) {
+        if (!(value instanceof this.TargetModel)) {
+            return new DatabaseError(`Expected instance of ${this.TargetModel.tableName}, got ${typeof value}`, 'VALUE_ERROR');
         }
-        return [];
     }
     
     serializeType(bytes: Bytes): void {
@@ -483,111 +510,128 @@ export class LinkType<T extends typeof Model<any>> extends TypeWrapper<InstanceT
 }
 
 /** Constant representing the string type. */
-export const string = new StringType();
+export const string = new StringType() as TypeWrapper<string>;
 
 /** Constant representing the number type. */
-export const number = new NumberType();
+export const number = new NumberType() as TypeWrapper<number>;
 
 /** Constant representing the boolean type. */
-export const boolean = new BooleanType();
+export const boolean = new BooleanType() as TypeWrapper<boolean>;
 
 /** Constant representing the identifier type. */
-export const identifier = new IdentifierType();
-
-/**
- * Create a literal type wrapper for a constant value.
- * @template T - The literal type.
- * @param value - The literal value.
- * @returns A literal type instance.
- * 
- * @example
- * ```typescript
- * const statusType = E.literal("active");
- * const countType = E.literal(42);
- * ```
- */
-export function literal<const T>(value: T) {
-    return new LiteralType<T>(value);
-}
-
-/**
- * Create a union type wrapper from multiple type choices.
- * @template T - Array of type wrapper or basic types.
- * @param choices - The type choices for the union.
- * @returns A union type instance.
- * 
- * @example
- * ```typescript
- * const stringOrNumber = E.or(E.string, E.number);
- * const status = E.or("active", "inactive", "pending");
- * ```
- */
-export function or<const T extends (TypeWrapper<unknown>|BasicType)[]>(...choices: T) {
-    return new OrType<UnwrapTypes<T>>(choices.map(wrapIfLiteral) as any);
-}
+export const identifier = new IdentifierType() as TypeWrapper<string>;
 
 /** Constant representing the 'undefined' type. */
-export const undef = new LiteralType(undefined);
+export const undef = new LiteralType(undefined) as TypeWrapper<undefined>;
 
 /**
- * Create an optional type wrapper (allows undefined).
- * @template T - Type wrapper or basic type to make optional.
- * @param inner - The inner type to make optional.
- * @returns A union type that accepts the inner type or undefined.
- * 
- * @example
- * ```typescript
- * const optionalString = E.opt(E.string);
- * const optionalNumber = E.opt(E.number);
- * ```
- */
-export function opt<const T extends TypeWrapper<unknown>|BasicType>(inner: T) {
+* Create a literal type wrapper for a constant value.
+* @template T - The literal type.
+* @param value - The literal value.
+* @returns A literal type instance.
+* 
+* @example
+* ```typescript
+* const statusType = E.literal("active");
+* const countType = E.literal(42);
+* ```
+*/
+export function literal<const T>(value: T): TypeWrapper<T> {
+    return new LiteralType(value);
+}
+
+/**
+* Create a union type wrapper from multiple type choices.
+* @template T - Array of type wrapper or basic types.
+* @param choices - The type choices for the union.
+* @returns A union type instance.
+* 
+* @example
+* ```typescript
+* const stringOrNumber = E.or(E.string, E.number);
+* const status = E.or("active", "inactive", "pending");
+* ```
+*/
+export function or<const T extends (TypeWrapper<unknown>|BasicType)[]>(...choices: T): TypeWrapper<UnwrapTypes<T>> {
+    return new OrType(choices.map(wrapIfLiteral));
+}
+
+/**
+* Create an optional type wrapper (allows undefined).
+* @template T - Type wrapper or basic type to make optional.
+* @param inner - The inner type to make optional.
+* @returns A union type that accepts the inner type or undefined.
+* 
+* @example
+* ```typescript
+* const optionalString = E.opt(E.string);
+* const optionalNumber = E.opt(E.number);
+* ```
+*/
+export function opt<const T extends TypeWrapper<unknown>|BasicType>(inner: T): TypeWrapper<UnwrapTypes<[T, typeof undef]>> {
     return or(undef, inner);
 }
 
 /**
- * Create an array type wrapper with optional length constraints.
- * @template T - The element type.
- * @param inner - Type wrapper for array elements.
- * @param opts - Optional constraints (min/max length).
- * @returns An array type instance.
- * 
- * @example
- * ```typescript
- * const stringArray = E.array(E.string);
- * const boundedArray = E.array(E.number, {min: 1, max: 10});
- * ```
- */
-export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: number} = {}) {
-    return new ArrayType<T>(wrapIfLiteral(inner), opts);
+* Create an array type wrapper with optional length constraints.
+* @template T - The element type.
+* @param inner - Type wrapper for array elements.
+* @param opts - Optional constraints (min/max length).
+* @returns An array type instance.
+* 
+* @example
+* ```typescript
+* const stringArray = E.array(E.string);
+* const boundedArray = E.array(E.number, {min: 1, max: 10});
+* ```
+*/
+export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: number} = {}): TypeWrapper<T[]> {
+    return new ArrayType(wrapIfLiteral(inner), opts);
 }
 
 /**
- * Create a link type wrapper for model relationships.
- * @template T - The target model class.
- * @param TargetModel - The model class this link points to.
- * @returns A link type instance.
- * 
- * @example
- * ```typescript
- * class User extends E.Model<User> {
- *   posts = E.field(E.array(E.link(Post, 'author')));
- * }
- * 
- * class Post extends E.Model<Post> {
- *   author = E.field(E.link(User));
- * }
- * ```
- */
-export function link<const T extends typeof Model<any>>(TargetModel: T) {
-    return new LinkType<T>(TargetModel);
+* Create a Set type wrapper with optional length constraints.
+* @template T - The element type.
+* @param inner - Type wrapper for set elements.
+* @param opts - Optional constraints (min/max length).
+* @returns A set type instance.
+*
+* @example
+* ```typescript
+* const stringSet = E.set(E.string);
+* const boundedSet = E.set(E.number, {min: 1, max: 10});
+* ```
+*/
+export function set<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: number} = {}): TypeWrapper<Set<T>> {
+    return new SetType(wrapIfLiteral(inner), opts);
+}
+
+/**
+* Create a link type wrapper for model relationships.
+* @template T - The target model class.
+* @param TargetModel - The model class this link points to.
+* @returns A link type instance.
+* 
+* @example
+* ```typescript
+* class User extends E.Model<User> {
+*   posts = E.field(E.array(E.link(Post, 'author')));
+* }
+* 
+* class Post extends E.Model<Post> {
+*   author = E.field(E.link(User));
+* }
+* ```
+*/
+export function link<const T extends typeof Model<any>>(TargetModel: T): TypeWrapper<InstanceType<T>> {
+    return new LinkType(TargetModel);
 }
 
 
 // Utility types and functions
-export type BasicType = TypeWrapper<any> | string | number | boolean | undefined | null;
+export type BasicType = string | number | boolean | undefined | null; // TypeWrapper<any>
 
-export type UnwrapTypes<T extends BasicType[]> = {
+export type UnwrapTypes<T extends (TypeWrapper<unknown> | BasicType)[]> = {
     [K in keyof T]: T[K] extends TypeWrapper<infer U> ? U : T[K];
 }[number];
 
@@ -598,10 +642,10 @@ function wrapIfLiteral(type: any) {
 }
 
 /**
- * Serialize a type wrapper to bytes for schema persistence.
- * @param arg - The type wrapper to serialize.
- * @param bytes - The Bytes instance to write to.
- */
+* Serialize a type wrapper to bytes for schema persistence.
+* @param arg - The type wrapper to serialize.
+* @param bytes - The Bytes instance to write to.
+*/
 export function serializeType(arg: TypeWrapper<any>, bytes: Bytes) {
     bytes.writeString(arg.kind);
     arg.serializeType(bytes);
@@ -616,14 +660,15 @@ const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (bytes:
     boolean: boolean,
     id: identifier,
     link: LinkType,
+    set: SetType
 };
 
 /**
- * Deserialize a type wrapper from bytes.
- * @param bytes - The Bytes instance to read from.
- * @param featureFlags - Feature flags for version compatibility.
- * @returns The deserialized type wrapper.
- */
+* Deserialize a type wrapper from bytes.
+* @param bytes - The Bytes instance to read from.
+* @param featureFlags - Feature flags for version compatibility.
+* @returns The deserialized type wrapper.
+*/
 export function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
     const kind = bytes.readString();
     const TypeWrapper = TYPE_WRAPPERS[kind];

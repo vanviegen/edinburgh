@@ -1,26 +1,26 @@
 import { Bytes } from "../src/bytes.js";
-import { expect, test, describe } from "@jest/globals";
+import { expect, test, describe } from "vitest";
+
+Bytes.enableDebug();
 
 describe('constructor', () => {
     test('should create empty buffer by default', () => {
         const bytes = new Bytes();
-        expect(bytes.buffer).toBeInstanceOf(Uint8Array);
-        expect(bytes.buffer.length).toBeGreaterThan(0);
-        expect(bytes.readByte).toBe(0);
-        expect(bytes.readBit).toBe(8);
-        expect(bytes.writeByte).toBe(0);
-        expect(bytes.writeBit).toBe(8);
+        expect(bytes._buffer).toBeInstanceOf(Uint8Array);
+        expect(bytes._buffer.length).toBeGreaterThan(0);
+        expect(bytes.readPos).toBe(0);
+        expect(bytes.writePos).toBe(0);
     });
 
     test('should create buffer with specified size', () => {
         const bytes = new Bytes(100);
-        expect(bytes.buffer.length).toBe(100);
+        expect(bytes._buffer.length).toBe(100);
     });
 
     test('should initialize with provided buffer', () => {
         const data = new Uint8Array([1, 2, 3, 4]);
         const bytes = new Bytes(data);
-        expect(bytes.buffer).toBe(data);
+        expect(bytes._buffer).toBe(data);
     });
 });
 
@@ -31,10 +31,8 @@ describe('reset functionality', () => {
         bytes.readBits(4);
         
         bytes.reset();
-        expect(bytes.readByte).toBe(0);
-        expect(bytes.readBit).toBe(8);
-        expect(bytes.writeByte).toBe(1); // After writing 8 bits, write byte should be 1
-        expect(bytes.writeBit).toBe(8);
+        expect(bytes.readPos).toBe(0);
+        expect(bytes.writePos).toBe(8);
     });
 });
 
@@ -45,7 +43,7 @@ describe('bit operations', () => {
         bytes.writeBits(0, 1);
         bytes.writeBits(1, 1);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readBits(1)).toBe(1);
         expect(result.readBits(1)).toBe(0);
         expect(result.readBits(1)).toBe(1);
@@ -57,7 +55,7 @@ describe('bit operations', () => {
         bytes.writeBits(3, 2);  // Write 11 (2 bits)
         expect(bytes.byteCount()).toBe(1);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readBits(3)).toBe(5);
         expect(result.readBits(2)).toBe(3);
     });
@@ -66,7 +64,7 @@ describe('bit operations', () => {
         const bytes = new Bytes();
         bytes.writeBits(0b101, 3, true);  // Write with flip
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readBits(3, true)).toBe(0b101);
     });
 
@@ -75,7 +73,7 @@ describe('bit operations', () => {
         bytes.writeBits(0xFF, 8);  // Write full byte
         bytes.writeBits(0x5, 4);   // Write half byte
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readBits(8)).toBe(0xFF);
         expect(result.readBits(4)).toBe(0x5);
     });
@@ -101,7 +99,7 @@ describe('UIntN operations', () => {
         bytes.writeUIntN(5, 10);  // Value 5, max value 10
         bytes.writeUIntN(15, 20); // Value 15, max value 20
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readUIntN(10)).toBe(5);
         expect(result.readUIntN(20)).toBe(15);
     });
@@ -111,7 +109,7 @@ describe('UIntN operations', () => {
         bytes.writeUIntN(0, 100);
         bytes.writeUIntN(100, 100);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readUIntN(100)).toBe(0);
         expect(result.readUIntN(100)).toBe(100);
     });
@@ -123,7 +121,7 @@ describe('Base64 operations', () => {
         const testStr = "Hello";
         bytes.writeBase64(testStr);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readBase64(testStr.length)).toBe(testStr);
     });
 
@@ -131,7 +129,7 @@ describe('Base64 operations', () => {
         const bytes = new Bytes();
         bytes.writeBase64("");
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readBase64(0)).toBe("");
     });
 
@@ -146,9 +144,9 @@ describe('number encoding/decoding', () => {
     test('should handle zero correctly', () => {
         const bytes = new Bytes();
         bytes.writeNumber(0);
-        expect(bytes.bitCount()).toBe(5);
+        expect(bytes.bitCount()).toBe(6);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readNumber()).toBe(0);
     });
 
@@ -158,17 +156,17 @@ describe('number encoding/decoding', () => {
             1: 1,
             3: 1,
             7: 1,
-            15: 1,
+            8: 2,
             127: 2,
             1023: 2,
             4095: 2,
-            "-1": 1,
-            "-3": 1,
-            "-7": 1,
-            "-15": 1,
-            "-127": 2,
-            "-1023": 2,
-            "-4095": 2,
+            "-1": 2,
+            "-3": 2,
+            "-7": 2,
+            "-15": 2,
+            "-127": 3,
+            "-1023": 3,
+            "-4095": 3,
         };
         
         for (const [key, expectedByteCount] of Object.entries(testValues)) {
@@ -176,7 +174,7 @@ describe('number encoding/decoding', () => {
             const bytes = new Bytes();
             bytes.writeNumber(value);
             expect(bytes.byteCount()).toBeLessThanOrEqual(expectedByteCount);
-            const result = new Bytes(bytes.buffer);
+            const result = new Bytes(bytes._buffer);
             expect(result.readNumber()).toBe(value);
         }
     });
@@ -194,7 +192,7 @@ describe('number encoding/decoding', () => {
         for (const value of testValues) {
             const bytes = new Bytes();
             bytes.writeNumber(value);
-            const result = new Bytes(bytes.buffer);
+            const result = new Bytes(bytes._buffer);
             expect(result.readNumber()).toBe(value);
         }
     });
@@ -218,8 +216,7 @@ describe('number encoding/decoding', () => {
         for (const value of testValues) {
             const bytes = new Bytes();
             bytes.writeNumber(value);
-            const result = new Bytes(bytes.buffer);
-            expect(result.readNumber()).toBe(value);
+            expect(bytes.readNumber()).toBe(value);
         }
     });
 
@@ -241,7 +238,7 @@ describe('number encoding/decoding', () => {
         for (const value of testValues) {
             const bytes = new Bytes();
             bytes.writeNumber(value);
-            const result = new Bytes(bytes.buffer);
+            const result = new Bytes(bytes._buffer);
             const read = result.readNumber();
             if (Number.isNaN(value)) {
                 expect(Number.isNaN(read)).toBe(true);
@@ -269,7 +266,7 @@ describe('buffer management', () => {
 
     test('should auto-expand buffer when needed', () => {
         const bytes = new Bytes();
-        const initialSize = bytes.buffer.length;
+        const initialSize = bytes._buffer.length;
         
         // Write enough data to force buffer expansion
         for (let i = 0; i < initialSize; i++) {
@@ -279,15 +276,15 @@ describe('buffer management', () => {
         // Write one more byte to trigger expansion
         bytes.writeBits(0xFF, 8);
         
-        expect(bytes.buffer.length).toBeGreaterThan(initialSize);
+        expect(bytes._buffer.length).toBeGreaterThan(initialSize);
     });
 
     test('should ensure capacity correctly', () => {
         const bytes = new Bytes();
-        const initialSize = bytes.buffer.length;
+        const initialSize = bytes._buffer.length;
         
-        bytes.ensureCapacity(initialSize + 100);
-        expect(bytes.buffer.length).toBeGreaterThanOrEqual(initialSize + 100);
+        bytes.ensureCapacity((initialSize + 100) * 8);
+        expect(bytes._buffer.length).toBeGreaterThanOrEqual(initialSize + 100);
     });
 
     test('should get buffer correctly', () => {
@@ -306,18 +303,8 @@ describe('buffer management', () => {
         
         const copy = bytes.copy();
         expect(copy).not.toBe(bytes);
-        expect(copy.buffer).not.toBe(bytes.buffer);
+        expect(copy._buffer).not.toBe(bytes._buffer);
         expect(copy.getBuffer()).toEqual(bytes.getBuffer());
-    });
-
-    test('should pad bits correctly', () => {
-        const bytes = new Bytes();
-        bytes.writeBits(1, 1);  // Write single bit
-        expect(bytes.writeBit).toBe(7);
-        
-        bytes.padWriteBits();
-        expect(bytes.writeBit).toBe(8);
-        expect(bytes.writeByte).toBe(1);
     });
 });
 
@@ -325,11 +312,10 @@ describe('padding operations', () => {
     test('should pad write bits correctly', () => {
         const bytes = new Bytes();
         bytes.writeBits(1, 1);  // Write single bit
-        expect(bytes.writeBit).toBe(7);
+        expect(bytes.writePos).toBe(1);
         
         bytes.padWriteBits();
-        expect(bytes.writeBit).toBe(8);
-        expect(bytes.writeByte).toBe(1);
+        expect(bytes.writePos).toBe(8);
     });
 
     test('should pad read bits correctly', () => {
@@ -337,24 +323,10 @@ describe('padding operations', () => {
         bytes.writeBits(0xFF, 8);
         bytes.writeBits(0x5, 4);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         result.readBits(1);  // Read one bit
         result.padReadBits(); // Pad to next byte
-        expect(result.readBit).toBe(8);
-    });
-});
-
-describe('bytes operations', () => {
-    test('should write and read Bytes objects', () => {
-        // This test is disabled due to implementation issue in writeBytes
-        // The writeBytes method has a buffer range error
-        expect(true).toBe(true);
-    });
-
-    test('should handle empty Bytes objects', () => {
-        // This test is disabled due to implementation issue in writeBytes  
-        // The writeBytes method has a buffer range error
-        expect(true).toBe(true);
+        expect(result.readPos).toBe(8);
     });
 });
 
@@ -364,7 +336,7 @@ describe('string encoding/decoding', () => {
         const testStr = 'Hello, World!';
         bytes.writeString(testStr);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readString()).toBe(testStr);
     });
 
@@ -372,7 +344,7 @@ describe('string encoding/decoding', () => {
         const bytes = new Bytes();
         bytes.writeString('');
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readString()).toBe('');
     });
 
@@ -381,7 +353,7 @@ describe('string encoding/decoding', () => {
         const testStr = 'Hello\u0000World';
         bytes.writeString(testStr);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readString()).toBe(testStr);
     });
 
@@ -390,7 +362,7 @@ describe('string encoding/decoding', () => {
         const testStr = 'Hello\u0001World';
         bytes.writeString(testStr);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readString()).toBe(testStr);
     });
 
@@ -399,12 +371,13 @@ describe('string encoding/decoding', () => {
         const testStr = '🌍👋🏼 Hello, 世界！';
         bytes.writeString(testStr);
         
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readString()).toBe(testStr);
     });
 
     test('should throw error for non-null-terminated strings', () => {
-        const bytes = new Bytes(new Uint8Array([72, 101, 108, 108, 111])); // "Hello" without null terminator
+        const bytes = new Bytes();
+        bytes.writeFixedBlob(new TextEncoder().encode("Hell"));
         expect(() => bytes.readString()).toThrow('String not null-terminated');
     });
 
@@ -418,7 +391,7 @@ describe('string encoding/decoding', () => {
         }
         
         // Read back and verify
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         for (const expected of strings) {
             expect(result.readString()).toBe(expected);
         }
@@ -442,7 +415,7 @@ describe('mixed data types', () => {
         bytes.writeString('!');
         
         // Read back and verify
-        const result = new Bytes(bytes.buffer);
+        const result = new Bytes(bytes._buffer);
         expect(result.readBits(3)).toBe(0b101);
         expect(result.readNumber()).toBe(42);
         expect(result.readString()).toBe('Hello');
@@ -476,7 +449,7 @@ describe('binary sort order', () => {
     });
 
     test('should maintain number sort order', () => {
-        const numbers = [-Math.pow(2,52),-Math.pow(2,40),-Math.pow(2,32),-Math.pow(2,30), -100, -20, -5, -1, 0, 1, 5, 20, 100, Math.pow(2,30), Math.pow(2,32), Math.pow(2,40), Math.pow(2,52)];
+        const numbers = [-Math.pow(2,52),-Math.pow(2,40),-Math.pow(2,36),-Math.pow(2,36)+1,-Math.pow(2,32),-Math.pow(2,30), -100, -20, -5, -1, 0, 1, 5, 20, 100, Math.pow(2,30), Math.pow(2,32), Math.pow(2,36)-1, Math.pow(2,36), Math.pow(2,40), Math.pow(2,52)];
         const buffers: Uint8Array[] = [];
         
         // Create buffers with the numbers

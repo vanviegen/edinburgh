@@ -18,14 +18,16 @@ export function assert(cond: any, message?: string): asserts cond {
 export const ERROR_AT = /^(.*) at ([a-zA-Z0-9_.]+)$/;
 
 /**
- * Add a path segment to a DatabaseError message for better error reporting.
- * @param error - The DatabaseError to modify.
+ * Add a path segment to an exception for better error reporting.
+ * @param error - The (Database)Error to modify.
  * @param path - The path segment to add (string or number).
  * @returns The modified DatabaseError.
  */
-export function addErrorPath(error: DatabaseError, path: string | number): DatabaseError {
-    const m = error.message.match(ERROR_AT);
-    error.message = m ? `${m[1]} at ${path}.${m[2]}` : `${error.message} at ${path}`;
+export function addErrorPath<T>(error: T, path: string | number): T {
+    if (error instanceof Error) {
+        const m = error.message.match(ERROR_AT);
+        error.message = m ? `${m[1]} at ${path}.${m[2]}` : `${error.message} at ${path}`;
+    }
     return error;
 }
 
@@ -37,3 +39,26 @@ export let logLevel = 0;
 
 /** @internal Symbol used to access the underlying model from a proxy */
 export declare const TARGET_SYMBOL: unique symbol;
+
+export const delayedInits = new Set<{_delayedInit: () => boolean}>();
+let tryingDelayedInits = false;
+
+export function tryDelayedInits() {
+    if (tryingDelayedInits) return;
+    tryingDelayedInits = true;
+    let progress = true;
+    while(progress) {
+        progress = false;
+        for(const target of delayedInits) {
+            try {
+                if (target._delayedInit()) {
+                    delayedInits.delete(target);
+                    progress = true;
+                }
+            } catch(e) {
+                console.error("Error during delayed init:", e);
+            }
+        }
+    }
+    tryingDelayedInits = false;
+}
