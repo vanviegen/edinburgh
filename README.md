@@ -1,5 +1,5 @@
 # Edinburgh
-**Very fast object persistence for TypeScript, supporting optimistic transactions, on-demand reference loading, automatic back-references and indexes.**
+**Very fast object persistence for TypeScript, supporting optimistic transactions, lazy loading and indexes.**
 
 Edinburgh is a high-performance ORM built on [OLMDB](https://github.com/vanviegen/olmdb), providing type-safe model definitions with automatic field validation, ACID transactions, and efficient LMDB-based storage.
 
@@ -7,9 +7,9 @@ Edinburgh is a high-performance ORM built on [OLMDB](https://github.com/vanviege
 
 - 🚀 **Type-Safe Models**: Define models with automatic TypeScript type inference and runtime validation
 - 🔒 **ACID Transactions**: Optimistic locking with automatic retry on conflicts  
-- 🔗 **Relationship Management**: Automatic back-references and link handling between models
+- 🔗 **Relationships**: Model instances can reference each other, and will be lazy-loaded on access
+- 📦 **Embedded Database**: Negligible query latency, due to a blazing fast embedded database (LMDB)
 - 📊 **Custom Indexing**: Efficient querying with primary, unique, and multi-value indexes
-- 📦 **Zero Dependencies**: Minimal footprint, built on LMDB for maximum performance
 
 ## Quick Demo
 ```typescript
