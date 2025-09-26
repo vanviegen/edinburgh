@@ -1,4 +1,4 @@
-import { Bytes } from "./bytes.js";
+import { DataPack } from "./datapack.js";
 import * as olmdb from "olmdb";
 import { DatabaseError } from "olmdb";
 import { Model, modelRegistry, getMockModel } from "./models.js";
@@ -24,17 +24,17 @@ export abstract class TypeWrapper<const T> {
     constructor() {}
     
     /**
-    * Serialize a value from an object property to bytes.
+    * Serialize a value from an object property to a Pack.
     * @param value - The value to serialize.
-    * @param bytes - The Bytes instance to write to.
+    * @param pack - The Pack instance to write to.
     */
-    abstract serialize(value: T, bytes: Bytes): void;
+    abstract serialize(value: T, pack: DataPack): void;
 
     /**
-    * Deserialize a value from bytes into an object property.
-    * @param bytes - The Bytes instance to read from.
+    * Deserialize a value from a Pack into an object property.
+    * @param pack - The Pack instance to read from.
     */
-    abstract deserialize(bytes: Bytes): T;
+    abstract deserialize(pack: DataPack): T;
 
     /**
     * Validate a value.
@@ -44,10 +44,10 @@ export abstract class TypeWrapper<const T> {
     abstract getError(value: T): DatabaseError | void;
     
     /**
-    * Serialize type metadata to bytes (for schema serialization).
-    * @param bytes - The Bytes instance to write to.
+    * Serialize type metadata to a Pack (for schema serialization).
+    * @param pack - The Pack instance to write to.
     */
-    serializeType(bytes: Bytes) {}
+    serializeType(pack: DataPack) {}
     
     /**
     * Check if indexing should be skipped for this field value.
@@ -86,12 +86,12 @@ export interface TypeWrapper<T> {
 class StringType extends TypeWrapper<string> {
     kind = 'string';
     
-    serialize(value: string, bytes: Bytes) {
-        bytes.writeString(value);
+    serialize(value: string, pack: DataPack) {
+        pack.write(value);
     }
     
-    deserialize(bytes: Bytes): string {
-        return bytes.readString();
+    deserialize(pack: DataPack): string {
+        return pack.readString();
     }
 
     getError(value: string) {
@@ -102,15 +102,22 @@ class StringType extends TypeWrapper<string> {
 }
 
 
+class OrderedStringType extends StringType {
+    serialize(value: string, pack: DataPack) {
+        pack.writeOrderedString(value);
+    }
+}
+
+
 class NumberType extends TypeWrapper<number> {
     kind = 'number';
 
-    serialize(value: number, bytes: Bytes) {
-        bytes.writeNumber(value);
+    serialize(value: number, pack: DataPack) {
+        pack.write(value);
     }
 
-    deserialize(bytes: Bytes): number {
-        return bytes.readNumber();
+    deserialize(pack: DataPack): number {
+        return pack.readNumber();
     }
 
     getError(value: number) {
@@ -120,16 +127,38 @@ class NumberType extends TypeWrapper<number> {
     }
 }
 
+class DateTimeType extends TypeWrapper<Date> {
+    kind = 'dateTime';
+
+    serialize(value: Date, pack: DataPack) {
+        pack.write(value);
+    }
+
+    deserialize(pack: DataPack): Date {
+        return pack.readDate();;
+    }
+
+    getError(value: Date) {
+        if (!(value instanceof Date)) {
+            return new DatabaseError(`Expected Date, got ${typeof value}`, 'INVALID_TYPE');
+        }
+    }
+
+    default(): Date {
+        return new Date();
+    }
+
+}
 
 class BooleanType extends TypeWrapper<boolean> {
     kind = 'boolean';
 
-    serialize(value: boolean, bytes: Bytes) {
-        bytes.writeBits(value ? 1 : 0, 1);
+    serialize(value: boolean, pack: DataPack) {
+        pack.write(value);
     }
 
-    deserialize(bytes: Bytes): boolean {
-        return bytes.readBits(1) === 1;
+    deserialize(pack: DataPack): boolean {
+        return pack.readBoolean();
     }
 
     getError(value: boolean) {
@@ -155,18 +184,18 @@ class ArrayType<T> extends TypeWrapper<T[]> {
         super();
     }
     
-    serialize(value: T[], bytes: Bytes) {
-        bytes.writeNumber(value.length);
+    serialize(value: T[], pack: DataPack) {
+        pack.write(value.length);
         for(let i=0; i<value.length; i++) {
-            this.inner.serialize(value[i], bytes);
+            this.inner.serialize(value[i], pack);
         }
     }
     
-    deserialize(bytes: Bytes): T[] {
-        const length = bytes.readNumber();
+    deserialize(pack: DataPack): T[] {
+        const length = pack.readNumber();
         const result: T[] = [];
         for (let i = 0; i < length; i++) {
-            result.push(this.inner.deserialize(bytes));
+            result.push(this.inner.deserialize(pack));
         }
         return result;
     }
@@ -188,12 +217,12 @@ class ArrayType<T> extends TypeWrapper<T[]> {
         }
     }
     
-    serializeType(bytes: Bytes): void {
-        serializeType(this.inner, bytes);
+    serializeType(pack: DataPack): void {
+        serializeType(this.inner, pack);
     }
     
-    static deserializeType(bytes: Bytes, featureFlags: number): ArrayType<any> {
-        const inner = deserializeType(bytes, featureFlags);
+    static deserializeType(pack: DataPack, featureFlags: number): ArrayType<any> {
+        const inner = deserializeType(pack, featureFlags);
         return new ArrayType(inner);
     }
 
@@ -226,18 +255,18 @@ export class SetType<T> extends TypeWrapper<Set<T>> {
         super();
     }
 
-    serialize(value: Set<T>, bytes: Bytes) {
-        bytes.writeNumber(value.size);
+    serialize(value: Set<T>, pack: DataPack) {
+        pack.write(value.size);
         for (const item of value) {
-            this.inner.serialize(item, bytes);
+            this.inner.serialize(item, pack);
         }
     }
 
-    deserialize(bytes: Bytes): Set<T> {
-        const length = bytes.readNumber();
+    deserialize(pack: DataPack): Set<T> {
+        const length = pack.readNumber();
         const result = new Set<T>();
         for (let i = 0; i < length; i++) {
-            result.add(this.inner.deserialize(bytes));
+            result.add(this.inner.deserialize(pack));
         }
         return result;
     }
@@ -263,12 +292,12 @@ export class SetType<T> extends TypeWrapper<Set<T>> {
         }
     }
     
-    serializeType(bytes: Bytes): void {
-        serializeType(this.inner, bytes);
+    serializeType(pack: DataPack): void {
+        serializeType(this.inner, pack);
     }
     
-    static deserializeType(bytes: Bytes, featureFlags: number): SetType<any> {
-        const inner = deserializeType(bytes, featureFlags);
+    static deserializeType(pack: DataPack, featureFlags: number): SetType<any> {
+        const inner = deserializeType(pack, featureFlags);
         return new SetType(inner);
     }
 
@@ -316,19 +345,19 @@ class OrType<const T> extends TypeWrapper<T> {
         throw new DatabaseError(`Value does not match any union type: ${value}`, 'INVALID_TYPE');
     }
     
-    serialize(value: T, bytes: Bytes) {
+    serialize(value: T, pack: DataPack) {
         const choiceIndex = this._getChoiceIndex(value);
-        bytes.writeUIntN(choiceIndex, this.choices.length-1);
-        this.choices[choiceIndex].serialize(value, bytes);
+        pack.write(choiceIndex);
+        this.choices[choiceIndex].serialize(value, pack);
     }
     
-    deserialize(bytes: Bytes) {
-        const index = bytes.readUIntN(this.choices.length-1);
+    deserialize(pack: DataPack) {
+        const index = pack.readNumber();
         if (index < 0 || index >= this.choices.length) {
             throw new DatabaseError(`Could not deserialize invalid union index ${index}`, 'DESERIALIZATION_ERROR');
         }
         const type = this.choices[index];
-        return type.deserialize(bytes);
+        return type.deserialize(pack);
     }
     
     getError(value: any) {
@@ -343,18 +372,18 @@ class OrType<const T> extends TypeWrapper<T> {
         return this.choices[choiceIndex].containsNull(value);
     }
     
-    serializeType(bytes: Bytes): void {
-        bytes.writeNumber(this.choices.length);
+    serializeType(pack: DataPack): void {
+        pack.write(this.choices.length);
         for (const choice of this.choices) {
-            serializeType(choice, bytes);
+            serializeType(choice, pack);
         }
     }
     
-    static deserializeType(bytes: Bytes, featureFlags: number): OrType<any> {
-        const count = bytes.readNumber();
+    static deserializeType(pack: DataPack, featureFlags: number): OrType<any> {
+        const count = pack.readNumber();
         const choices: TypeWrapper<unknown>[] = [];
         for (let i = 0; i < count; i++) {
-            choices.push(deserializeType(bytes, featureFlags));
+            choices.push(deserializeType(pack, featureFlags));
         }
         return new OrType(choices);
     }
@@ -386,11 +415,11 @@ class LiteralType<const T> extends TypeWrapper<T> {
         super();
     }
     
-    serialize(value: T, bytes: Bytes) {
+    serialize(value: T, pack: DataPack) {
         // Literal values don't need to be serialized since they're constants
     }
     
-    deserialize(bytes: Bytes) {
+    deserialize(pack: DataPack) {
         return this.value;
     }
     
@@ -400,16 +429,16 @@ class LiteralType<const T> extends TypeWrapper<T> {
         }
     }
     
-    serializeType(bytes: Bytes): void {
-        bytes.writeString(this.value===undefined ? "" : JSON.stringify(this.value));
+    serializeType(pack: DataPack): void {
+        pack.write(this.value===undefined ? "" : JSON.stringify(this.value));
     }
     
     containsNull(value: T): boolean {
         return value == null;
     }
     
-    static deserializeType(bytes: Bytes, featureFlags: number): LiteralType<any> {
-        const json = bytes.readString();
+    static deserializeType(pack: DataPack, featureFlags: number): LiteralType<any> {
+        const json = pack.readString();
         const value = json==="" ? undefined : JSON.parse(json);
         return new LiteralType(value);
     }
@@ -419,7 +448,7 @@ class LiteralType<const T> extends TypeWrapper<T> {
     }
 }
 
-const ID_SIZE = 7;
+const ID_SIZE = 8;
 
 /**
 * @internal Type wrapper for auto-generated unique identifier strings.
@@ -427,23 +456,23 @@ const ID_SIZE = 7;
 class IdentifierType extends TypeWrapper<string> {
     kind = 'id';
     
-    serialize(value: string, bytes: Bytes): void {
+    serialize(value: string, pack: DataPack): void {
         assert(value.length === ID_SIZE);
-        bytes.writeBase64(value);
+        pack.writeIdentifier(value);
     }
 
-    deserialize(bytes: Bytes) {
-        return bytes.readBase64(ID_SIZE);
+    deserialize(pack: DataPack) {
+        return pack.readIdentifier();
     }
     
     getError(value: any) {
         if (typeof value !== 'string' || value.length !== ID_SIZE) return new DatabaseError(`Invalid ID format: ${value}`, 'VALUE_ERROR');
     }
     
-    serializeType(bytes: Bytes): void {
+    serializeType(pack: DataPack): void {
     }
     
-    static deserializeType(bytes: Bytes, featureFlags: number): IdentifierType {
+    static deserializeType(pack: DataPack, featureFlags: number): IdentifierType {
         return new IdentifierType();
     }
     
@@ -451,17 +480,8 @@ class IdentifierType extends TypeWrapper<string> {
         // Generate a random ID, and if it already exists in the database, retry.
         let id: string;
         do {
-            // Combine a timestamp with randomness, to create locality of reference as well as a high chance of uniqueness.
-            // Bits 9...42 are the date (wrapping about four times a year)
-            // Bit 0...14 are random bits (partly overlapping with the date, adding up to 31ms of jitter)
-            let num = Math.floor(+new Date() * (1<<9) + Math.random() * (1<<14));
-            
-            id = '';
-            for(let i = 0; i < 7; i++) {
-                id = Bytes.BASE64_CHARS[num & 0x3f] + id;
-                num = Math.floor(num / 64);
-            }
-        } while (olmdb.get(new Bytes().writeNumber(model.constructor._primary!._cachedIndexId!).writeBase64(id).getBuffer()));
+            id = DataPack.generateIdentifier();
+        } while (olmdb.get(new DataPack().write(model.constructor._primary!._cachedIndexId!).writeIdentifier(id).toUint8Array()));
         return id;
     }
 }
@@ -483,12 +503,12 @@ export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<Insta
         this.TargetModel = getMockModel(TargetModel);
     }
     
-    serialize(model: InstanceType<T>, bytes: Bytes) {
-        bytes.writeBlob(model._getCreatePrimaryKey());
+    serialize(model: InstanceType<T>, pack: DataPack) {
+        pack.write(model._getCreatePrimaryKey());
     }
     
-    deserialize(bytes: Bytes) {
-        return this.TargetModel._primary!.getLazy(bytes.readBlob());
+    deserialize(pack: DataPack) {
+        return this.TargetModel._primary!.getLazy(pack.readUint8Array());
     }
     
     getError(value: InstanceType<T>) {
@@ -497,31 +517,42 @@ export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<Insta
         }
     }
     
-    serializeType(bytes: Bytes): void {
-        bytes.writeString(this.TargetModel.tableName);
+    serializeType(pack: DataPack): void {
+        pack.write(this.TargetModel.tableName);
     }
     
-    static deserializeType(bytes: Bytes, featureFlags: number): LinkType<any> {
-        const tableName = bytes.readString();
+    static deserializeType(pack: DataPack, featureFlags: number): LinkType<any> {
+        const tableName = pack.readString();
         const targetModel = modelRegistry[tableName];
         if (!targetModel) throw new DatabaseError(`Could not deserialize undefined model ${tableName}`, 'DESERIALIZATION_ERROR');
         return new LinkType(targetModel);
     }
 }
 
-/** Constant representing the string type. */
+/** Type wrapper instance for the string type. */
 export const string = new StringType() as TypeWrapper<string>;
 
-/** Constant representing the number type. */
+/** Type wrapper instance for the ordered string type, which is just like a string
+ * except that it sorts lexicographically in the database (instead of by incrementing
+ * length first), making it suitable for index fields that want lexicographic range
+ * scans. Ordered strings are implemented as null-terminated UTF-8 strings, so they
+ * may not contain null characters.
+ */
+export const orderedString = new OrderedStringType() as TypeWrapper<string>;
+
+/** Type wrapper instance for the number type. */
 export const number = new NumberType() as TypeWrapper<number>;
 
-/** Constant representing the boolean type. */
+/** Type wrapper instance for the date/time type. */
+export const dateTime = new DateTimeType() as TypeWrapper<Date>;
+
+/** Type wrapper instance for the boolean type. */
 export const boolean = new BooleanType() as TypeWrapper<boolean>;
 
-/** Constant representing the identifier type. */
+/** Type wrapper instance for the identifier type. */
 export const identifier = new IdentifierType() as TypeWrapper<string>;
 
-/** Constant representing the 'undefined' type. */
+/** Type wrapper instance for the 'undefined' type. */
 export const undef = new LiteralType(undefined) as TypeWrapper<undefined>;
 
 /**
@@ -642,16 +673,16 @@ function wrapIfLiteral(type: any) {
 }
 
 /**
-* Serialize a type wrapper to bytes for schema persistence.
+* Serialize a type wrapper to a Pack for schema persistence.
 * @param arg - The type wrapper to serialize.
-* @param bytes - The Bytes instance to write to.
+* @param pack - The Pack instance to write to.
 */
-export function serializeType(arg: TypeWrapper<any>, bytes: Bytes) {
-    bytes.writeString(arg.kind);
-    arg.serializeType(bytes);
+export function serializeType(arg: TypeWrapper<any>, pack: DataPack) {
+    pack.write(arg.kind);
+    arg.serializeType(pack);
 }
 
-const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (bytes: Bytes, featureFlags: number) => TypeWrapper<any>}> = {
+const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (pack: DataPack, featureFlags: number) => TypeWrapper<any>}> = {
     string: string,
     number: number,
     array: ArrayType,
@@ -664,16 +695,16 @@ const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (bytes:
 };
 
 /**
-* Deserialize a type wrapper from bytes.
-* @param bytes - The Bytes instance to read from.
+* Deserialize a type wrapper from a Pack.
+* @param pack - The Pack instance to read from.
 * @param featureFlags - Feature flags for version compatibility.
 * @returns The deserialized type wrapper.
 */
-export function deserializeType(bytes: Bytes, featureFlags: number): TypeWrapper<any> {
-    const kind = bytes.readString();
+export function deserializeType(pack: DataPack, featureFlags: number): TypeWrapper<any> {
+    const kind = pack.readString();
     const TypeWrapper = TYPE_WRAPPERS[kind];
     if ('deserializeType' in TypeWrapper) {
-        return TypeWrapper.deserializeType(bytes, featureFlags);
+        return TypeWrapper.deserializeType(pack, featureFlags);
     } else {
         return TypeWrapper;
     }

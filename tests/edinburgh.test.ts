@@ -66,9 +66,9 @@ class User extends E.Model<User> {
 class CompositeKeyModel extends E.Model<CompositeKeyModel> {
     static pk = E.primary(CompositeKeyModel, ["category", "subcategory", "name"]);
     
-    category = E.field(E.string, {description: "Main category"});
-    subcategory = E.field(E.string, {description: "Sub category"});
-    name = E.field(E.string, {description: "Item name"});
+    category = E.field(E.orderedString, {description: "Main category"});
+    subcategory = E.field(E.orderedString, {description: "Sub category"});
+    name = E.field(E.orderedString, {description: "Item name"});
     value = E.field(E.number, {description: "Item value"});
     
     static byValue = E.unique(CompositeKeyModel, ["value"]);
@@ -502,7 +502,7 @@ test("Advanced model lifecycle and registration", async () => {
     await E.transact(() => {
         const model = new AutoIdModel({name: "test"});
         expect(typeof (model as any).id).toBe("string");
-        expect((model as any).id.length).toBe(7);
+        expect((model as any).id.length).toBe(8);
         model.preventPersist();
     });
 
@@ -618,7 +618,6 @@ test("Model state management and persistence", async () => {
 
     // Verify deletion
     await E.transact(() => {
-        E.dump();
         let loaded = User.pk.get(userId);
         expect(loaded).toBeUndefined();
         loaded = User.byEmail.get("state@test.com");
@@ -1184,11 +1183,9 @@ test("Secondary index implementation", async () => {
 
     // Verify both the changed and unchanged indices are still okay
     await E.transact(() => {
-        E.dump();
         // expect(Product.byName.get("Phone")!.price).toBe(799);
         let count = 0;
         for (const product of Product.byPrice.find({from: 790, to: 810})) {
-            console.log('pp', product)
             expect(product.price).toBe(799);
             expect(product.name).toBe("Phone");
             count++;

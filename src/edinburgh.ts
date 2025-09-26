@@ -15,7 +15,9 @@ import type { ChangedModel } from "./models.js";
 export {
     // Pre-defined type instances
     string,
+    orderedString,
     number,
+    dateTime,
     boolean,
     identifier,
     undef,
@@ -34,6 +36,10 @@ export {
     unique,
     dump,
 } from "./indexes.js";
+
+export {
+    setLogLevel
+} from "./utils.js";
 
 export { BaseIndex, UniqueIndex, PrimaryIndex } from './indexes.js';
 

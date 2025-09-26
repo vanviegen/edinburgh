@@ -1,6 +1,6 @@
 {
   "name": "edinburgh",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "author": "Frank van Viegen",
   "devDependencies": {
     "@types/bun": "^1.2.16",
@@ -15,10 +15,10 @@
       "types": "./build/src/edinburgh.d.ts",
       "default": "./build/src/edinburgh.js"
     },
-    "./bytes": {
-      "bun": "./src/bytes.ts",
-      "types": "./build/src/bytes.d.ts",
-      "default": "./build/src/bytes.js"
+    "./datapack": {
+      "bun": "./src/datapack.ts",
+      "types": "./build/src/datapack.d.ts",
+      "default": "./build/src/datapack.js"
     }
   },
   "description": "Very fast object persistence for TypeScript, supporting optimistic transactions, on-demand reference loading, automatic back-references and indexes.",

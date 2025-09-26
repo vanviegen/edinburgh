@@ -1,5 +1,3 @@
-import { DatabaseError } from "olmdb";
-
 /**
  * Assert function for runtime checks with TypeScript assertion support.
  * @param cond - Condition to check.
@@ -31,11 +29,16 @@ export function addErrorPath<T>(error: T, path: string | number): T {
     return error;
 }
 
+// Get initial log level from environment variable
+export let logLevel = parseInt(process.env.EDINBURGH_LOG_LEVEL || "0") || 0;
+
 /**
  * Global log level for debugging output.
  * 0 = no logging, 1 = model-level logs, 2 = update logs, 3 = read logs.
  */
-export let logLevel = 0;
+export function setLogLevel(level: number) {
+    logLevel = level;
+}
 
 /** @internal Symbol used to access the underlying model from a proxy */
 export declare const TARGET_SYMBOL: unique symbol;

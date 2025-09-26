@@ -1,11 +1,9 @@
 import * as olmdb from "olmdb";
 import { DatabaseError } from "olmdb";
-import { Bytes } from "./bytes.js";
+import { DataPack } from "./datapack.js";
 import { FieldConfig, getMockModel, Model, modelRegistry } from "./models.js";
 import { assert, logLevel, delayedInits, tryDelayedInits } from "./utils.js";
 import { deserializeType, serializeType, TypeWrapper } from "./types.js";
-
-Bytes.enableDebug();
 
 // Index system types and utilities
 type IndexArgTypes<M extends typeof Model<any>, F extends readonly (keyof InstanceType<M> & string)[]> = {
@@ -40,7 +38,7 @@ export class IndexRangeIterator<M extends typeof Model> implements Iterator<Inst
         }
         
         // Extract the key without the index ID
-        const keyBytes = new Bytes(entry.value.key);
+        const keyBytes = new DataPack(entry.value.key);
         const entryIndexId = keyBytes.readNumber();
         assert(entryIndexId === this.indexId);
 
@@ -179,13 +177,13 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @returns A Bytes instance containing the index id and serialized key parts.
      * @internal
      */
-    _argsToKeyBytes(args: [], allowPartial: boolean): Bytes;
-    _argsToKeyBytes(args: Partial<IndexArgTypes<M, F>>, allowPartial: boolean): Bytes;
+    _argsToKeyBytes(args: [], allowPartial: boolean): DataPack;
+    _argsToKeyBytes(args: Partial<IndexArgTypes<M, F>>, allowPartial: boolean): DataPack;
 
     _argsToKeyBytes(args: any, allowPartial: boolean) {
         assert(allowPartial ? args.length <= this._fieldCount : args.length === this._fieldCount);
-        const bytes = new Bytes();
-        bytes.writeNumber(this._getIndexId());
+        const bytes = new DataPack();
+        bytes.write(this._getIndexId());
         let index = 0;
         for(const fieldType of this._fieldTypes.values()) {
             // For partial keys, undefined values are acceptable and represent open range suffixes
@@ -197,7 +195,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
 
     _argsToKeySingleton(args: IndexArgTypes<M, F>): Uint8Array {
         const bytes = this._argsToKeyBytes(args, false);
-        return getSingletonUint8Array(bytes.getBuffer());
+        return getSingletonUint8Array(bytes.toUint8Array());
     }
 
     /**
@@ -207,7 +205,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @returns Model instance or undefined.
      * @internal
      */
-    abstract _pairToInstance(keyBytes: Bytes, valueBuffer: Uint8Array): InstanceType<M> | undefined;
+    abstract _pairToInstance(keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined;
 
     _hasNullIndexValues(model: InstanceType<M>) {
         for(const fieldName of this._fieldTypes.keys()) {
@@ -216,9 +214,9 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         return false;
     }
 
-    _instanceToKeyBytes(model: InstanceType<M>): Bytes {
-        const bytes = new Bytes();
-        bytes.writeNumber(this._getIndexId());
+    _instanceToKeyBytes(model: InstanceType<M>): DataPack {
+        const bytes = new DataPack();
+        bytes.write(this._getIndexId());
         for(const [fieldName, fieldType] of this._fieldTypes.entries()) {
             fieldType.serialize(model[fieldName], bytes);
         }
@@ -233,30 +231,30 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         // Resolve an index to a number
         let indexId = this._cachedIndexId;
         if (indexId == null) {
-            const indexNameBytes = new Bytes().writeNumber(INDEX_ID_PREFIX).writeString(this._MyModel.tableName).writeString(this._getTypeName());
+            const indexNameBytes = new DataPack().write(INDEX_ID_PREFIX).write(this._MyModel.tableName).write(this._getTypeName());
             for(let name of this._fieldNames) {
-                indexNameBytes.writeString(name);
+                indexNameBytes.write(name);
                 serializeType(this._MyModel.fields[name].type, indexNameBytes);
             }
-            const indexNameBuf = indexNameBytes.getBuffer();
+            const indexNameBuf = indexNameBytes.toUint8Array();
 
             let result = olmdb.get(indexNameBuf);
             if (result) {
-                indexId = this._cachedIndexId = new Bytes(result).readNumber();
+                indexId = this._cachedIndexId = new DataPack(result).readNumber();
             } else {
-                const maxIndexIdBuf = new Bytes().writeNumber(MAX_INDEX_ID_PREFIX).getBuffer();
+                const maxIndexIdBuf = new DataPack().write(MAX_INDEX_ID_PREFIX).toUint8Array();
                 result = olmdb.get(maxIndexIdBuf);
-                indexId = result ? new Bytes(result).readNumber() + 1 : 1;
+                indexId = result ? new DataPack(result).readNumber() + 1 : 1;
                 olmdb.onCommit(() => {
                     // Only if the transaction succeeds can we cache this id
                     this._cachedIndexId = indexId;
                 });
 
-                const idBuf = new Bytes().writeNumber(indexId).getBuffer();
+                const idBuf = new DataPack().write(indexId).toUint8Array();
                 olmdb.put(indexNameBuf, idBuf);
                 olmdb.put(maxIndexIdBuf, idBuf); // This will also cause the transaction to rerun if we were raced
                 if (logLevel >= 1) {
-                    console.log(`Created ${this} with id ${indexId}`);
+                    console.log(`Create ${this} with id ${indexId}`);
                 }
             }
         }
@@ -328,13 +326,13 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     public find(opts: FindOptions<IndexArgTypes<M, F>> = {}): IndexRangeIterator<M> {
         const indexId = this._getIndexId();
         
-        let startKey: Bytes | undefined;
-        let endKey: Bytes | undefined;
+        let startKey: DataPack | undefined;
+        let endKey: DataPack | undefined;
 
         if ('is' in opts) {
             // Exact match - set both 'from' and 'to' to the same value
             startKey = this._argsToKeyBytes(toArray(opts.is), true);
-            endKey = startKey.copy().increment();
+            endKey = startKey.clone(true).increment();
         } else {
             // Range query
             if ('from' in opts) {
@@ -364,9 +362,12 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         const scanStart = opts.reverse ? endKey : startKey;
         const scanEnd = opts.reverse ? startKey : endKey;
 
+        if (logLevel >= 3) {
+            console.log(`Scan ${this} start=${scanStart} end=${scanEnd} reverse=${opts.reverse||false}`);
+        }
         const iterator = olmdb.scan({
-            start: scanStart?.getBuffer(),
-            end: scanEnd?.getBuffer(),
+            start: scanStart?.toUint8Array(),
+            end: scanEnd?.toUint8Array(),
             reverse: opts.reverse || false,
         });
         
@@ -376,7 +377,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     abstract _getTypeName(): string;
 
     toString() {
-        return `${this._getTypeName()} ${this._MyModel.tableName}[${Array.from(this._fieldTypes.keys()).join(', ')}]`;
+        return `${this._getIndexId()}:${this._MyModel.tableName}:${this._getTypeName()}[${Array.from(this._fieldTypes.keys()).join(',')}]`;
     }
 }
 
@@ -462,10 +463,6 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     _get(args: IndexArgTypes<M, F> | [Uint8Array], lazy: true): InstanceType<M>;
     _get(args: IndexArgTypes<M, F> | [Uint8Array], lazy: false): InstanceType<M> | undefined;
     _get(args: IndexArgTypes<M, F> | [Uint8Array], lazy: boolean) {
-        if (logLevel >= 3) {
-            console.log(`Getting ${this} (id=${this._getIndexId()}) with key`, args);
-        }
-        
         let key, keyParts;
         if (args.length === 1 && args[0] instanceof Uint8Array) {
             key = getSingletonUint8Array(args[0]);
@@ -481,6 +478,9 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
         let valueBuffer;
         if (!lazy) {
             valueBuffer = olmdb.get(key);
+            if (logLevel >= 3) {
+                console.log(`Get ${this} key=${new DataPack(key)} result=${valueBuffer && new DataPack(valueBuffer)}`);
+            }
             if (!valueBuffer) return;
         }
         
@@ -497,7 +497,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
                 model._setLoadedField(fieldName, keyParts[index++] as any);
             }
         } else {
-            const bytes = new Bytes(key);
+            const bytes = new DataPack(key);
             assert(bytes.readNumber() === this._MyModel._primary._getIndexId()); // Skip index id
             for(const [fieldName, fieldType] of this._fieldTypes.entries()) {
                 model._setLoadedField(fieldName, fieldType.deserialize(bytes));
@@ -506,7 +506,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
 
         if (valueBuffer) {
             // Set other fields
-            this._setNonKeyValues(model, new Bytes(valueBuffer));
+            this._setNonKeyValues(model, new DataPack(valueBuffer));
         } else {
             // Lazy - set getters for other fields
             Object.defineProperties(model, this._lazyDescriptors);
@@ -522,17 +522,20 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
      */
     _instanceToKeySingleton(model: InstanceType<M>): Uint8Array {
         const bytes = this._instanceToKeyBytes(model);
-        return getSingletonUint8Array(bytes.getBuffer());
+        return getSingletonUint8Array(bytes.toUint8Array());
     }
 
     _lazyNow(model: InstanceType<M>) {
         let valueBuffer = olmdb.get(model._primaryKey!);
+        if (logLevel >= 3) {
+            console.log(`Lazy retrieve ${this} key=${new DataPack(model._primaryKey)} result=${valueBuffer && new DataPack(valueBuffer)}`);
+        }
         if (!valueBuffer) throw new DatabaseError(`Lazy-loaded ${model.constructor.name}#${model._primaryKey} does not exist`, 'LAZY_FAIL');
         Object.defineProperties(model, this._resetDescriptors);
-        this._setNonKeyValues(model, new Bytes(valueBuffer));
+        this._setNonKeyValues(model, new DataPack(valueBuffer));
     }
 
-    _setNonKeyValues(model: InstanceType<M>, valueBytes: Bytes) {
+    _setNonKeyValues(model: InstanceType<M>, valueBytes: DataPack) {
         const fieldConfigs = this._MyModel.fields;
 
         for (const fieldName of this._nonKeyFields) {
@@ -542,20 +545,20 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     }
 
     _keyToArray(key: Uint8Array): IndexArgTypes<M, F> {
-        const bytes = new Bytes(key);
+        const bytes = new DataPack(key);
         return this._fieldTypes.values().map((fieldType) => {
             return fieldType.deserialize(bytes);
         }) as any;
     }
 
-    _pairToInstance(keyBytes: Bytes, valueBuffer: Uint8Array): InstanceType<M> | undefined {
-        const valueBytes = new Bytes(valueBuffer);
+    _pairToInstance(keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined {
+        const valueBytes = new DataPack(valueBuffer);
         const model = new (this._MyModel as any)() as InstanceType<M>;
 
         for(const [fieldName, fieldType] of this._fieldTypes.entries()) {
             model._setLoadedField(fieldName, fieldType.deserialize(keyBytes));
         }
-        model._primaryKey = getSingletonUint8Array(keyBytes.getBuffer());
+        model._primaryKey = getSingletonUint8Array(keyBytes.toUint8Array());
         
         this._setNonKeyValues(model, valueBytes);
 
@@ -567,19 +570,23 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     }
 
     _write(model: InstanceType<M>) {
-        let valueBytes = new Bytes();
+        let valueBytes = new DataPack();
         const fieldConfigs = this._MyModel.fields as any;
         for (const fieldName of this._nonKeyFields) {
             const fieldConfig = fieldConfigs[fieldName] as FieldConfig<unknown>;
             fieldConfig.type.serialize(model[fieldName], valueBytes);
         }
-        console.log("Writing primary key", model._primaryKey);
-        olmdb.put(model._getCreatePrimaryKey(), valueBytes.getBuffer());
+        if (logLevel >= 2) {
+            console.log(`Write ${this} key=${new DataPack(model._getCreatePrimaryKey())} value=${valueBytes}`);
+        }
+        olmdb.put(model._getCreatePrimaryKey(), valueBytes.toUint8Array());
     }
 
     _delete(model: InstanceType<M>) {
         if (model._primaryKey) {
-            console.log("Deleting primary key", model._primaryKey);
+            if (logLevel >= 2) {
+                console.log(`Delete ${this} key=${new DataPack(model._primaryKey)}`);
+            }
             olmdb.del(model._primaryKey);
         }
     }
@@ -611,11 +618,10 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
     get(...args: IndexArgTypes<M, F>): InstanceType<M> | undefined {
         let keyBuffer = this._argsToKeySingleton(args);
 
-        if (logLevel >= 3) {
-            console.log(`Getting unique ${this} (id=${this._getIndexId()}) with key`, args, keyBuffer);
-        }
-
         let valueBuffer = olmdb.get(keyBuffer);
+        if (logLevel >= 3) {
+            console.log(`Get ${this} key=${new DataPack(keyBuffer)} result=${valueBuffer}`);
+        }
         if (!valueBuffer) return;
 
         const pk = this._MyModel._primary!;
@@ -626,17 +632,25 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
 
     _delete(model: InstanceType<M>) {
         if (!this._hasNullIndexValues(model)) {
-            olmdb.del(this._instanceToKeyBytes(model).getBuffer());
+            const keyBytes = this._instanceToKeyBytes(model);
+            if (logLevel >= 2) {
+                console.log(`Delete ${this} key=${keyBytes}`);
+            }
+            olmdb.del(keyBytes.toUint8Array());
         }
     }
 
     _write(model: InstanceType<M>) {
         if (!this._hasNullIndexValues(model)) {
-            const key = this._instanceToKeyBytes(model).getBuffer();
-            if (olmdb.get(key)) {
-                throw new DatabaseError(`Unique constraint violation for ${this} (id=${this._getIndexId()})`, 'UNIQUE_CONSTRAINT');
+            const key = this._instanceToKeyBytes(model);
+            if (logLevel >= 2) {
+                console.log(`Write ${this} key=${key} value=${new DataPack(model._primaryKey)}`);
             }
-            olmdb.put(key, model._primaryKey!);
+            const keyBuffer = key.toUint8Array();
+            if (olmdb.get(keyBuffer)) {
+                throw new DatabaseError(`Unique constraint violation for ${this} key ${key}`, 'UNIQUE_CONSTRAINT');
+            }
+            olmdb.put(keyBuffer, model._primaryKey!);
         }
     }
 
@@ -647,7 +661,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
      * @returns Model instance or undefined.
      * @internal
      */
-    _pairToInstance(keyBytes: Bytes, valueBuffer: Uint8Array): InstanceType<M> | undefined {
+    _pairToInstance(keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined {
         // For unique indexes, the value contains the primary key
 
         const pk = this._MyModel._primary!;
@@ -674,7 +688,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
 }
 
 // OLMDB does not support storing empty values, so we use a single byte value for secondary indexes.
-const SECONDARY_VALUE = new Uint8Array([64]); // Single byte value for secondary indexes
+const SECONDARY_VALUE = new DataPack().write(undefined).toUint8Array(); // Single byte value for secondary indexes
 
 /**
  * Secondary index for non-unique lookups.
@@ -696,7 +710,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
      * @returns Model instance or undefined.
      * @internal
      */
-    _pairToInstance(keyBytes: Bytes, valueBuffer: Uint8Array): InstanceType<M> | undefined {
+    _pairToInstance(keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined {
         // For secondary indexes, the primary key is stored after the index fields in the key
         
         // Read the index fields, saving them for later
@@ -705,7 +719,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
             indexFields.set(name, type.deserialize(keyBytes));
         }
 
-        const primaryKey = keyBytes.readBlob();
+        const primaryKey = keyBytes.readUint8Array();
         const model = this._MyModel._primary!.getLazy(primaryKey);
 
         // Add the index fields to the model, overriding lazy loading for these fields
@@ -722,23 +736,29 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
         return model;
     }
 
-    _instanceToKeyBytes(model: InstanceType<M>): Bytes {
+    _instanceToKeyBytes(model: InstanceType<M>): DataPack {
         // index id + index fields + primary key
         const bytes = super._instanceToKeyBytes(model);
-        bytes.writeBlob(model._getCreatePrimaryKey());
+        bytes.write(model._getCreatePrimaryKey());
         return bytes;
     }
 
     _write(model: InstanceType<M>) {
         if (this._hasNullIndexValues(model)) return;
         const keyBytes = this._instanceToKeyBytes(model);
-        olmdb.put(keyBytes.getBuffer(), SECONDARY_VALUE);
+        if (logLevel >= 2) {
+            console.log(`Write ${this} key=${keyBytes}`);
+        }
+        olmdb.put(keyBytes.toUint8Array(), SECONDARY_VALUE);
     }
 
     _delete(model: InstanceType<M>): void {
         if (this._hasNullIndexValues(model)) return;
         const keyBytes = this._instanceToKeyBytes(model);
-        olmdb.del(keyBytes.getBuffer());
+        if (logLevel >= 2) {
+            console.log(`Delete ${this} key=${keyBytes}`);
+        }
+        olmdb.del(keyBytes.toUint8Array());
     }
 
     _getTypeName(): string {
@@ -835,8 +855,8 @@ export function dump() {
     let indexesById = new Map<number, {name: string, type: string, fields: Record<string, TypeWrapper<any>>}>();
     console.log("--- Database dump ---")
     for(const {key,value} of olmdb.scan()) {
-        const kb = new Bytes(key);
-        const vb = new Bytes(value);
+        const kb = new DataPack(key);
+        const vb = new DataPack(value);
         const indexId = kb.readNumber();
         if (indexId === MAX_INDEX_ID_PREFIX) {
             console.log("* Max index id", vb.readNumber());
@@ -848,9 +868,8 @@ export function dump() {
                 const name = kb.readString();
                 fields[name] = deserializeType(kb, 0);
             }
-            const fieldDescription = Object.entries(fields).map(([name, type]) => `${name}:${type}`);
             const indexId = vb.readNumber();
-            console.log(`* Definition for ${type} ${indexId} for ${name}[${fieldDescription.join(',')}]`);
+            console.log(`* Index definition ${indexId}:${name}:${type}[${Object.keys(fields).join(',')}]`);
             indexesById.set(indexId, {name, type, fields});
         } else if (indexId > 0 && indexesById.has(indexId)) {
             const index = indexesById.get(indexId)!;
@@ -859,11 +878,11 @@ export function dump() {
             for(const [fieldName, fieldType] of Object.entries(fields)) {
                 rowKey[fieldName] = fieldType.deserialize(kb);
             }
-            const Model = modelRegistry[name]!;
+            // const Model = modelRegistry[name]!;
             // TODO: once we're storing schemas (serializeType) in the db, we can deserialize here
-            console.log(`* Row for ${name}:${type}(${indexId}) with key ${JSON.stringify(rowKey)}`, kb.getBuffer(), vb.getBuffer());
+            console.log(`* Row for ${indexId}:${name}:${type}[${Object.keys(fields).join(',')}] key=${kb} value=${vb}`);
         } else {
-            console.log(`* Unhandled ${indexId} index key=${kb} value=${vb}`);
+            console.log(`* Unhandled '${indexId}' key=${kb} value=${vb}`);
         }
     }
     console.log("--- End of database dump ---")
