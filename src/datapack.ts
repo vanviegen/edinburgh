@@ -13,7 +13,8 @@ const RESET_COLOR = '\x1b[0m';
 const ERROR_COLOR = '\x1b[31m'; // red
 
 let toStringTermCount = 0;
-let useExtendedLogging = !!process.env.DATAPACK_EXTENDED_LOGGING;
+let useExtendedLogging = typeof process !== 'undefined' ? !!process.env?.DATAPACK_EXTENDED_LOGGING : false;
+
 
 /**
  * A byte buffer for efficient reading and writing of primitive values and bit sequences.
@@ -23,7 +24,7 @@ let useExtendedLogging = !!process.env.DATAPACK_EXTENDED_LOGGING;
  * It supports both reading and writing operations with automatic buffer management.
  */
 
-export class DataPack {
+export default class DataPack {
     private buffer: Uint8Array;
     private dataView?: DataView;
 
@@ -41,7 +42,7 @@ export class DataPack {
      * Create a new DataPack instance.
      * @param data - Optional initial data as Uint8Array or buffer size as number.
      */
-    constructor(data: Uint8Array | number = 3900) {
+    constructor(data: Uint8Array | number = 1900) {
         if (data instanceof Uint8Array) {
             this.buffer = data;
             this.writePos = data.length;
@@ -123,6 +124,8 @@ export class DataPack {
      *   9: EOD
      *   10: identifier (6 byte positive int follows, represented as a base64 string of length 8)
      *   11: null-terminated string
+     *   12: Date/Time (varint with whole seconds since epoch follows)
+     *   13: custom type, followed by name string and data value
      * 5: short string (length in lower bits, 0-31)
      * 6: string (byte count of length in lower bits)
      * 7: blob (byte count of length in lower bits)
@@ -205,21 +208,21 @@ export class DataPack {
             this.buffer[this.writePos++] = (4 << 5) | 12;
             // Write a varint -- whole seconds should be plenty of resolution
             this.write(Math.floor(data.getTime()/1000));
-        } else if (typeof data === 'object' && data.constructor === Object) {
-            // Type 4, subtype 6: object start
-            this.buffer[this.writePos++] = (4 << 5) | 6;
-            for (const [key, value] of Object.entries(data)) {
-                this.write(key);
-                this.write(value);
+        } else if (typeof data === 'object') {
+            if (data instanceof CustomData) {
+                this.writeCustom(data.name, data.data);
+            } else if (typeof data.toDataPack === 'function') {
+                data.toDataPack(this);
+            } else {
+                this.writeAsObject(data);
             }
-            this.buffer[this.writePos++] = (4 << 5) | 9; // EOD
         } else {
             throw new Error(`Unsupported data type: ${typeof data}`);
         }
         return this;
     }
 
-    read(): any {
+    read(customConverters?: {[name: string]: ((data: any) => any)} | undefined): any {
         if (this.readPos > this.writePos) {
             throw new Error('Not enough data');
         }
@@ -251,7 +254,7 @@ export class DataPack {
             }
 
             case 4: {
-                // Special values and container starts
+                // Floats, special values and collections
                 switch (subtype) {
                     case 0: {
                         // float64
@@ -269,19 +272,19 @@ export class DataPack {
                         // Array start
                         const result = [];
                         while (true) {
-                            const nextValue = this.read();
+                            const nextValue = this.read(customConverters);
                             if (nextValue === EOD) break;
                             result.push(nextValue);
                         }
                         return result;
                     }
                     case 6: {
-                        // Object start
-                        const result: any = {};
+                        // Plain object or custom class instance
+                        let result: any = {};
                         while (true) {
-                            const key = this.read();
+                            const key = this.read(customConverters);
                             if (key === EOD) break;
-                            const value = this.read();
+                            const value = this.read(customConverters);
                             result[key] = value;
                         }
                         return result;
@@ -290,9 +293,9 @@ export class DataPack {
                         // Map start
                         const result = new Map();
                         while (true) {
-                            const key = this.read();
+                            const key = this.read(customConverters);
                             if (key === EOD) break;
-                            const value = this.read();
+                            const value = this.read(customConverters);
                             result.set(key, value);
                         }
                         return result;
@@ -301,7 +304,7 @@ export class DataPack {
                         // Set start
                         const result = new Set();
                         while (true) {
-                            const value = this.read();
+                            const value = this.read(customConverters);
                             if (value === EOD) break;
                             result.add(value);
                         }
@@ -310,7 +313,7 @@ export class DataPack {
                     case 9: return EOD;
                     case 10: {
                         // Identifier (6 byte positive int follows, represented as a base64 string of length 8)
-                        --this.readPos;
+                        --this.readPos; // readIdentifier() will read the header byte again
                         return this.readIdentifier();
                     }
                     case 11: {
@@ -329,6 +332,12 @@ export class DataPack {
                         // Date/Time (varint with whole seconds since epoch follows)
                         const seconds = this.readPositiveInt();
                         return new Date(seconds * 1000);
+                    }
+                    case 13: {
+                        // Custom type, followed by name string and data value
+                        const name = this.readString();
+                        const data = this.read();
+                        return (customConverters && name in customConverters) ? customConverters[name](data) : new CustomData(name, data);
                     }
                     default: throw new Error(`Unknown type 4 subtype: ${subtype}`);
                 }
@@ -430,19 +439,24 @@ export class DataPack {
         return result;
     }
 
-    writeIdentifier(id: string): DataPack {
-        if (id.length !== 8) {
-            throw new Error(`Identifier must be exactly 8 characters, got ${id.length}`);
-        }
-        
-        // Convert base64 string to 48-bit number
-        let value, num = 0;
-        for (let i = 0; i < 8; i++) {
-            const char = id.charCodeAt(i);
-            if (char > 127 || (value = BASE64_LOOKUP[char]) === 255) {
-                throw new Error(`Invalid base64 character: ${id[i]}`);
+    writeIdentifier(id: string | number): DataPack {
+        let num: number = 0;
+        if (typeof id === 'number') {
+            num = id;
+        } else {
+            if (id.length !== 8) {
+                throw new Error(`Identifier must be exactly 8 characters, got ${id.length}`);
             }
-            num = num * 64 + value;
+            
+            // Convert base64 string to 48-bit number
+            let value;
+            for (let i = 0; i < 8; i++) {
+                const char = id.charCodeAt(i);
+                if (char > 127 || (value = BASE64_LOOKUP[char]) === 255) {
+                    throw new Error(`Invalid base64 character: ${id[i]}`);
+                }
+                num = num * 64 + value;
+            }
         }
         
         // Write type 4, subtype 10 header
@@ -451,13 +465,28 @@ export class DataPack {
         
         // Write the 6-byte number in big-endian format
         for (let i = 5; i >= 0; i--) {
-            this.buffer[this.writePos++] = Math.floor(num / Math.pow(256, i)) & 0xFF;
+            this.buffer[this.writePos + i] = num % 256;
+            num = Math.floor(num / 256);
         }
+        this.writePos += 6;
         
         return this;
     }
 
     readIdentifier(): string {
+        let num = this.readIdentifierNumber();
+        
+        // Convert 48-bit number back to 8-character base64 string
+        let id = '';
+        for (let i = 0; i < 8; i++) {
+            id = BASE64_CHARS[num % 64] + id;
+            num = Math.floor(num / 64);
+        }
+        
+        return id;
+    }
+
+    readIdentifierNumber(): number {
         // Read the 6-byte number in big-endian format
         if (this.readPos + 7 > this.writePos) this.notEnoughData('identifier');
 
@@ -470,15 +499,7 @@ export class DataPack {
         for (let i = 0; i < 6; i++) {
             num = (num * 256) + this.buffer[this.readPos++];
         }
-        
-        // Convert 48-bit number back to 8-character base64 string
-        let id = '';
-        for (let i = 0; i < 8; i++) {
-            id = BASE64_CHARS[num % 64] + id;
-            num = Math.floor(num / 64);
-        }
-        
-        return id;
+        return num;
     }
 
     /**
@@ -503,6 +524,10 @@ export class DataPack {
         return copyBuffer ? this.buffer.slice(startPos, endPos) : this.buffer.subarray(startPos, endPos);
     }
 
+    toBuffer(): ArrayBuffer {
+        return this.buffer.buffer.slice(0, this.writePos) as ArrayBuffer;
+    }
+
     clone(copyBuffer: boolean, readPos: number = 0, writePos: number = this.writePos): DataPack {
         if (copyBuffer) {
             return new DataPack(this.buffer.slice(readPos, writePos));
@@ -512,6 +537,23 @@ export class DataPack {
             pack.writePos = writePos;
             return pack;
         }
+    }
+
+    writeCustom(name: string, data: any) {
+        this.buffer[this.writePos++] = (4 << 5) | 13;
+        this.write(name);
+        this.write(data);
+    }
+
+    writeAsObject(obj: Record<string, any>) {
+        // Type 4, subtype 6: object start
+        this.buffer[this.writePos++] = (4 << 5) | 6;
+        for (const key of Object.keys(obj)) {
+            this.write(key);
+            this.write(obj[key]);
+        }
+        this.buffer[this.writePos++] = (4 << 5) | 9; // EOD
+        return this;
     }
 
     /**
@@ -640,6 +682,22 @@ export class DataPack {
         }
         return id;
     }
+
+    static createBuffer(...args: any) {
+        const pack = new DataPack();
+        for (const arg of args) {
+            pack.write(arg);
+        }
+        return pack.toBuffer();
+    }
+
+    static createUint8Array(...args: any) {
+        const pack = new DataPack();
+        for (const arg of args) {
+            pack.write(arg);
+        }
+        return pack.toUint8Array(false);
+    }
 }
 
 function toText(v: any): string {
@@ -653,3 +711,14 @@ function toText(v: any): string {
     }
     return JSON.stringify(v);
 }
+
+
+class CustomData {
+    constructor(public name: string, public data: any) {}
+}
+
+export default interface DataPack {
+    CustomData: typeof CustomData;
+}
+
+DataPack.prototype.CustomData = CustomData;

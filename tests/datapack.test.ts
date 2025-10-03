@@ -1,4 +1,4 @@
-import { DataPack } from "../src/datapack.js";
+import DataPack from "../src/datapack.js";
 import { expect, test, describe } from "vitest";
 
 describe('constructor', () => {
@@ -150,6 +150,46 @@ describe('complex data types', () => {
         expect(readDate).toBeInstanceOf(Date);
         expect(readDate.toISOString()).toBe(date.toISOString());
     });
+
+    test('should write and read custom data', () => {
+        const pack = new DataPack();
+        pack.writeCustom("test-type", { value: 42 });
+        
+        const customData = pack.read();
+        
+        expect(customData.name).toBe("test-type");
+        expect(customData.data).toEqual({ value: 42 });
+    });
+
+    test('should use custom converters when reading', () => {
+        const pack = new DataPack();
+        pack.writeCustom("Point", { x: 10, y: 20 });
+        
+        const converters = {
+            Point: (data: any) => ({ x: data.x * 2, y: data.y * 2 })
+        };
+        
+        const result = pack.read(converters);
+        expect(result).toEqual({ x: 20, y: 40 });
+    });
+
+    test('should handle objects with toDataPack method', () => {
+        const pack = new DataPack();
+        
+        class TestClass {
+            constructor(public value: number) {}
+            
+            toDataPack(dataPack: DataPack) {
+                dataPack.writeCustom("TestClass", this.value);
+            }
+        }
+        
+        pack.write(new TestClass(123));
+        
+        const result = pack.read();
+        expect(result.name).toBe("TestClass");
+        expect(result.data).toBe(123);
+    });
 });
 
 describe('identifier operations', () => {
@@ -159,8 +199,7 @@ describe('identifier operations', () => {
         
         pack.writeIdentifier(id);
         
-        const result = new DataPack(pack._buffer.slice(0, pack.writePos));
-        expect(result.read()).toBe(id);
+        expect(pack.read()).toBe(id);
     });
 
     test('should validate identifier length', () => {
@@ -175,6 +214,25 @@ describe('identifier operations', () => {
         
         expect(() => pack.writeIdentifier("invalid@")).toThrow();
         expect(() => pack.writeIdentifier("bad!char")).toThrow();
+    });
+
+    test('should write and read identifiers as numbers', () => {
+        const pack = new DataPack();
+        pack.writeIdentifier(123456);
+        
+        expect(pack.readIdentifierNumber()).toBe(123456);
+    });
+
+    test('should generate valid identifiers', () => {
+        const id1 = DataPack.generateIdentifier();
+        const id2 = DataPack.generateIdentifier();
+        
+        expect(id1).toHaveLength(8);
+        expect(id2).toHaveLength(8);
+        expect(id1).not.toBe(id2);
+        
+        // Should be valid base64-like characters
+        expect(id1).toMatch(/^[0-9A-Za-z_$]{8}$/);
     });
 });
 
@@ -280,6 +338,18 @@ describe('buffer management', () => {
         const result = maxpack.increment();
         expect(result).toBeUndefined();
     });
+
+    test('should create buffer with static methods', () => {
+        const buffer = DataPack.createBuffer("hello", 42, true);
+        expect(buffer).toBeInstanceOf(ArrayBuffer);
+        
+        const data = DataPack.createUint8Array("test", 123);
+        expect(data).toBeInstanceOf(Uint8Array);
+        
+        const pack = new DataPack(data);
+        expect(pack.read()).toBe("test");
+        expect(pack.read()).toBe(123);
+    });
 });
 
 describe('mixed data scenarios', () => {
@@ -332,6 +402,16 @@ describe('mixed data scenarios', () => {
         expect(result.read()).toEqual([1, 2, 3]);
         expect(result.read()).toEqual({ key: "value" });
     });
+
+    test('should handle misc classes as objects', () => {
+        const pack = new DataPack();
+        class X {
+            a = 1;
+        };
+        pack.write(new X());
+        expect(pack.read()).toEqual({ a: 1 });
+    });
+
 });
 
 describe('error handling', () => {
@@ -343,14 +423,6 @@ describe('error handling', () => {
         result.read(); // Read the number
         
         expect(() => result.read()).toThrow('Not enough data');
-    });
-
-    test('should handle unsupported data types', () => {
-        const pack = new DataPack();
-        class X {};
-        const unsupported = new X();
-        
-        expect(() => pack.write(unsupported)).toThrow('Unsupported data type');
     });
 });
 
@@ -417,3 +489,5 @@ describe('number encoding efficiency', () => {
         expect(Number.isNaN(result.read())).toBe(true);
     });
 });
+
+
