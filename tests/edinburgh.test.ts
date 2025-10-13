@@ -1,6 +1,5 @@
 import { test, expect, beforeEach } from "vitest";
 import * as E from '../src/edinburgh.js';
-import { transact } from "olmdb";
 
 try {
     E.init("./.olmdb_test");
@@ -294,12 +293,12 @@ test("Invalid data must throw on save", async () => {
     let code;
     try {
         await E.transact(async () => {
-            new Data({createdAt: 1234}); // subjects is missing
+            new Data({createdAt: 1234}); // subjects is implicitly empty, but must be at least 1
         });
     } catch (error: any) {
         code = error.code;
     }
-    expect(code).toBe("INVALID_TYPE");
+    expect(code).toBe("OUT_OF_BOUNDS");
 });
 
 test("Update a lazy-loaded row", async () => {
@@ -1449,4 +1448,30 @@ test("onSave callback with multiple models and operations", async () => {
     );
     
     E.setOnSaveCallback(undefined);
+});
+
+test("Trying to modify instances outside their transaction throws an error", async () => {
+    let user: User;
+    
+    // Attempt to modify instance outside of a transaction
+    await E.transact(() => {
+        user = new User({email: "test@user.com", name: "Test User"});
+    });    
+    expect(() => {
+        user.name = "Modified User";
+    }).toThrowError();
+
+
+    // Attempt to modify instance inside another transaction
+    await E.transact(() => {
+        user = new User({email: "test2@user.com", name: "Test User"});
+    });
+    await E.transact(() => {
+        try {
+            user.name = "Modified User";
+            expect.fail("Should have thrown an error");
+        } catch (error) {
+        }
+    });
+
 });

@@ -1,8 +1,9 @@
-import { DataPack } from "./datapack.js";
+import DataPack from "./datapack.js";
 import * as olmdb from "olmdb";
 import { DatabaseError } from "olmdb";
-import { Model, modelRegistry, getMockModel } from "./models.js";
+import { Model, modelRegistry, getMockModel, FieldConfig } from "./models.js";
 import { assert, addErrorPath } from "./utils.js";
+import { PrimaryIndex, BaseIndex, IndexRangeIterator } from "./indexes.js";
 
 
 /**
@@ -69,6 +70,10 @@ export abstract class TypeWrapper<const T> {
 
     equals(value1: T, value2: T): boolean {
         return value1 === value2;
+    }
+
+    getLinkedModel(): (typeof Model<unknown>) | undefined {
+        return;
     }
 }
 
@@ -226,6 +231,10 @@ class ArrayType<T> extends TypeWrapper<T[]> {
         return new ArrayType(inner);
     }
 
+    default(): T[] {
+        return [];
+    }
+
     clone(value: T[]): T[] {
         return value.map(this.inner.clone.bind(this.inner));
     }
@@ -238,6 +247,9 @@ class ArrayType<T> extends TypeWrapper<T[]> {
         return true;
     }
 
+    getLinkedModel() {
+        return this.inner.getLinkedModel();
+    }
 }
 
 /**
@@ -320,6 +332,10 @@ export class SetType<T> extends TypeWrapper<Set<T>> {
         }
         return true;
     }
+
+    getLinkedModel() {
+        return this.inner.getLinkedModel();
+    }
 }
 
 
@@ -397,6 +413,18 @@ class OrType<const T> extends TypeWrapper<T> {
         const ca = this._getChoiceIndex(a);
         const cb = this._getChoiceIndex(b);
         return ca === cb && this.choices[ca].equals(a, b);
+    }
+
+    getLinkedModel() {
+        let model;
+        for (const choice of this.choices) {
+            const m = choice.getLinkedModel();
+            if (m) {
+                if (model && model !== m) throw new DatabaseError(`Union type has multiple linked models, unsupported by getLinkedModel()`, 'INVALID_TYPE');
+                model = m;
+            }
+        }
+        return model;
     }
 }
 
@@ -526,6 +554,10 @@ export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<Insta
         const targetModel = modelRegistry[tableName];
         if (!targetModel) throw new DatabaseError(`Could not deserialize undefined model ${tableName}`, 'DESERIALIZATION_ERROR');
         return new LinkType(targetModel);
+    }
+
+    getLinkedModel() {
+        return this.TargetModel;
     }
 }
 

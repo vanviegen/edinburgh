@@ -87,40 +87,39 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
 * ```
 */
 export async function transact<T>(fn: () => T): Promise<T> {
+    const instances: Set<Model<any>> = new Set();
+    const onSaveQueue: ChangedModel[] | undefined = onSaveCallback ? [] : undefined;
+
+    let result!: T;
     try {
-        const onSaveQueue: ChangedModel[] | undefined = onSaveCallback ? [] : undefined;
-        return await olmdb.transact(async (): Promise<T> => {
-            const instances = new Set<Model<any>>();
+        const commitSeq = await olmdb.transact(async () => {
+            // In case of a retry, we'll want to clear these collections
+            for(const instance of instances) Object.freeze(instance);
+            instances.clear();
+            if (onSaveQueue) onSaveQueue.length = 0;
+
+            // Set async-task-local storage for this transaction
             olmdb.setTransactionData(INSTANCES_SYMBOL, instances);
             olmdb.setTransactionData(INSTANCES_BY_PK_SYMBOL, new Map());
             
-            const savedInstances: Set<Model<any>> = new Set();
-            try {
-                const result = await fn();
-                // Save all modified instances before committing.
-                while(instances.size > 0) {
-                    // Back referencing can cause models to be scheduled for save() a second time,
-                    // which is why we require the outer loop.
-                    for (const instance of instances) {
-                        instance._onCommit(onSaveQueue);
-                        savedInstances.add(instance);
-                        instances.delete(instance);
-                    }
-                }
-                if (onSaveQueue?.length) {
-                    olmdb.onCommit((commitId: number) => {
-                        if (onSaveCallback) onSaveCallback(commitId, onSaveQueue);
-                    });
-                }
-                
-                return result;
-            } catch (error) {
-                // Discard changes on all saved and still unsaved instances
-                for (const instance of savedInstances) instance.preventPersist();
-                for (const instance of instances) instance.preventPersist();
-                throw error;
+            // Execute the user function
+            result = await fn();
+
+            // Save all modified instances before committing.
+            for (const instance of instances) {
+                instance._onCommit(onSaveQueue);
             }
+
+            // Instruct OLMDB to return the commit sequence number
+            return olmdb.RETURN_COMMIT_SEQ;
         });
+
+        // After a successful commit, call the onSaveCallback if anything was changed
+        if (onSaveCallback && onSaveQueue?.length) {
+            onSaveCallback(commitSeq, onSaveQueue);
+        }
+
+        return result;
     } catch (e: Error | any) {
         // This hackery is required to provide useful stack traces. Without this,
         // both Bun and Node (even with --async-stack-traces) don't show which
@@ -129,6 +128,10 @@ export async function transact<T>(fn: () => T): Promise<T> {
         // make sense. Probably this bug: https://github.com/oven-sh/bun/issues/15859
         e.stack += "\nat async:\n" + new Error().stack?.replace(/^.*?\n/, '');
         throw e;
+    } finally {
+        for (const instance of instances) {
+            Object.freeze(instance);
+        }
     }
 }
 

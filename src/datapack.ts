@@ -8,9 +8,11 @@ const BASE64_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 const BASE64_LOOKUP = new Uint8Array(128).fill(255); // Use 255 as invalid marker;
 for (let i = 0; i < BASE64_CHARS.length; ++i) BASE64_LOOKUP[BASE64_CHARS.charCodeAt(i)] = i;
 
-const COLORS = ['\x1b[32m', '\x1b[33m', '\x1b[34m', '\x1b[35m']; // green, yellow, blue, magenta
-const RESET_COLOR = '\x1b[0m';
-const ERROR_COLOR = '\x1b[31m'; // red
+const USE_COLORS = typeof process !== 'undefined' && process?.stdout?.isTTY;
+
+const COLORS = USE_COLORS ? ['\x1b[32m', '\x1b[33m', '\x1b[34m', '\x1b[35m'] : ['']; // green, yellow, blue, magenta
+const RESET_COLOR = USE_COLORS ? '\x1b[0m' : '';
+const ERROR_COLOR = USE_COLORS ? '\x1b[31m' : ''; // red
 
 let toStringTermCount = 0;
 let useExtendedLogging = typeof process !== 'undefined' ? !!process.env?.DATAPACK_EXTENDED_LOGGING : false;

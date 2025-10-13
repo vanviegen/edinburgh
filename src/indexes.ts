@@ -1,7 +1,7 @@
 import * as olmdb from "olmdb";
 import { DatabaseError } from "olmdb";
-import { DataPack } from "./datapack.js";
-import { FieldConfig, getMockModel, Model, modelRegistry } from "./models.js";
+import DataPack from "./datapack.js";
+import { FieldConfig, getMockModel, Model } from "./models.js";
 import { assert, logLevel, delayedInits, tryDelayedInits } from "./utils.js";
 import { deserializeType, serializeType, TypeWrapper } from "./types.js";
 
@@ -155,8 +155,6 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      */
     constructor(MyModel: M, public _fieldNames: F) {
         this._MyModel = getMockModel(MyModel);
-        delayedInits.add(this);
-        tryDelayedInits();
     }
 
     _delayedInit(): boolean {
@@ -377,7 +375,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     abstract _getTypeName(): string;
 
     toString() {
-        return `${this._getIndexId()}:${this._MyModel.tableName}:${this._getTypeName()}[${Array.from(this._fieldTypes.keys()).join(',')}]`;
+        return `${this._cachedIndexId}:${this._MyModel.tableName}:${this._getTypeName()}[${Array.from(this._fieldTypes.keys()).join(',')}]`;
     }
 }
 
@@ -404,9 +402,11 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     constructor(MyModel: M, fieldNames: F) {
         super(MyModel, fieldNames);
         if (MyModel._primary) {
-            throw new DatabaseError(`Model ${MyModel.tableName} already has a primary key defined`, 'INIT_ERROR');
+            throw new DatabaseError(`There's already a primary index defined: ${MyModel._primary}. This error may also indicate that your tsconfig.json needs to have "target": "ES2022" set.`, 'INIT_ERROR');
         }
         MyModel._primary = this;
+        delayedInits.add(this);
+        tryDelayedInits();
     }
 
     _delayedInit(): boolean {
@@ -603,6 +603,8 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
     constructor(MyModel: M, fieldNames: F) {
         super(MyModel, fieldNames);
         (this._MyModel._secondaries ||= []).push(this);
+        delayedInits.add(this);
+        tryDelayedInits();
     }
 
     /**
@@ -701,6 +703,8 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     constructor(MyModel: M, fieldNames: F) {
         super(MyModel, fieldNames);
         (this._MyModel._secondaries ||= []).push(this);
+        delayedInits.add(this);
+        tryDelayedInits();
     }
 
     /**

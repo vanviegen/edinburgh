@@ -3,7 +3,6 @@ import { DatabaseError } from "olmdb";
 import { TypeWrapper, identifier } from "./types.js";
 import { BaseIndex as BaseIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
 import { addErrorPath, logLevel, tryDelayedInits, delayedInits } from "./utils.js";
-import { on } from "events";
 
 /**
  * Configuration interface for model fields.
@@ -201,6 +200,7 @@ export abstract class Model<SUB> {
      */
     _oldValues: Partial<Model<SUB>> | undefined;
     _primaryKey: Uint8Array | undefined;
+    _primaryKeyHash: number | undefined;
 
     /**
      * This property can be used in `setOnSave` callbacks to determine how a model instance has changed.
@@ -306,6 +306,22 @@ export abstract class Model<SUB> {
         return this._primaryKey;
     }
 
+    /**
+     * @returns A 53-bit positive integer non-cryptographic hash of the primary key, or undefined if not yet saved.
+     */
+    getPrimaryKeyHash(): number | undefined{
+        if (this._primaryKeyHash) return this._primaryKeyHash;
+        if (!this._primaryKey) return;
+
+        let a = 0x811C9DC5, b = 0x811C9DC5;
+        for(const ch of this._primaryKey) {
+            a = Math.imul(a ^ ch, 0x517CC1B7) >>> 0;
+            b = Math.imul(b ^ ch, 0x27220A95) >>> 0;
+        }
+        // 32 bits of data + 21 bits of data shifted left by 32
+        return this._primaryKeyHash = a + ((b & 0x1FFFFF) * 0x100000000);
+    }
+
     _getCreatePrimaryKey(): Uint8Array {
         return this._primaryKey ||= this.constructor._primary!._instanceToKeySingleton(this);
     }
@@ -332,7 +348,7 @@ export abstract class Model<SUB> {
                     changed[fieldName] = oldValue;
                 }
             }
-            if (isObjectEmpty(changed)) return; // No changes, nothing to do
+            if (isObjectEmpty(changed)) return false; // No changes, nothing to do
 
             // Make sure primary has not been changed
             for (const field of this.constructor._primary!._fieldTypes.keys()) {
