@@ -1,8 +1,27 @@
-import * as olmdb from "olmdb";
-import { DatabaseError } from "olmdb";
+import { DatabaseError } from "olmdb/lowlevel";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { TypeWrapper, identifier } from "./types.js";
+
+export const txnStorage = new AsyncLocalStorage<Transaction>();
+
+/**
+ * Returns the current transaction from AsyncLocalStorage.
+ * Throws if called outside a transact() callback.
+ * @internal
+ */
+export function currentTxn(): Transaction {
+    const txn = txnStorage.getStore();
+    if (!txn) throw new DatabaseError("No active transaction. Operations must be performed within a transact() callback.", 'NO_TRANSACTION');
+    return txn;
+}
+
+export interface Transaction {
+    id: number;
+    instances: Set<any>;
+    instancesByPk: Map<number, any>;
+}
 import { BaseIndex as BaseIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
-import { addErrorPath, logLevel, tryDelayedInits, delayedInits, assert } from "./utils.js";
+import { addErrorPath, logLevel, assert, dbGet, hashBytes } from "./utils.js";
 
 /**
  * Configuration interface for model fields.
@@ -45,15 +64,7 @@ export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> 
 
 // Model registration and initialization
 export const modelRegistry: Record<string, typeof Model> = {};
-
-export function resetModelCaches() {
-    for(const model of Object.values(modelRegistry)) {
-        for(const index of model._secondaries || []) {
-            index._cachedIndexId = undefined;
-        }
-        delete model._primary?._cachedIndexId;
-    }
-}
+export const modelsNeedingDelayedInit: Set<typeof Model> = new Set();
 
 function isObjectEmpty(obj: object) {
     for (let _ of Object.keys(obj)) {
@@ -99,10 +110,6 @@ export function registerModel<T extends typeof Model<unknown>>(MyModel: T): T {
     if (MockModel.tableName in modelRegistry) throw new DatabaseError(`Model with table name '${MockModel.tableName}' already registered`, 'INIT_ERROR');
     modelRegistry[MockModel.tableName] = MockModel;
 
-    // Attempt to instantiate the class and gather field metadata
-    delayedInits.add(MyModel);
-    tryDelayedInits();
-
     return MockModel;   
 }
 
@@ -111,11 +118,11 @@ export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     if (AnyOrgModel._isMock) return OrgModel;
     if (AnyOrgModel._mock) return AnyOrgModel._mock;
 
-    // const name =  OrgModel.tableName || OrgModel.name;
     const MockModel = function(this: any, initial?: Record<string,any>) {
-        if (delayedInits.has(this.constructor)) {
-            throw new DatabaseError("Cannot instantiate while linked models haven't been registered yet", 'INIT_ERROR');
-        }
+        assert(this.constructor.fields); // Should have been set by _delayedInit
+        const txn = currentTxn();
+        this._txn = txn;
+        txn.instances.add(this);
         if (initial) {
             Object.assign(this, initial);
         }
@@ -128,17 +135,14 @@ export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     Object.setPrototypeOf(MockModel, Object.getPrototypeOf(OrgModel));
     MockModel.prototype = OrgModel.prototype;
     (MockModel as any)._isMock = true;
+    (MockModel as any)._original = OrgModel;
     AnyOrgModel._mock = MockModel;
+    modelsNeedingDelayedInit.add(MockModel);
     return MockModel;
 }
 
 // Model base class and related symbols/state
 const INIT_INSTANCE_SYMBOL = Symbol();
-
-/** @internal Symbol used to attach modified instances to running transaction */
-export const INSTANCES_SYMBOL = Symbol('instances');
-
-/** @internal Symbol used to access the underlying model from a proxy */
 
 /**
  * Model interface that ensures proper typing for the constructor property.
@@ -200,6 +204,7 @@ export abstract class Model<SUB> {
     _oldValues: Partial<Model<SUB>> | undefined | null;
     _primaryKey: Uint8Array | undefined;
     _primaryKeyHash: number | undefined;
+    _txn: Transaction | undefined;
 
     /**
      * This property can be used in `setOnSave` callbacks to determine how a model instance has changed.
@@ -217,24 +222,16 @@ export abstract class Model<SUB> {
     constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
         // This constructor will only be called once, from `initModels`. All other instances will
         // be created by the 'fake' constructor. The typing for `initial` *is* important though.
-        if (initial as any !== INIT_INSTANCE_SYMBOL) {
-            throw new DatabaseError("The model needs a @registerModel decorator", 'INIT_ERROR');
-        }
+        if (initial as any === INIT_INSTANCE_SYMBOL) return;
+        throw new DatabaseError("The model needs a @registerModel decorator", 'INIT_ERROR');
     }
 
-    static _delayedInit(): boolean {
+    static async _delayedInit(): Promise<void> {
         const MockModel = getMockModel(this);
         // Create an instance (the only one to ever exist) of the actual class,
-        // in order to gather field config data. 
-        let instance;
-        try {
-            instance = new (this as any)(INIT_INSTANCE_SYMBOL);
-        } catch(e) {
-            if (!(e instanceof ReferenceError)) throw e;
-            // ReferenceError: Cannot access 'SomeLinkedClass' before initialization.
-            // We'll try again after the next class has successfully initialized.
-            return false;
-        }
+        // in order to gather field config data.
+        const OrgModel = (MockModel as any)._original || this;
+        const instance = new (OrgModel as any)(INIT_INSTANCE_SYMBOL);
 
         // If no primary key exists, create one using 'id' field
         if (!MockModel._primary) {
@@ -285,8 +282,8 @@ export abstract class Model<SUB> {
         if (logLevel >= 1) {
             console.log(`Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
         }
-
-        return true;
+        await MockModel._primary._delayedInit();
+        for (const sec of MockModel._secondaries || []) await sec._delayedInit();
     }
 
     _setLoadedField(fieldName: string, value: any) {
@@ -312,18 +309,11 @@ export abstract class Model<SUB> {
     getPrimaryKeyHash(): number | undefined{
         if (this._primaryKeyHash) return this._primaryKeyHash;
         if (!this._primaryKey) return;
-
-        let a = 0x811C9DC5, b = 0x811C9DC5;
-        for(const ch of this._primaryKey) {
-            a = Math.imul(a ^ ch, 0x517CC1B7) >>> 0;
-            b = Math.imul(b ^ ch, 0x27220A95) >>> 0;
-        }
-        // 32 bits of data + 21 bits of data shifted left by 32
-        return this._primaryKeyHash = a + ((b & 0x1FFFFF) * 0x100000000);
+        return this._primaryKeyHash = hashBytes(this._primaryKey);
     }
 
     _getCreatePrimaryKey(): Uint8Array {
-        return this._primaryKey ||= this.constructor._primary!._instanceToKeySingleton(this);
+        return this._primaryKey ||= this.constructor._primary!._instanceToKeyBytes(this).toUint8Array();
     }
 
     isLazyField(field: keyof this) {
@@ -333,6 +323,7 @@ export abstract class Model<SUB> {
 
     _preCommit(onSaveQueue: ChangedModel[] | undefined) {
         const oldValues = this._oldValues;
+        const txn = this._txn!;
         let changed : Record<any, any> | "created" | "deleted";
 
         if (oldValues)  {
@@ -344,12 +335,10 @@ export abstract class Model<SUB> {
             changed = {};
             for(const fieldName of Object.keys(oldValues) as Iterable<keyof Model<SUB>>) {
                 const oldValue = oldValues[fieldName];
-                console.log(fieldName, this[fieldName], oldValue);
                 if (!(fields[fieldName] as FieldConfig<unknown>).type.equals(this[fieldName], oldValue)) {
                     changed[fieldName] = oldValue;
                 }
             }
-            console.log('no changes', isObjectEmpty(changed));
             if (isObjectEmpty(changed)) return false; // No changes, nothing to do
 
             // Make sure primary has not been changed
@@ -365,23 +354,23 @@ export abstract class Model<SUB> {
             this.validate(true);
 
             // Update the primary index
-            this.constructor._primary!._write(this);
+            this.constructor._primary!._write(txn, this);
 
             // Update any secondaries with changed fields
             for (const index of this.constructor._secondaries || []) {
                 for (const field of index._fieldTypes.keys()) {
                     if (changed.hasOwnProperty(field)) {
                         // We need to update this index - first delete the old one
-                        index._delete(oldValues);
-                        index._write(this)
+                        index._delete(txn, oldValues);
+                        index._write(txn, this)
                         break;
                     }
                 }
             }
         } else if (oldValues === null) { // Deleted instance
-            this.constructor._primary._delete(this);
+            this.constructor._primary._delete(txn, this);
             for(const index of this.constructor._secondaries || []) {
-                index._delete(this);
+                index._delete(txn, this);
             }
             changed = "deleted";
         } else { // oldValues === undefined
@@ -390,16 +379,16 @@ export abstract class Model<SUB> {
             this.validate(true);
 
             // Make sure the primary key does not already exist
-            if (olmdb.get(this._getCreatePrimaryKey())) {
+            if (dbGet(txn.id, this._getCreatePrimaryKey())) {
                 throw new DatabaseError("Unique constraint violation", "UNIQUE_CONSTRAINT");
             }
 
             // Insert the primary index
-            this.constructor._primary!._write(this);
+            this.constructor._primary!._write(txn, this);
 
             // Insert all secondaries
             for (const index of this.constructor._secondaries || []) {
-                index._write(this);
+                index._write(txn, this);
             }
 
             changed = "created";
@@ -424,8 +413,7 @@ export abstract class Model<SUB> {
      * ```
      */
     preventPersist() {
-        const instances = olmdb.getTransactionData(INSTANCES_SYMBOL) as Set<Model<any>>;
-        instances.delete(this);
+        this._txn?.instances.delete(this);
         return this;
     }
 

@@ -332,47 +332,30 @@ test("Update a lazy-loaded row", async () => {
 
 });
 
-test("Transaction management and retry logic", async () => {
-    // Test transaction data storage with symbols
-    const testKey = Symbol('testKey');
+test("Parallel transactions", async () => {
+    // Multiple transactions should be able to run concurrently
+    const results = await Promise.all([
+        E.transact(() => {
+            const user = new User({email: "parallel1@test.com", name: "Parallel 1"});
+            return user.id;
+        }),
+        E.transact(() => {
+            const user = new User({email: "parallel2@test.com", name: "Parallel 2"});
+            return user.id;
+        }),
+        E.transact(() => {
+            const user = new User({email: "parallel3@test.com", name: "Parallel 3"});
+            return user.id;
+        }),
+    ]);
+
+    expect(results).toHaveLength(3);
+    expect(new Set(results).size).toBe(3); // All different IDs
+
+    // Verify all were persisted
     await E.transact(() => {
-        E.setTransactionData(testKey, "testValue");
-        expect(E.getTransactionData(testKey)).toBe("testValue");
-    });
-
-    // Test onCommit callback
-    let commitCalled = false;
-    await E.transact(() => {
-        E.onCommit(() => {
-            commitCalled = true;
-        });
-        new User({email: "test@example.com", name: "Test User"});
-    });
-    expect(commitCalled).toBe(true);
-
-    // Test onRevert callback
-    let revertCalled = false;
-    try {
-        await E.transact(() => {
-            E.onRevert(() => {
-                revertCalled = true;
-            });
-            new User({email: "test2@example.com", name: "Test User 2"});
-            throw new Error("Force rollback");
-        });
-    } catch (error) {
-        expect(revertCalled).toBe(true);
-    }
-
-    // Test nested transaction error
-    await E.transact(async () => {
-        try {
-            await E.transact(() => {
-                // This should throw TypeError for nested transaction
-            });
-            expect(true).toBe(false); // Should not reach here
-        } catch (error) {
-            expect(error).toBeInstanceOf(TypeError);
+        for (const id of results) {
+            expect(User.pk.get(id)).toBeDefined();
         }
     });
 });

@@ -1,6 +1,6 @@
-import * as olmdb from "olmdb";
-import { Model, INSTANCES_SYMBOL, resetModelCaches } from "./models.js";
-import { INSTANCES_BY_PK_SYMBOL } from "./indexes.js";
+import * as lowlevel from "olmdb/lowlevel";
+import { DatabaseError } from "olmdb/lowlevel";
+import { modelsNeedingDelayedInit, modelRegistry, txnStorage, currentTxn } from "./models.js";
 
 // Re-export public API from models
 export {
@@ -9,7 +9,7 @@ export {
     field,
 } from "./models.js";
 
-import type { ChangedModel } from "./models.js";
+import type { Transaction, ChangedModel } from "./models.js";
 
 // Re-export public API from types (only factory functions and instances)
 export {
@@ -43,8 +43,11 @@ export {
 
 export { BaseIndex, UniqueIndex, PrimaryIndex } from './indexes.js';
 
-// Re-export from OLMDB
-export { init, onCommit, onRevert, getTransactionData, setTransactionData, DatabaseError } from "olmdb";
+export type { Transaction } from './models.js';
+export { init, DatabaseError } from "olmdb/lowlevel";
+
+let pendingInit: Promise<void> | undefined;
+
 
 /**
 * Executes a function within a database transaction context.
@@ -54,15 +57,13 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
 * 
 * Transactions have a consistent view of the database, and changes made within a transaction are
 * isolated from other transactions until they are committed. In case a commit clashes with changes
-* made by another transaction, the transaction function will automatically be re-executed up to 10
+* made by another transaction, the transaction function will automatically be re-executed up to 6
 * times.
 * 
 * @template T - The return type of the transaction function.
-* @param fn - The function to execute within the transaction context.
+* @param fn - The function to execute within the transaction context. Receives a Transaction instance.
 * @returns A promise that resolves with the function's return value.
-* @throws {TypeError} If nested transactions are attempted.
 * @throws {DatabaseError} With code "RACING_TRANSACTION" if the transaction fails after retries due to conflicts.
-* @throws {DatabaseError} With code "TRANSACTION_FAILED" if the transaction fails for other reasons.
 * @throws {DatabaseError} With code "TXN_LIMIT" if maximum number of transactions is reached.
 * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
 * 
@@ -70,7 +71,6 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
 * ```typescript
 * const paid = await E.transact(() => {
 *   const user = User.pk.get("john_doe");
-*   // This is concurrency-safe - the function will rerun if it is raced by another transaction
 *   if (user.credits > 0) {
 *     user.credits--;
 *     return true;
@@ -81,62 +81,84 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
 * ```typescript
 * // Transaction with automatic retry on conflicts
 * await E.transact(() => {
-*   const counter = Counter.load("global") || new Counter({id: "global", value: 0});
+*   const counter = Counter.pk.get("global") || new Counter({id: "global", value: 0});
 *   counter.value++;
 * });
 * ```
 */
 export async function transact<T>(fn: () => T): Promise<T> {
-    const instances: Set<Model<any>> = new Set();
-    const onSaveQueue: ChangedModel[] | undefined = onSaveCallback ? [] : undefined;
-    console.log('transact', onSaveCallback ? 'with onSaveCallback' : 'without onSaveCallback');
+    while (modelsNeedingDelayedInit.size) {
+        // Make sure only one async task is doing the inits, the rest should wait for it
+        if (pendingInit) {
+            await pendingInit;
+        } else {
+            pendingInit = (async () => {
+                for (const model of modelsNeedingDelayedInit) {
+                    await model._delayedInit();
+                    modelsNeedingDelayedInit.delete(model);
+                }
+                pendingInit = undefined;
+            })();
 
-    let result!: T;
-    try {
-        const commitSeq = await olmdb.transact(async () => {
-            // In case of a retry, we'll want to clear these collections
-            for(const instance of instances) Object.freeze(instance);
-            instances.clear();
-            if (onSaveQueue) onSaveQueue.length = 0;
-
-            // Set async-task-local storage for this transaction
-            olmdb.setTransactionData(INSTANCES_SYMBOL, instances);
-            olmdb.setTransactionData(INSTANCES_BY_PK_SYMBOL, new Map());
-            
-            // Execute the user function
-            result = await fn();
-
-            // Save all modified instances before committing.
-            for (const instance of instances) {
-                console.log('Saving instance', instance);
-                instance._preCommit(onSaveQueue);
-            }
-
-            // Instruct OLMDB to return the commit sequence number
-            return olmdb.RETURN_COMMIT_SEQ;
-        });
-
-        // After a successful commit, call the onSaveCallback if anything was changed
-        console.log('Transaction committed with commitSeq', commitSeq, onSaveQueue);
-        if (onSaveCallback && onSaveQueue?.length) {
-            onSaveCallback(commitSeq, onSaveQueue);
         }
-
-        return result;
-    } catch (e: Error | any) {
-        // This hackery is required to provide useful stack traces. Without this,
-        // both Bun and Node (even with --async-stack-traces) don't show which
-        // line called the transact(), which is pretty important info when validation
-        // fails, for instance. Though the line numbers in Bun still don't really
-        // make sense. Probably this bug: https://github.com/oven-sh/bun/issues/15859
-        e.stack += "\nat async:\n" + new Error().stack?.replace(/^.*?\n/, '');
-        throw e;
-    } finally {
-        for (const instance of instances) {
-            Object.freeze(instance);
-        }
-        instances.clear();
     }
+
+    try {
+        for (let retryCount = 0; ; retryCount++) {
+            const txnId = lowlevel.startTransaction();
+            const txn: Transaction = { id: txnId, instances: new Set(), instancesByPk: new Map() };
+            const onSaveQueue: ChangedModel[] | undefined = onSaveCallback ? [] : undefined;
+
+            try {
+                const result = await txnStorage.run(txn, fn);
+
+                // Save all modified instances before committing
+                for (const instance of txn.instances) {
+                    instance._preCommit(onSaveQueue);
+                }
+
+                const commitResult = lowlevel.commitTransaction(txnId);
+                const commitSeq = typeof commitResult === 'number' ? commitResult : await commitResult;
+
+                if (commitSeq > 0) {
+                    // Success
+                    closeTransaction(txn);
+                    if (onSaveQueue?.length) {
+                        onSaveCallback!(commitSeq, onSaveQueue);
+                    }
+                    return result;
+                } else {
+                    // Race condition - retry
+                    closeTransaction(txn);
+                    if (retryCount >= 6) {
+                        throw new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION");
+                    }
+                    continue;
+                }
+            } catch (e: any) {
+                try { lowlevel.abortTransaction(txnId); } catch {}
+                closeTransaction(txn);
+                throw e;
+            }
+        }
+    } catch (e: Error | any) {
+        // This hackery is required to provide useful stack traces.
+        const callerStack = new Error().stack?.replace(/^.*?\n/, '');
+        e.stack += "\nat async:\n" + callerStack;
+        throw e;
+    }
+}
+
+function closeTransaction(txn: Transaction) {
+    // Instances may be used in read-only mode after the transaction, but changing anything or
+    // triggering lazy loading should throw an error.
+    for (const instance of txn.instances) {
+        instance._txn = undefined;
+        Object.freeze(instance);
+    }
+    // Destroy the transaction object, to make sure things crash if they are used after
+    // this point, and to help the GC reclaim memory.
+    txn.id = txn.instances = txn.instancesByPk = undefined as any;
 }
 
 let onSaveCallback: ((commitId: number, items: ChangedModel[]) => void) | undefined;
@@ -156,10 +178,23 @@ export function setOnSaveCallback(callback: ((commitId: number, items: ChangedMo
 
 
 export async function deleteEverything(): Promise<void> {
-    await olmdb.transact(() => {
-        for (const {key} of olmdb.scan()) {
-            olmdb.del(key);
+    await transact(() => {
+        const txn = currentTxn();
+        const iteratorId = lowlevel.createIterator(txn.id, undefined, undefined, false);
+        try {
+            while (true) {
+                const raw = lowlevel.readIterator(iteratorId);
+                if (!raw) break;
+                lowlevel.del(txn.id, raw.key);
+            }
+        } finally {
+            lowlevel.closeIterator(iteratorId);
         }
     });
-    await resetModelCaches();
+    // Re-assign index IDs since metadata was deleted
+    for (const model of Object.values(modelRegistry)) {
+        if (modelsNeedingDelayedInit.has(model)) continue; // Will be done in the pendingInit loop in transact()
+        await model._primary._retrieveIndexId();
+        for (const sec of model._secondaries || []) await sec._retrieveIndexId();
+    }
 }

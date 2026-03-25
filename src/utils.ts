@@ -1,3 +1,5 @@
+import * as lowlevel from "olmdb/lowlevel";
+
 /**
  * Assert function for runtime checks with TypeScript assertion support.
  * @param cond - Condition to check.
@@ -8,6 +10,33 @@ export function assert(cond: any, message?: string): asserts cond {
     if (!cond) {
         throw new Error(message || "Assertion failed");
     }
+}
+
+export function toBuffer(data: Uint8Array): ArrayBufferLike {
+    const b = data.buffer;
+    return b.byteLength === data.byteLength ? b : b.slice(data.byteOffset, data.byteOffset + data.byteLength);
+}
+
+export function hashBytes(data: Uint8Array): number {
+    let a = 0x811C9DC5, b = 0x811C9DC5;
+    for (const ch of data) {
+        a = Math.imul(a ^ ch, 0x517CC1B7) >>> 0;
+        b = Math.imul(b ^ ch, 0x27220A95) >>> 0;
+    }
+    return a + ((b & 0x1FFFFF) * 0x100000000);
+}
+
+export function dbGet(txnId: number, key: Uint8Array): Uint8Array | undefined {
+    const result = lowlevel.get(txnId, toBuffer(key));
+    return result ? new Uint8Array(result) : undefined;
+}
+
+export function dbPut(txnId: number, key: Uint8Array, value: Uint8Array): void {
+    lowlevel.put(txnId, toBuffer(key), toBuffer(value));
+}
+
+export function dbDel(txnId: number, key: Uint8Array): void {
+    lowlevel.del(txnId, toBuffer(key));
 }
 
 /**
@@ -43,25 +72,3 @@ export function setLogLevel(level: number) {
 /** @internal Symbol used to access the underlying model from a proxy */
 export declare const TARGET_SYMBOL: unique symbol;
 
-export const delayedInits = new Set<{_delayedInit: () => boolean}>();
-let tryingDelayedInits = false;
-
-export function tryDelayedInits() {
-    if (tryingDelayedInits) return;
-    tryingDelayedInits = true;
-    let progress = true;
-    while(progress) {
-        progress = false;
-        for(const target of delayedInits) {
-            try {
-                if (target._delayedInit()) {
-                    delayedInits.delete(target);
-                    progress = true;
-                }
-            } catch(e) {
-                console.error("Error during delayed init:", e);
-            }
-        }
-    }
-    tryingDelayedInits = false;
-}

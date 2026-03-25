@@ -1,8 +1,7 @@
 import DataPack from "./datapack.js";
-import * as olmdb from "olmdb";
-import { DatabaseError } from "olmdb";
-import { Model, modelRegistry, getMockModel, FieldConfig } from "./models.js";
-import { assert, addErrorPath } from "./utils.js";
+import { DatabaseError } from "olmdb/lowlevel";
+import { Model, modelRegistry, getMockModel, FieldConfig, currentTxn } from "./models.js";
+import { assert, addErrorPath, dbGet } from "./utils.js";
 import { PrimaryIndex, BaseIndex, IndexRangeIterator } from "./indexes.js";
 
 
@@ -505,11 +504,12 @@ class IdentifierType extends TypeWrapper<string> {
     }
     
     default(model: Model<any>): string {
+        const txn = model._txn!;
         // Generate a random ID, and if it already exists in the database, retry.
         let id: string;
         do {
             id = DataPack.generateIdentifier();
-        } while (olmdb.get(new DataPack().write(model.constructor._primary!._cachedIndexId!).writeIdentifier(id).toUint8Array()));
+        } while (dbGet(txn.id, new DataPack().write(model.constructor._primary!._indexId!).writeIdentifier(id).toUint8Array()));
         return id;
     }
 }
