@@ -49,8 +49,5 @@
   "trustedDependencies": [
     "olmdb"
   ],
-  "type": "module",
-  "dependencies": {
-    "olmdb": "^0.2.19"
-  }
+  "type": "module"
 }

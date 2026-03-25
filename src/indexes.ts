@@ -1,7 +1,7 @@
 import * as olmdb from "olmdb";
 import { DatabaseError } from "olmdb";
 import DataPack from "./datapack.js";
-import { FieldConfig, getMockModel, Model } from "./models.js";
+import { FieldConfig, getMockModel, INSTANCES_SYMBOL, Model } from "./models.js";
 import { assert, logLevel, delayedInits, tryDelayedInits } from "./utils.js";
 import { deserializeType, serializeType, TypeWrapper } from "./types.js";
 
@@ -486,6 +486,13 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
         
         // This is a primary index. So we can now deserialize all primary and non-primary fields into instance values.
         const model = new (this._MyModel as any)() as InstanceType<M>;
+
+        if (!lazy) {
+            // Add this to the set of instances of the current transaction.
+            // When lazy loading, we do that in _lazyNow instead
+            const instances = olmdb.getTransactionData(INSTANCES_SYMBOL) as Set<Model<any>>;
+            instances.add(model);
+        }
         
         // Store the canonical primary key on the model
         model._primaryKey = key;
@@ -533,6 +540,10 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
         if (!valueBuffer) throw new DatabaseError(`Lazy-loaded ${model.constructor.name}#${model._primaryKey} does not exist`, 'LAZY_FAIL');
         Object.defineProperties(model, this._resetDescriptors);
         this._setNonKeyValues(model, new DataPack(valueBuffer));
+
+        // Add this to the set of instances of the current transaction.
+        const instances = olmdb.getTransactionData(INSTANCES_SYMBOL) as Set<Model<any>>;
+        instances.add(model);
     }
 
     _setNonKeyValues(model: InstanceType<M>, valueBytes: DataPack) {
@@ -546,9 +557,12 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
 
     _keyToArray(key: Uint8Array): IndexArgTypes<M, F> {
         const bytes = new DataPack(key);
-        return this._fieldTypes.values().map((fieldType) => {
-            return fieldType.deserialize(bytes);
-        }) as any;
+        assert(bytes.readNumber() === this._MyModel._primary._getIndexId());
+        const result = [] as any[];
+        for (const fieldType of this._fieldTypes.values()) {
+            result.push(fieldType.deserialize(bytes));
+        }
+        return result as any;
     }
 
     _pairToInstance(keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined {

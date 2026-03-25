@@ -2,7 +2,7 @@ import * as olmdb from "olmdb";
 import { DatabaseError } from "olmdb";
 import { TypeWrapper, identifier } from "./types.js";
 import { BaseIndex as BaseIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
-import { addErrorPath, logLevel, tryDelayedInits, delayedInits } from "./utils.js";
+import { addErrorPath, logLevel, tryDelayedInits, delayedInits, assert } from "./utils.js";
 
 /**
  * Configuration interface for model fields.
@@ -111,16 +111,14 @@ export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     if (AnyOrgModel._isMock) return OrgModel;
     if (AnyOrgModel._mock) return AnyOrgModel._mock;
 
-    const name =  OrgModel.tableName || OrgModel.name;
+    // const name =  OrgModel.tableName || OrgModel.name;
     const MockModel = function(this: any, initial?: Record<string,any>) {
         if (delayedInits.has(this.constructor)) {
             throw new DatabaseError("Cannot instantiate while linked models haven't been registered yet", 'INIT_ERROR');
         }
-        if (initial && !isObjectEmpty(initial)) {
+        if (initial) {
             Object.assign(this, initial);
         }
-        const instances = olmdb.getTransactionData(INSTANCES_SYMBOL) as Set<Model<any>>;
-        instances.add(this);
     } as any as T;
 
     // We want .constructor to point at our fake constructor function.
@@ -195,10 +193,11 @@ export abstract class Model<SUB> {
     
     /** 
      * @internal
-     * - !_oldValues: New instance, not yet saved.
-     * - _oldValues && _primaryKey: Loaded (possibly only partial, still lazy) from disk, _oldValues contains (partial) old values
+     * - _oldValues===undefined: New instance, not yet saved.
+     * - _oldValues===null && _primeKey: Deleted instance
+     * - _oldValues is an object: Loaded (possibly only partial, still lazy) from disk, _oldValues contains (partial) old values
      */
-    _oldValues: Partial<Model<SUB>> | undefined;
+    _oldValues: Partial<Model<SUB>> | undefined | null;
     _primaryKey: Uint8Array | undefined;
     _primaryKeyHash: number | undefined;
 
@@ -291,6 +290,7 @@ export abstract class Model<SUB> {
     }
 
     _setLoadedField(fieldName: string, value: any) {
+        assert(this._oldValues !== null);
         const orgValues = this._oldValues ||= Object.create(Object.getPrototypeOf(this));
         if (orgValues.hasOwnProperty(fieldName)) return; // Already loaded earlier (as part of index key?)
 
@@ -331,7 +331,7 @@ export abstract class Model<SUB> {
         return !!(descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, field)?.get);
     }
 
-    _onCommit(onSaveQueue: ChangedModel[] | undefined) {
+    _preCommit(onSaveQueue: ChangedModel[] | undefined) {
         const oldValues = this._oldValues;
         let changed : Record<any, any> | "created" | "deleted";
 
@@ -339,15 +339,17 @@ export abstract class Model<SUB> {
             // We're doing an update. Note that we may still be in a lazy state, and we don't want to load
             // the whole object just to see if something changed.
 
-            //  Delete all items from this.changed that have not actually changed.
+            // Delete all items from this.changed that have not actually changed.
             const fields = this._fields;
             changed = {};
             for(const fieldName of Object.keys(oldValues) as Iterable<keyof Model<SUB>>) {
                 const oldValue = oldValues[fieldName];
+                console.log(fieldName, this[fieldName], oldValue);
                 if (!(fields[fieldName] as FieldConfig<unknown>).type.equals(this[fieldName], oldValue)) {
                     changed[fieldName] = oldValue;
                 }
             }
+            console.log('no changes', isObjectEmpty(changed));
             if (isObjectEmpty(changed)) return false; // No changes, nothing to do
 
             // Make sure primary has not been changed
@@ -376,13 +378,13 @@ export abstract class Model<SUB> {
                     }
                 }
             }
-        } else if (this._primaryKey) { // Deleted instance
+        } else if (oldValues === null) { // Deleted instance
             this.constructor._primary._delete(this);
             for(const index of this.constructor._secondaries || []) {
                 index._delete(this);
             }
             changed = "deleted";
-        } else {
+        } else { // oldValues === undefined
             // New instance
             // Raise any validation errors
             this.validate(true);
@@ -450,7 +452,7 @@ export abstract class Model<SUB> {
      */
     delete() {
         if (!this._primaryKey) throw new DatabaseError("Cannot delete unsaved instance", "NOT_SAVED");
-        this._oldValues = undefined;
+        this._oldValues = null;
     }
 
     /**
@@ -493,5 +495,21 @@ export abstract class Model<SUB> {
      */
     isValid(): boolean {
         return this.validate().length === 0;
+    }
+
+    getState(): "deleted" | "new" | "loaded" {
+        if (this._oldValues === null) return "deleted";
+        if (this._oldValues === undefined) return "new";
+        return "loaded";
+    }
+
+    toString(): string {
+        const primary = this.constructor._primary;
+        const pk = primary._keyToArray(this._primaryKey || primary._instanceToKeyBytes(this).toUint8Array(false));
+        return `{Model:${this.constructor.tableName} ${this.getState()} ${pk}}`;
+    }
+
+    [Symbol.for('nodejs.util.inspect.custom')]() {
+        return this.toString();
     }
 }

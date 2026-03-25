@@ -89,6 +89,7 @@ export { init, onCommit, onRevert, getTransactionData, setTransactionData, Datab
 export async function transact<T>(fn: () => T): Promise<T> {
     const instances: Set<Model<any>> = new Set();
     const onSaveQueue: ChangedModel[] | undefined = onSaveCallback ? [] : undefined;
+    console.log('transact', onSaveCallback ? 'with onSaveCallback' : 'without onSaveCallback');
 
     let result!: T;
     try {
@@ -107,7 +108,8 @@ export async function transact<T>(fn: () => T): Promise<T> {
 
             // Save all modified instances before committing.
             for (const instance of instances) {
-                instance._onCommit(onSaveQueue);
+                console.log('Saving instance', instance);
+                instance._preCommit(onSaveQueue);
             }
 
             // Instruct OLMDB to return the commit sequence number
@@ -115,6 +117,7 @@ export async function transact<T>(fn: () => T): Promise<T> {
         });
 
         // After a successful commit, call the onSaveCallback if anything was changed
+        console.log('Transaction committed with commitSeq', commitSeq, onSaveQueue);
         if (onSaveCallback && onSaveQueue?.length) {
             onSaveCallback(commitSeq, onSaveQueue);
         }
@@ -132,6 +135,7 @@ export async function transact<T>(fn: () => T): Promise<T> {
         for (const instance of instances) {
             Object.freeze(instance);
         }
+        instances.clear();
     }
 }
 
