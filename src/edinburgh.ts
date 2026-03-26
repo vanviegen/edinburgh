@@ -1,5 +1,5 @@
 import * as lowlevel from "olmdb/lowlevel";
-import { DatabaseError } from "olmdb/lowlevel";
+import { init as olmdbInit, DatabaseError } from "olmdb/lowlevel";
 import { modelsNeedingDelayedInit, modelRegistry, txnStorage, currentTxn } from "./models.js";
 
 // Re-export public API from models
@@ -9,7 +9,7 @@ export {
     field,
 } from "./models.js";
 
-import type { Transaction, ChangedModel } from "./models.js";
+import type { Transaction, Change, Model } from "./models.js";
 
 // Re-export public API from types (only factory functions and instances)
 export {
@@ -44,7 +44,24 @@ export {
 export { BaseIndex, UniqueIndex, PrimaryIndex } from './indexes.js';
 
 export type { Transaction } from './models.js';
-export { init, DatabaseError } from "olmdb/lowlevel";
+export { DatabaseError } from "olmdb/lowlevel";
+
+let olmdbReady = false;
+
+/**
+ * Initialize the database with the specified directory path.
+ * This function may be called multiple times with the same parameters. If it is not called before the first transact(),
+ * the database will be automatically initialized with the default directory.
+ * 
+ * @example
+ * ```typescript
+ * init("./my-database");
+ * ```
+ */
+export function init(dbDir: string): void {
+    olmdbReady = true;
+    olmdbInit(dbDir);
+}
 
 let pendingInit: Promise<void> | undefined;
 
@@ -93,13 +110,15 @@ export async function transact<T>(fn: () => T): Promise<T> {
             await pendingInit;
         } else {
             pendingInit = (async () => {
+                if (!olmdbReady) olmdbInit('.edinburgh');
+                olmdbReady = true;
+
                 for (const model of modelsNeedingDelayedInit) {
                     await model._delayedInit();
                     modelsNeedingDelayedInit.delete(model);
                 }
                 pendingInit = undefined;
             })();
-
         }
     }
 
@@ -107,14 +126,17 @@ export async function transact<T>(fn: () => T): Promise<T> {
         for (let retryCount = 0; ; retryCount++) {
             const txnId = lowlevel.startTransaction();
             const txn: Transaction = { id: txnId, instances: new Set(), instancesByPk: new Map() };
-            const onSaveQueue: ChangedModel[] | undefined = onSaveCallback ? [] : undefined;
+            const onSaveQueue: Map<Model<unknown>, Change> | undefined = onSaveCallback ? new Map() : undefined;
 
             try {
                 const result = await txnStorage.run(txn, fn);
 
                 // Save all modified instances before committing
                 for (const instance of txn.instances) {
-                    instance._preCommit(onSaveQueue);
+                    const change = instance._write(txn);
+                    if (onSaveQueue && change) {
+                        onSaveQueue.set(instance, change);
+                    }
                 }
 
                 const commitResult = lowlevel.commitTransaction(txnId);
@@ -123,7 +145,7 @@ export async function transact<T>(fn: () => T): Promise<T> {
                 if (commitSeq > 0) {
                     // Success
                     closeTransaction(txn);
-                    if (onSaveQueue?.length) {
+                    if (onSaveQueue?.size) {
                         onSaveCallback!(commitSeq, onSaveQueue);
                     }
                     return result;
@@ -150,29 +172,28 @@ export async function transact<T>(fn: () => T): Promise<T> {
 }
 
 function closeTransaction(txn: Transaction) {
-    // Instances may be used in read-only mode after the transaction, but changing anything or
-    // triggering lazy loading should throw an error.
+    // Reset instances back to uninitialized lazy-loading state, so if they get recycled in
+    // another transaction, they will be reloaded there.
     for (const instance of txn.instances) {
-        instance._txn = undefined;
-        Object.freeze(instance);
+        Object.defineProperties(instance, instance.constructor._primary._lazyDescriptors);
+        instance._oldValues = {};
     }
     // Destroy the transaction object, to make sure things crash if they are used after
     // this point, and to help the GC reclaim memory.
     txn.id = txn.instances = txn.instancesByPk = undefined as any;
 }
 
-let onSaveCallback: ((commitId: number, items: ChangedModel[]) => void) | undefined;
-
+let onSaveCallback: ((commitId: number, items: Map<Model<any>, Change>) => void) | undefined;
+ 
 /**
  * Set a callback function to be called after a model is saved and committed.
  *
  * @param callback The callback function to set. It gets called after each successful
  * `transact()` commit that has changes, with the following arguments:
  *   - A sequential number. Higher numbers have been committed after lower numbers.
- *   - An array of model instances that have been modified, created, or deleted.
- *     You can used its {@link Model.changed} property to figure out what changed.
+ *   - A map of model instances to their changes. The change can be "created", "deleted", or an object containing the old values.
  */
-export function setOnSaveCallback(callback: ((commitId: number, items: ChangedModel[]) => void) | undefined) {
+export function setOnSaveCallback(callback: ((commitId: number, items: Map<Model<any>, Change>) => void) | undefined) {
     onSaveCallback = callback;
 }
 

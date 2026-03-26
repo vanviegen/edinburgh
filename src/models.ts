@@ -17,8 +17,8 @@ export function currentTxn(): Transaction {
 
 export interface Transaction {
     id: number;
-    instances: Set<any>;
-    instancesByPk: Map<number, any>;
+    instances: Set<Model<unknown>>;
+    instancesByPk: Map<number, Model<unknown>>;
 }
 import { BaseIndex as BaseIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
 import { addErrorPath, logLevel, assert, dbGet, hashBytes } from "./utils.js";
@@ -73,9 +73,7 @@ function isObjectEmpty(obj: object) {
     return true;
 }
 
-export type ChangedModel = Model<unknown> & {
-    changed: Record<any, any> | "updated" | "deleted";
-}
+export type Change = Record<any, any> | "created" | "deleted";
 
 /**
  * Register a model class with the Edinburgh ORM system.
@@ -119,10 +117,9 @@ export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     if (AnyOrgModel._mock) return AnyOrgModel._mock;
 
     const MockModel = function(this: any, initial?: Record<string,any>) {
-        assert(this.constructor.fields); // Should have been set by _delayedInit
-        const txn = currentTxn();
-        this._txn = txn;
-        txn.instances.add(this);
+        // This constructor should only be called when the user does 'new Model'. We'll bypass this when
+        // loading objects. Add to 'instances', so the object will be saved.
+        currentTxn().instances.add(this);
         if (initial) {
             Object.assign(this, initial);
         }
@@ -198,26 +195,12 @@ export abstract class Model<SUB> {
     /** 
      * @internal
      * - _oldValues===undefined: New instance, not yet saved.
-     * - _oldValues===null && _primeKey: Deleted instance
+     * - _oldValues===null: Instance is to be deleted.
      * - _oldValues is an object: Loaded (possibly only partial, still lazy) from disk, _oldValues contains (partial) old values
      */
-    _oldValues: Partial<Model<SUB>> | undefined | null;
+    _oldValues: Record<string, any> | undefined | null;
     _primaryKey: Uint8Array | undefined;
     _primaryKeyHash: number | undefined;
-    _txn: Transaction | undefined;
-
-    /**
-     * This property can be used in `setOnSave` callbacks to determine how a model instance has changed.
-     * If the value is undefined, the instance has been created. If it's "deleted" the instance has
-     * been deleted. If its an object, the instance has been modified and the object contains the old values.
-     * 
-     * Note: this property should **not** be accessed *during* a `transact()` -- it's state is an implementation
-     * detail that may change semantics at any minor release.
-     */
-    changed?: Record<any,any> | "deleted" | "created";
-
-    // Reference the static `fields` property; the mock constructor copies it here for performance
-    _fields!: Record<string | symbol | number, FieldConfig<unknown>>;
 
     constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
         // This constructor will only be called once, from `initModels`. All other instances will
@@ -243,7 +226,7 @@ export abstract class Model<SUB> {
             new PrimaryIndex(MockModel, ['id']);
         }
 
-        MockModel.fields = MockModel.prototype._fields = {};
+        MockModel.fields = {};
         for (const key in instance) {
             const value = instance[key] as FieldConfig<unknown>;
             // Check if this property contains field metadata
@@ -287,99 +270,67 @@ export abstract class Model<SUB> {
     }
 
     _setLoadedField(fieldName: string, value: any) {
-        assert(this._oldValues !== null);
-        const orgValues = this._oldValues ||= Object.create(Object.getPrototypeOf(this));
-        if (orgValues.hasOwnProperty(fieldName)) return; // Already loaded earlier (as part of index key?)
+        const oldValues = this._oldValues!;
+        if (oldValues.hasOwnProperty(fieldName)) return; // Already loaded earlier (as part of index key?)
 
-        const fieldType = (this._fields[fieldName] as FieldConfig<unknown>).type;
         this[fieldName as keyof Model<SUB>] = value;
-        orgValues[fieldName] = fieldType.clone(value);
+        if (typeof value === 'object' && value !== null) {            
+            const fieldType = (this.constructor.fields[fieldName] as FieldConfig<unknown>).type;
+            oldValues[fieldName] = fieldType.clone(value);
+        } else {
+            // This path is just an optimization
+            oldValues[fieldName] = value;
+        }
     }
 
     /**
-     * @returns The primary key for this instance, or undefined if not yet saved.
+     * @returns The primary key for this instance.
      */
-    getPrimaryKey(): Uint8Array | undefined {
-        return this._primaryKey;
+    getPrimaryKey(): Uint8Array {
+        let key = this._primaryKey;
+        if (key === undefined) {
+            key = this.constructor._primary!._instanceToKeyBytes(this).toUint8Array();
+            this._setPrimaryKey(key);
+        }
+        return key;
+    }
+
+    _setPrimaryKey(key: Uint8Array, hash?: number) {
+        this._primaryKey = key;
+        this._primaryKeyHash = hash ?? hashBytes(key);
+        Object.defineProperties(this, this.constructor._primary._freezePrimaryKeyDescriptors);
     }
 
     /**
      * @returns A 53-bit positive integer non-cryptographic hash of the primary key, or undefined if not yet saved.
      */
-    getPrimaryKeyHash(): number | undefined{
-        if (this._primaryKeyHash) return this._primaryKeyHash;
-        if (!this._primaryKey) return;
-        return this._primaryKeyHash = hashBytes(this._primaryKey);
-    }
-
-    _getCreatePrimaryKey(): Uint8Array {
-        return this._primaryKey ||= this.constructor._primary!._instanceToKeyBytes(this).toUint8Array();
+    getPrimaryKeyHash(): number {
+        if (this._primaryKeyHash === undefined) this.getPrimaryKey();
+        return this._primaryKeyHash!;
     }
 
     isLazyField(field: keyof this) {
         const descr = this.constructor._primary!._lazyDescriptors[field];
-        return !!(descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, field)?.get);
+        return descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, field)?.get;
     }
 
-    _preCommit(onSaveQueue: ChangedModel[] | undefined) {
+    _write(txn: Transaction): undefined | Change {
         const oldValues = this._oldValues;
-        const txn = this._txn!;
-        let changed : Record<any, any> | "created" | "deleted";
 
-        if (oldValues)  {
-            // We're doing an update. Note that we may still be in a lazy state, and we don't want to load
-            // the whole object just to see if something changed.
-
-            // Delete all items from this.changed that have not actually changed.
-            const fields = this._fields;
-            changed = {};
-            for(const fieldName of Object.keys(oldValues) as Iterable<keyof Model<SUB>>) {
-                const oldValue = oldValues[fieldName];
-                if (!(fields[fieldName] as FieldConfig<unknown>).type.equals(this[fieldName], oldValue)) {
-                    changed[fieldName] = oldValue;
-                }
-            }
-            if (isObjectEmpty(changed)) return false; // No changes, nothing to do
-
-            // Make sure primary has not been changed
-            for (const field of this.constructor._primary!._fieldTypes.keys()) {
-                if (changed.hasOwnProperty(field)) {
-                    throw new DatabaseError(`Cannot modify primary key field: ${field}`, "CHANGE_PRIMARY");
-                }
-            }
-
-            // We have changes. Now it's okay for any lazy fields to be loaded (which the validate will trigger).
-
-            // Raise any validation errors
-            this.validate(true);
-
-            // Update the primary index
-            this.constructor._primary!._write(txn, this);
-
-            // Update any secondaries with changed fields
-            for (const index of this.constructor._secondaries || []) {
-                for (const field of index._fieldTypes.keys()) {
-                    if (changed.hasOwnProperty(field)) {
-                        // We need to update this index - first delete the old one
-                        index._delete(txn, oldValues);
-                        index._write(txn, this)
-                        break;
-                    }
-                }
-            }
-        } else if (oldValues === null) { // Deleted instance
+        if (oldValues === null) { // Delete instance
             this.constructor._primary._delete(txn, this);
             for(const index of this.constructor._secondaries || []) {
                 index._delete(txn, this);
             }
-            changed = "deleted";
-        } else { // oldValues === undefined
-            // New instance
-            // Raise any validation errors
+            
+            return "deleted";
+        }
+        
+        if (oldValues === undefined) { // Create instance
             this.validate(true);
 
             // Make sure the primary key does not already exist
-            if (dbGet(txn.id, this._getCreatePrimaryKey())) {
+            if (dbGet(txn.id, this.getPrimaryKey())) {
                 throw new DatabaseError("Unique constraint violation", "UNIQUE_CONSTRAINT");
             }
 
@@ -391,13 +342,51 @@ export abstract class Model<SUB> {
                 index._write(txn, this);
             }
 
-            changed = "created";
+            return "created";
         }
 
-        if (onSaveQueue) {
-            this.changed = changed;
-            onSaveQueue.push(this as ChangedModel);
+        // oldValues is an object.
+        // We're doing an update. Note that we may still be in a lazy state, and we don't want to load
+        // the whole object just to see if something changed.
+
+        // Add old values of changed fields to 'changed'.
+        const fields = this.constructor.fields;
+        let changed : Record<any, any> = {};
+        for(const fieldName of Object.keys(oldValues) as Iterable<keyof Model<SUB>>) {
+            const oldValue = oldValues[fieldName];
+            if (!(fields[fieldName] as FieldConfig<unknown>).type.equals(this[fieldName], oldValue)) {
+                changed[fieldName] = oldValue;
+            }
         }
+        if (isObjectEmpty(changed)) return; // No changes, nothing to do
+
+        // Make sure primary has not been changed
+        for (const field of this.constructor._primary!._fieldTypes.keys()) {
+            if (changed.hasOwnProperty(field)) {
+                throw new DatabaseError(`Cannot modify primary key field: ${field}`, "CHANGE_PRIMARY");
+            }
+        }
+
+        // We have changes. Now it's okay for any lazy fields to be loaded (which the validate will trigger).
+
+        // Raise any validation errors
+        this.validate(true);
+
+        // Update the primary index
+        this.constructor._primary!._write(txn, this);
+
+        // Update any secondaries with changed fields
+        for (const index of this.constructor._secondaries || []) {
+            for (const field of index._fieldTypes.keys()) {
+                if (changed.hasOwnProperty(field)) {
+                    // We need to update this index - first delete the old one
+                    index._delete(txn, oldValues);
+                    index._write(txn, this)
+                    break;
+                }
+            }
+        }
+        return changed;
     }
 
     /**
@@ -413,7 +402,7 @@ export abstract class Model<SUB> {
      * ```
      */
     preventPersist() {
-        this._txn?.instances.delete(this);
+        currentTxn().instances.delete(this);
         return this;
     }
 
@@ -439,7 +428,7 @@ export abstract class Model<SUB> {
      * ```
      */
     delete() {
-        if (!this._primaryKey) throw new DatabaseError("Cannot delete unsaved instance", "NOT_SAVED");
+        if (this._oldValues === undefined) throw new DatabaseError("Cannot delete unsaved instance", "NOT_SAVED");
         this._oldValues = null;
     }
 
@@ -460,7 +449,7 @@ export abstract class Model<SUB> {
     validate(raise: boolean = false): Error[] {
         const errors: Error[] = [];
         
-        for (const [key, fieldConfig] of Object.entries(this._fields)) {
+        for (const [key, fieldConfig] of Object.entries(this.constructor.fields)) {
             let e = fieldConfig.type.getError((this as any)[key]);
             if (e) {
                 e = addErrorPath(e, this.constructor.tableName+"."+key);
@@ -485,9 +474,9 @@ export abstract class Model<SUB> {
         return this.validate().length === 0;
     }
 
-    getState(): "deleted" | "new" | "loaded" {
+    getState(): "deleted" | "created" | "loaded" {
         if (this._oldValues === null) return "deleted";
-        if (this._oldValues === undefined) return "new";
+        if (this._oldValues === undefined) return "created";
         return "loaded";
     }
 

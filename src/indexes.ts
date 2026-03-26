@@ -42,18 +42,8 @@ export class IndexRangeIterator<M extends typeof Model> implements Iterator<Inst
             return { done: true, value: undefined };
         }
         
-        // Extract the key without the index ID
-        const keyBytes = new DataPack(new Uint8Array(raw.key));
-        const entryIndexId = keyBytes.readNumber();
-        assert(entryIndexId === this.indexId);
-
-        // Use polymorphism to get the model from the entry
-        const model = this.parentIndex._pairToInstance(this.txn, keyBytes, new Uint8Array(raw.value));
-
-        if (!model) {
-            // This shouldn't happen, but skip if it does
-            return this.next();
-        }
+        // Dispatches to the _pairToInstance specific to the index type
+        const model = this.parentIndex._pairToInstance(this.txn, raw.key, raw.value);
 
         return { done: false, value: model };
     }
@@ -113,7 +103,8 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     public _MyModel: M;
     public _fieldTypes: Map<keyof InstanceType<M> & string, TypeWrapper<any>> = new Map();
     public _fieldCount!: number;
-
+    _resetIndexFieldDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
+    
     /**
      * Create a new index.
      * @param MyModel - The model class this index belongs to.
@@ -130,6 +121,14 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         }
         this._fieldCount = this._fieldNames.length;
         await this._retrieveIndexId();
+
+        for(const fieldName of this._fieldTypes.keys()) {
+            this._resetIndexFieldDescriptors[fieldName] = {
+                writable: true,
+                configurable: true,
+                enumerable: true
+            };
+        }
     }
 
     _indexId?: number;
@@ -158,12 +157,12 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
 
     /**
      * Extract model from iterator entry - implemented differently by each index type.
-     * @param keyBytes - Key bytes with index ID already read.
-     * @param valueBuffer - Value Uint8Array from the entry.
+     * @param keyBuffer - Key bytes (including index id).
+     * @param valueBuffer - Value bytes from the entry.
      * @returns Model instance or undefined.
      * @internal
      */
-    abstract _pairToInstance(txn: Transaction, keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined;
+    abstract _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M>;
 
     _hasNullIndexValues(model: InstanceType<M>) {
         for(const fieldName of this._fieldTypes.keys()) {
@@ -361,6 +360,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     _nonKeyFields!: (keyof InstanceType<M> & string)[];
     _lazyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
     _resetDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
+    _freezePrimaryKeyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
 
     constructor(MyModel: M, fieldNames: F) {
         super(MyModel, fieldNames);
@@ -393,6 +393,13 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
                 enumerable: true
             };
         }
+
+        for(const fieldName of this._fieldNames) {
+            this._freezePrimaryKeyDescriptors[fieldName] = {
+                writable: false,
+                enumerable: true
+            };
+        }
     }
 
     /**
@@ -405,8 +412,8 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
      * const user = User.pk.get("john_doe");
      * ```
      */
-    get(...args: IndexArgTypes<M, F> | [Uint8Array]): InstanceType<M> | undefined {
-        return this._get(currentTxn(), args, false);
+    get(...args: IndexArgTypes<M, F>): InstanceType<M> | undefined {
+        return this._get(currentTxn(), args, true);
     }
 
     /**
@@ -416,40 +423,54 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
      * @param args Primary key field values. (Or a single Uint8Array containing the key.)
      * @returns The (lazily loaded) model instance.
      */
-    getLazy(...args: IndexArgTypes<M, F> | [Uint8Array]): InstanceType<M> {
-        return this._get(currentTxn(), args, true);
+    getLazy(...args: IndexArgTypes<M, F>): InstanceType<M> {
+        return this._get(currentTxn(), args, false);
     }
 
-    _get(txn: Transaction, args: IndexArgTypes<M, F> | [Uint8Array], lazy: true): InstanceType<M>;
-    _get(txn: Transaction, args: IndexArgTypes<M, F> | [Uint8Array], lazy: false): InstanceType<M> | undefined;
-    _get(txn: Transaction, args: IndexArgTypes<M, F> | [Uint8Array], lazy: boolean) {
+    _get(txn: Transaction, args: IndexArgTypes<M, F> | Uint8Array, loadNow: false | Uint8Array): InstanceType<M>;
+    _get(txn: Transaction, args: IndexArgTypes<M, F> | Uint8Array, loadNow: true): InstanceType<M> | undefined;
+    _get(txn: Transaction, args: IndexArgTypes<M, F> | Uint8Array, loadNow: boolean | Uint8Array) {
         let key: Uint8Array, keyParts;
-        if (args.length === 1 && args[0] instanceof Uint8Array) {
-            key = args[0];
+        if (args instanceof Uint8Array) {
+            key = args;
         } else {
             key = this._argsToKeyBytes(args as IndexArgTypes<M, F>, false).toUint8Array();
             keyParts = args;
         }
 
         const keyHash = hashBytes(key);
-        const cached = txn.instancesByPk.get(keyHash);
-        if (cached) return cached;
-        
-        let valueBuffer;
-        if (!lazy) {
-            valueBuffer = dbGet(txn.id, key);
-            if (logLevel >= 3) {
-                console.log(`Get ${this} key=${new DataPack(key)} result=${valueBuffer && new DataPack(valueBuffer)}`);
+        const cached = txn.instancesByPk.get(keyHash) as InstanceType<M>;
+        if (cached) {
+            if (loadNow && loadNow !== true) {
+                // The object already exists, but it may still be lazy-loaded
+                Object.defineProperties(cached, this._resetDescriptors);
+                this._setNonKeyValues(cached, loadNow);
             }
-            if (!valueBuffer) return;
+            return cached;
+        }
+        
+        let valueBuffer: Uint8Array | undefined;
+        if (loadNow) {
+            if (loadNow === true) {
+                valueBuffer = dbGet(txn.id, key);
+                if (logLevel >= 3) {
+                    console.log(`Get ${this} key=${new DataPack(key)} result=${valueBuffer && new DataPack(valueBuffer)}`);
+                }
+                if (!valueBuffer) return;
+            } else {
+                valueBuffer = loadNow; // Uint8Array
+            }
         }
         
         // This is a primary index. So we can now deserialize all primary and non-primary fields into instance values.
-        const model = new (this._MyModel as any)() as InstanceType<M>;
+        // Don't call the constructor, to avoid adding to txn.instances, which should happen when data is actually (lazy) loaded.
+        const model = Object.create(this._MyModel.prototype) as InstanceType<M>; 
 
-        // Store the canonical primary key on the model
-        model._primaryKey = key;
-        model._primaryKeyHash = keyHash;
+        // Store the canonical primary key on the model, set the hash, and freeze the primary key fields.
+        model._setPrimaryKey(key, keyHash);
+
+        // Set to the original value for all fields that are loaded by _setLoadedField
+        model._oldValues = {};
 
         // Set the primary key fields on the model
         if (keyParts) {
@@ -467,10 +488,15 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
 
         if (valueBuffer) {
             // Non-lazy load. Set other fields
-            this._setNonKeyValues(model, new DataPack(valueBuffer));
+            this._setNonKeyValues(model, valueBuffer);
+            txn.instances.add(model);
         } else {
             // Lazy - set getters for other fields
             Object.defineProperties(model, this._lazyDescriptors);
+            // When creating a lazy instance, we don't need to add it to txn.instances yet, as only the
+            // primary key fields are loaded, and they cannot be modified (so we don't need to check).
+            // When any other field is set, that will trigger a lazy-load, adding the instance to
+            // txn.instances.
         }
 
         txn.instancesByPk.set(keyHash, model);
@@ -478,22 +504,22 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     }
 
     _lazyNow(model: InstanceType<M>) {
-        const txn = model._txn;
-        if (!txn) throw new DatabaseError(`Cannot lazy-load ${model.constructor.name} after transaction has ended`, 'STALE_MODEL');
+        const txn = currentTxn();
         let valueBuffer = dbGet(txn.id, model._primaryKey!);
         if (logLevel >= 3) {
             console.log(`Lazy retrieve ${this} key=${new DataPack(model._primaryKey)} result=${valueBuffer && new DataPack(valueBuffer)}`);
         }
         if (!valueBuffer) throw new DatabaseError(`Lazy-loaded ${model.constructor.name}#${model._primaryKey} does not exist`, 'LAZY_FAIL');
         Object.defineProperties(model, this._resetDescriptors);
-        this._setNonKeyValues(model, new DataPack(valueBuffer));
+        this._setNonKeyValues(model, valueBuffer);
     }
 
-    _setNonKeyValues(model: InstanceType<M>, valueBytes: DataPack) {
+    _setNonKeyValues(model: InstanceType<M>, valueArray: Uint8Array) {
+        const valuePack = new DataPack(valueArray);
         const fieldConfigs = this._MyModel.fields;
 
         for (const fieldName of this._nonKeyFields) {
-            const value = fieldConfigs[fieldName].type.deserialize(valueBytes);
+            const value = fieldConfigs[fieldName].type.deserialize(valuePack);
             model._setLoadedField(fieldName, value);
         }
     }
@@ -508,18 +534,8 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
         return result as any;
     }
 
-    _pairToInstance(txn: Transaction, keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined {
-        const valueBytes = new DataPack(valueBuffer);
-        const model = new (this._MyModel as any)() as InstanceType<M>;
-
-        for(const [fieldName, fieldType] of this._fieldTypes.entries()) {
-            model._setLoadedField(fieldName, fieldType.deserialize(keyBytes));
-        }
-        model._primaryKey = keyBytes.toUint8Array();
-        
-        this._setNonKeyValues(model, valueBytes);
-
-        return model;
+    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M> {
+        return this._get(txn, new Uint8Array(keyBuffer), new Uint8Array(valueBuffer));
     }
 
     _getTypeName(): string {
@@ -534,9 +550,9 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
             fieldConfig.type.serialize(model[fieldName], valueBytes);
         }
         if (logLevel >= 2) {
-            console.log(`Write ${this} key=${new DataPack(model._getCreatePrimaryKey())} value=${valueBytes}`);
+            console.log(`Write ${this} key=${new DataPack(model.getPrimaryKey())} value=${valueBytes}`);
         }
-        dbPut(txn.id, model._getCreatePrimaryKey(), valueBytes.toUint8Array());
+        dbPut(txn.id, model.getPrimaryKey(), valueBytes.toUint8Array());
     }
 
     _delete(txn: Transaction, model: InstanceType<M>) {
@@ -583,7 +599,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         if (!valueBuffer) return;
 
         const pk = this._MyModel._primary!;
-        const result = pk._get(txn, [valueBuffer], false);
+        const result = pk._get(txn, valueBuffer, true);
         if (!result) throw new DatabaseError(`Unique index ${this} points at non-existing primary for key: ${args.join(', ')}`, 'CONSISTENCY_ERROR');
         return result;
     }
@@ -612,33 +628,30 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         }
     }
 
-    /**
-     * Extract model from iterator entry for unique index.
-     * @param keyBytes - Key bytes with index ID already read.
-     * @param valueBytes - Value bytes from the entry.
-     * @returns Model instance or undefined.
-     * @internal
-     */
-    _pairToInstance(txn: Transaction, keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined {
+    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M> {
         // For unique indexes, the value contains the primary key
 
-        const pk = this._MyModel._primary!;
-        const model = pk._get(txn, [valueBuffer], true);
+        const keyPack = new DataPack(new Uint8Array(keyBuffer));
+        keyPack.readNumber(); // discard index id
 
-        // Read the index fields from the key, overriding lazy loading for these fields
+        const pk = this._MyModel._primary!;
+        const model = pk._get(txn, new Uint8Array(valueBuffer), false);
+
+        // _get will have created lazy-load getters for our indexed fields. Let's turn them back into
+        // regular properties:
+        Object.defineProperties(model, this._resetIndexFieldDescriptors);
+
+        // Set the values for our indexed fields
         for(const [name, fieldType] of this._fieldTypes.entries()) {
-            // getLazy will have created a getter for this field - make it a normal property instead
-            Object.defineProperty(model, name, {
-                writable: true,
-                configurable: true,
-                enumerable: true
-            });
-            model._setLoadedField(name, fieldType.deserialize(keyBytes));
+            model._setLoadedField(name, fieldType.deserialize(keyPack));
         }
+
+        // We need to add to instances now, as we need to verify that the indexed fields have been changed
+        // by the user on commit.
+        txn.instances.add(model);
 
         return model;
     }
-
 
     _getTypeName(): string {
         return 'unique';
@@ -661,35 +674,34 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
         (this._MyModel._secondaries ||= []).push(this);
     }
 
-    /**
-     * Extract model from iterator entry for secondary index.
-     * @param keyBytes - Key bytes with index ID already read.
-     * @param valueBuffer - Value Uint8Array from the entry.
-     * @returns Model instance or undefined.
-     * @internal
-     */
-    _pairToInstance(txn: Transaction, keyBytes: DataPack, valueBuffer: Uint8Array): InstanceType<M> | undefined {
+    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, _valueBuffer: ArrayBuffer): InstanceType<M> {
         // For secondary indexes, the primary key is stored after the index fields in the key
+
+        const keyPack = new DataPack(new Uint8Array(keyBuffer));
+        keyPack.readNumber(); // discard index id
         
         // Read the index fields, saving them for later
         const indexFields = new Map();
         for(const [name, type] of this._fieldTypes.entries()) {
-            indexFields.set(name, type.deserialize(keyBytes));
+            indexFields.set(name, type.deserialize(keyPack));
         }
 
-        const primaryKey = keyBytes.readUint8Array();
-        const model = this._MyModel._primary!._get(txn, [primaryKey], true);
+        const primaryKey = keyPack.readUint8Array();
+        const model = this._MyModel._primary!._get(txn, primaryKey, false);
 
-        // Add the index fields to the model, overriding lazy loading for these fields
+
+        // _get will have created lazy-load getters for our indexed fields. Let's turn them back into
+        // regular properties:
+        Object.defineProperties(model, this._resetIndexFieldDescriptors);
+
+        // Set the values for our indexed fields
         for(const [name, value] of indexFields) {
-            // getLazy will have created a getter for this field - make it a normal property instead
-            Object.defineProperty(model, name, {
-                writable: true,
-                configurable: true,
-                enumerable: true
-            });
             model._setLoadedField(name, value);
         }
+
+        // We need to add to instances now, as we need to verify that the indexed fields have been changed
+        // by the user on commit.
+        txn.instances.add(model);
 
         return model;
     }
@@ -697,7 +709,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     _instanceToKeyBytes(model: InstanceType<M>): DataPack {
         // index id + index fields + primary key
         const bytes = super._instanceToKeyBytes(model);
-        bytes.write(model._getCreatePrimaryKey());
+        bytes.write(model.getPrimaryKey());
         return bytes;
     }
 

@@ -504,7 +504,7 @@ class IdentifierType extends TypeWrapper<string> {
     }
     
     default(model: Model<any>): string {
-        const txn = model._txn!;
+        const txn = currentTxn();
         // Generate a random ID, and if it already exists in the database, retry.
         let id: string;
         do {
@@ -532,11 +532,11 @@ export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<Insta
     }
     
     serialize(model: InstanceType<T>, pack: DataPack) {
-        pack.write(model._getCreatePrimaryKey());
+        pack.write(model.getPrimaryKey());
     }
     
     deserialize(pack: DataPack) {
-        return this.TargetModel._primary!.getLazy(pack.readUint8Array());
+        return this.TargetModel._primary!._get(currentTxn(), pack.readUint8Array(), false);
     }
     
     getError(value: InstanceType<T>) {

@@ -1228,7 +1228,7 @@ test("Secondary index implementation", async () => {
 
 
 test("onSave callback basic functionality", async () => {
-    const callbackEvents: Array<{commitId: number, items: any[]}> = [];
+    const callbackEvents: Array<{commitId: number, items: Map<any,any>}> = [];
     
     E.setOnSaveCallback((commitId, items) => {
         callbackEvents.push({commitId, items});
@@ -1246,11 +1246,7 @@ test("onSave callback basic functionality", async () => {
     // Verify create callback
     expect(callbackEvents).toHaveLength(1);
     expect(callbackEvents[0].commitId).toBeGreaterThan(0);
-    expect(callbackEvents[0].items).toHaveLength(1);
-    expect(callbackEvents[0].items[0]).toMatchObject({
-        email: "callback@test.com",
-        changed: "created"
-    });
+    expect(callbackEvents[0].items).toEqual(new Map([[{email: "callback@test.com", name: "Callback Test"}, "created"]]));
     initialCommitId = callbackEvents[0].commitId;
     callbackEvents.length = 0;
     
@@ -1264,10 +1260,7 @@ test("onSave callback basic functionality", async () => {
     expect(callbackEvents).toHaveLength(1);
     expect(callbackEvents[0].commitId).toBeGreaterThan(initialCommitId);
     expect(callbackEvents[0].items).toHaveLength(1);
-    expect(callbackEvents[0].items[0]).toMatchObject({
-        name: "Updated Name",
-        changed: { name: "Callback Test" }
-    });
+    expect(callbackEvents[0].items).toEqual(new Map([[{email: "callback@test.com", name: "Updated Name"}, { name: "Callback Test" }]]));
     callbackEvents.length = 0;
     
     // Test DELETE operation
@@ -1280,13 +1273,13 @@ test("onSave callback basic functionality", async () => {
     expect(callbackEvents).toHaveLength(1);
     expect(callbackEvents[0].commitId).toBeGreaterThan(0);
     expect(callbackEvents[0].items).toHaveLength(1);
-    expect(callbackEvents[0].items[0].changed).toBe("deleted");
+    expect(callbackEvents[0].items).toEqual(new Map([[{email: "callback@test.com", name: "Updated Name"}, "deleted"]]));
     
     E.setOnSaveCallback(undefined);
 });
 
 test("onSave callback with transaction rollback", async () => {
-    const callbackEvents: Array<{commitId: number, items: any[]}> = [];
+    const callbackEvents: Array<{commitId: number, items: Map<any,any>}> = [];
     
     E.setOnSaveCallback((commitId, items) => {
         callbackEvents.push({commitId, items});
