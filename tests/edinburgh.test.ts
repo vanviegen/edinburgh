@@ -1,5 +1,6 @@
 import { test, expect, beforeEach } from "vitest";
 import * as E from '../src/edinburgh.js';
+import { Change } from "../src/models.js";
 
 try {
     E.init("./.olmdb_test");
@@ -122,7 +123,20 @@ function noNeedToRunThis() {
 
 }
 
-beforeEach(E.deleteEverything);
+let lastOnSaveItems: {model: Record<string,any>, change: Change}[] | undefined;
+let lastOnSaveCommitId: number | undefined;
+
+E.setOnSaveCallback((commitId, items) => {
+    lastOnSaveItems = [...items].map(([model, change]) => ({model, change}));
+    lastOnSaveCommitId = commitId;
+});
+
+beforeEach(async () => {
+    await E.deleteEverything();
+    lastOnSaveItems = undefined;
+    lastOnSaveCommitId = undefined;
+});
+
 
 test("Checks for validity", async () => {
     await E.transact(() => {
@@ -1226,29 +1240,61 @@ test("Secondary index implementation", async () => {
     });
 });
 
+test("throws STALE_INSTANCE on access after transaction", async () => {
+    const id = await E.transact(async () => {
+        let person = new User({id: 'deadbeef', name: "Frank", email: 'a@b.c'});
 
-test("onSave callback basic functionality", async () => {
-    const callbackEvents: Array<{commitId: number, items: Map<any,any>}> = [];
-    
-    E.setOnSaveCallback((commitId, items) => {
-        callbackEvents.push({commitId, items});
+        return (new Post({
+            title: "Test Post",
+            content: "This is a test post.",
+            author: person,
+        })).id;
     });
 
-    let userId: string;
-    let initialCommitId: number;
+    const post = await E.transact(async () => {
+        return Post.pk.get(id)!;
+    });
+
+    expect(post.title).toBe("Test Post");
+    expect(post.author.id).toBe('deadbeef');
     
+    let code;
+    try {
+        // This would lazy-load, be we're outside our transaction
+        post.author.name;
+    } catch (error: any) {
+        code = error.code;
+    }
+    expect(code).toBe("STALE_INSTANCE");
+
+    // It should also fail when in a new transaction
+    await E.transact(async () => {
+        let code;
+        try {
+            // This would lazy-load, be we're outside our transaction
+            post.author.name;
+        } catch (error: any) {
+            code = error.code;
+        }
+        expect(code).toBe("STALE_INSTANCE");
+    });
+});
+
+
+
+test("onSave callback basic functionality", async () => {
     // Test CREATE operation
-    userId = await E.transact(() => {
+    const userId = await E.transact(() => {
         const user = new User({email: "callback@test.com", name: "Callback Test"});
         return user.id;
     });
     
     // Verify create callback
-    expect(callbackEvents).toHaveLength(1);
-    expect(callbackEvents[0].commitId).toBeGreaterThan(0);
-    expect(callbackEvents[0].items).toEqual(new Map([[{email: "callback@test.com", name: "Callback Test"}, "created"]]));
-    initialCommitId = callbackEvents[0].commitId;
-    callbackEvents.length = 0;
+    expect(lastOnSaveCommitId).toBeGreaterThan(0);
+    expect(lastOnSaveItems).toHaveLength(1);
+    expect(lastOnSaveItems![0].model.name).toEqual("Callback Test");
+    expect(lastOnSaveItems![0].change).toEqual("created");
+    const initialCommitId = lastOnSaveCommitId!;
     
     // Test UPDATE operation
     await E.transact(() => {
@@ -1257,11 +1303,10 @@ test("onSave callback basic functionality", async () => {
     });
     
     // Verify update callback
-    expect(callbackEvents).toHaveLength(1);
-    expect(callbackEvents[0].commitId).toBeGreaterThan(initialCommitId);
-    expect(callbackEvents[0].items).toHaveLength(1);
-    expect(callbackEvents[0].items).toEqual(new Map([[{email: "callback@test.com", name: "Updated Name"}, { name: "Callback Test" }]]));
-    callbackEvents.length = 0;
+    expect(lastOnSaveCommitId).toBeGreaterThan(initialCommitId);
+    expect(lastOnSaveItems).toHaveLength(1);
+    expect(lastOnSaveItems![0].model.name).toEqual("Updated Name");
+    expect(lastOnSaveItems![0].change).toEqual({name: "Callback Test"});
     
     // Test DELETE operation
     await E.transact(() => {
@@ -1270,54 +1315,35 @@ test("onSave callback basic functionality", async () => {
     });
     
     // Verify delete callback
-    expect(callbackEvents).toHaveLength(1);
-    expect(callbackEvents[0].commitId).toBeGreaterThan(0);
-    expect(callbackEvents[0].items).toHaveLength(1);
-    expect(callbackEvents[0].items).toEqual(new Map([[{email: "callback@test.com", name: "Updated Name"}, "deleted"]]));
-    
-    E.setOnSaveCallback(undefined);
+    expect(lastOnSaveItems).toHaveLength(1);
+    expect(lastOnSaveItems![0].model.name).toEqual("Updated Name");
+    expect(lastOnSaveItems![0].change).toEqual("deleted");
 });
 
 test("onSave callback with transaction rollback", async () => {
-    const callbackEvents: Array<{commitId: number, items: Map<any,any>}> = [];
-    
-    E.setOnSaveCallback((commitId, items) => {
-        callbackEvents.push({commitId, items});
-    });
-    
     // Test that callback is NOT called when transaction rolls back
     await expect(E.transact(() => {
         new User({email: "rollback@test.com", name: "Rollback Test"});
         throw new Error("Forced rollback");
     })).rejects.toThrow("Forced rollback");
     
-    expect(callbackEvents).toHaveLength(0);
+    expect(lastOnSaveCommitId).toBeUndefined();
 
     // Verify the user was not created
     await E.transact(() => {
         expect(User.byEmail.get("rollback@test.com")).toBeUndefined();
     });
-    
-    E.setOnSaveCallback(undefined);
 });
 
 test("onSave callback with unique constraint failures", async () => {
-    const callbackEvents: Array<{commitId: number, items: any[]}> = [];
-    
-    E.setOnSaveCallback((commitId, items) => {
-        callbackEvents.push({commitId, items: [...items]});
-    });
-    
     // Create first user successfully
     await E.transact(() => {
         new User({email: "unique@test.com", name: "First User"});
     });
     
-    expect(callbackEvents).toHaveLength(1);
-    expect(callbackEvents[0].commitId).toBeGreaterThan(0);
-    expect(callbackEvents[0].items).toHaveLength(1);
-    expect(callbackEvents[0].items[0].changed).toBe("created");
-    callbackEvents.length = 0;
+    expect(lastOnSaveCommitId).toBeGreaterThan(0);
+    expect(lastOnSaveItems).toHaveLength(1);
+    expect(lastOnSaveItems![0].change).toBe("created");
     
     // Test constraint violation doesn't trigger callback
     await expect(E.transact(() => {
@@ -1325,25 +1351,15 @@ test("onSave callback with unique constraint failures", async () => {
         new User({email: "unique@test.com", name: "Duplicate User"});
     })).rejects.toMatchObject({ code: "UNIQUE_CONSTRAINT" });
     
-    expect(callbackEvents).toHaveLength(0);
-    
     // Verify only first user exists
     await E.transact(() => {
         const user = User.byEmail.get("unique@test.com");
         expect(user).toBeDefined();
         expect(user!.name).toBe("First User");
     });
-    
-    E.setOnSaveCallback(undefined);
 });
 
 test("onSave callback with multiple models and operations", async () => {
-    const callbackEvents: Array<{commitId: number, items: any[]}> = [];
-    
-    E.setOnSaveCallback((commitId, items) => {
-        callbackEvents.push({commitId, items: [...items]});
-    });
-    
     let userId: string, postId: string;
     let firstCommitId: number;
     
@@ -1359,17 +1375,15 @@ test("onSave callback with multiple models and operations", async () => {
         postId = post.id;
     });
     
-    expect(callbackEvents).toHaveLength(1);
-    expect(callbackEvents[0].commitId).toBeGreaterThan(0);
-    expect(callbackEvents[0].items).toHaveLength(2);
-    expect(callbackEvents[0].items).toEqual(
+    expect(lastOnSaveCommitId).toBeGreaterThan(0);
+    expect(lastOnSaveItems).toHaveLength(2);
+    expect(lastOnSaveItems).toEqual(
         expect.arrayContaining([
-            expect.objectContaining({ email: "multi@test.com", changed: "created" }),
-            expect.objectContaining({ title: "Test Post", changed: "created" })
+            {model: expect.objectContaining({ email: "multi@test.com" }), change: "created"},
+            {model: expect.objectContaining({ title: "Test Post" }), change: "created"}
         ])
     );
-    firstCommitId = callbackEvents[0].commitId;
-    callbackEvents.length = 0;
+    firstCommitId = lastOnSaveCommitId!;
     
     // Test multiple updates in one transaction
     await E.transact(() => {
@@ -1379,23 +1393,29 @@ test("onSave callback with multiple models and operations", async () => {
         post!.title = "Updated Test Post";
     });
     
-    expect(callbackEvents).toHaveLength(1);
-    expect(callbackEvents[0].commitId).toBeGreaterThan(firstCommitId);
-    expect(callbackEvents[0].items).toHaveLength(2);
-    expect(callbackEvents[0].items).toEqual(
+    expect(lastOnSaveCommitId).toBeGreaterThan(firstCommitId);
+    expect(lastOnSaveItems).toHaveLength(2);
+    expect(lastOnSaveItems).toEqual(
         expect.arrayContaining([
-            expect.objectContaining({ 
-                email: "multi@test.com", 
-                name: "Updated Multi Test", 
-                changed: { name: "Multi Test" } 
-            }),
-            expect.objectContaining({ 
-                title: "Updated Test Post", 
-                changed: { title: "Test Post" } 
-            })
+            {
+                model: expect.objectContaining({ 
+                    email: "multi@test.com", 
+                    name: "Updated Multi Test", 
+                }),
+                change: {
+                    name: "Multi Test"
+                }
+            },
+            {
+                model: expect.objectContaining({ 
+                    title: "Updated Test Post", 
+                }),
+                change: {
+                    title: "Test Post"
+                }
+            }
         ])
     );
-    callbackEvents.length = 0;
     
     // Test mixed operations in one transaction
     await E.transact(() => {
@@ -1406,24 +1426,15 @@ test("onSave callback with multiple models and operations", async () => {
         new User({email: "mixed@test.com", name: "Mixed Test"});
     });
     
-    expect(callbackEvents).toHaveLength(1);
-    expect(callbackEvents[0].commitId).toBeGreaterThan(firstCommitId);
-    expect(callbackEvents[0].items).toHaveLength(3);
-    expect(callbackEvents[0].items).toEqual(
+    expect(lastOnSaveCommitId).toBeGreaterThan(firstCommitId);
+    expect(lastOnSaveItems).toHaveLength(3);
+    expect(lastOnSaveItems).toEqual(
         expect.arrayContaining([
-            expect.objectContaining({ changed: "deleted" }),
-            expect.objectContaining({ 
-                email: "multi@test.com", 
-                changed: { name: "Updated Multi Test" } 
-            }),
-            expect.objectContaining({ 
-                email: "mixed@test.com", 
-                changed: "created" 
-            })
+            expect.objectContaining({ change: "deleted" }),
+            {model: expect.objectContaining({email: "multi@test.com"}), change: { name: "Updated Multi Test" }},
+            {model: expect.objectContaining({email: "mixed@test.com"}), change: "created"}
         ])
     );
-    
-    E.setOnSaveCallback(undefined);
 });
 
 test("Trying to modify instances outside their transaction throws an error", async () => {

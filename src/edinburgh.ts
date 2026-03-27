@@ -2,6 +2,7 @@ import * as lowlevel from "olmdb/lowlevel";
 import { init as olmdbInit, DatabaseError } from "olmdb/lowlevel";
 import { modelsNeedingDelayedInit, modelRegistry, txnStorage, currentTxn } from "./models.js";
 
+
 // Re-export public API from models
 export {
     Model,
@@ -66,6 +67,12 @@ export function init(dbDir: string): void {
 let pendingInit: Promise<void> | undefined;
 
 
+const STALE_INSTANCE_DESCRIPTOR = {
+    get() {
+        throw new DatabaseError("The transaction for this model instance has ended", "STALE_INSTANCE");
+    },
+};
+
 /**
 * Executes a function within a database transaction context.
 * 
@@ -122,65 +129,62 @@ export async function transact<T>(fn: () => T): Promise<T> {
         }
     }
 
-    try {
-        for (let retryCount = 0; ; retryCount++) {
+    // try {
+        for (let retryCount = 0; retryCount < 6; retryCount++) {
             const txnId = lowlevel.startTransaction();
             const txn: Transaction = { id: txnId, instances: new Set(), instancesByPk: new Map() };
-            const onSaveQueue: Map<Model<unknown>, Change> | undefined = onSaveCallback ? new Map() : undefined;
+            const onSaveItems: Map<Model<unknown>, Change> | undefined = onSaveCallback ? new Map() : undefined;
 
+            let result: T | undefined;
             try {
-                const result = await txnStorage.run(txn, fn);
+                await txnStorage.run(txn, async function() {
+                    result = await fn();
 
-                // Save all modified instances before committing
-                for (const instance of txn.instances) {
-                    const change = instance._write(txn);
-                    if (onSaveQueue && change) {
-                        onSaveQueue.set(instance, change);
+                    // Save all modified instances before committing
+                    // This needs to happen inside txnStorage.run, because resolving default values
+                    // for identifiers requires database access.
+                    for (const instance of txn.instances) {
+                        const change = instance._write(txn);
+                        if (onSaveItems && change) {
+                            onSaveItems.set(instance, change);
+                        }
                     }
-                }
-
-                const commitResult = lowlevel.commitTransaction(txnId);
-                const commitSeq = typeof commitResult === 'number' ? commitResult : await commitResult;
-
-                if (commitSeq > 0) {
-                    // Success
-                    closeTransaction(txn);
-                    if (onSaveQueue?.size) {
-                        onSaveCallback!(commitSeq, onSaveQueue);
-                    }
-                    return result;
-                } else {
-                    // Race condition - retry
-                    closeTransaction(txn);
-                    if (retryCount >= 6) {
-                        throw new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION");
-                    }
-                    continue;
-                }
+                });
             } catch (e: any) {
                 try { lowlevel.abortTransaction(txnId); } catch {}
-                closeTransaction(txn);
                 throw e;
+            } finally {
+                // Make the instances read-only to make it clear that their transaction has ended.
+                for (const instance of txn.instances) {
+                    delete instance._oldValues;
+                    Object.defineProperty(instance, "_txn", STALE_INSTANCE_DESCRIPTOR);
+                    Object.freeze(instance);
+                }
+                // Destroy the transaction object, to make sure things crash if they are used after
+                // this point, and to help the GC reclaim memory.
+                txn.id = txn.instances = txn.instancesByPk = undefined as any;
             }
-        }
-    } catch (e: Error | any) {
-        // This hackery is required to provide useful stack traces.
-        const callerStack = new Error().stack?.replace(/^.*?\n/, '');
-        e.stack += "\nat async:\n" + callerStack;
-        throw e;
-    }
-}
 
-function closeTransaction(txn: Transaction) {
-    // Reset instances back to uninitialized lazy-loading state, so if they get recycled in
-    // another transaction, they will be reloaded there.
-    for (const instance of txn.instances) {
-        Object.defineProperties(instance, instance.constructor._primary._lazyDescriptors);
-        instance._oldValues = {};
-    }
-    // Destroy the transaction object, to make sure things crash if they are used after
-    // this point, and to help the GC reclaim memory.
-    txn.id = txn.instances = txn.instancesByPk = undefined as any;
+            const commitResult = lowlevel.commitTransaction(txnId);
+            const commitSeq = typeof commitResult === 'number' ? commitResult : await commitResult;
+
+            if (commitSeq > 0) {
+                // Success
+                if (onSaveItems?.size) {
+                    onSaveCallback!(commitSeq, onSaveItems);
+                }
+                return result as T;
+            }
+
+            // Race condition - retry
+        }
+        throw new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION");
+    // } catch (e: Error | any) {
+    //     // This hackery is required to provide useful stack traces.
+    //     const callerStack = new Error().stack?.replace(/^.*?\n/, '');
+    //     e.stack += "\nat async:\n" + callerStack;
+    //     throw e;
+    // }
 }
 
 let onSaveCallback: ((commitId: number, items: Map<Model<any>, Change>) => void) | undefined;

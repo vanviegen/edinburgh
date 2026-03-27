@@ -4,6 +4,13 @@ import { TypeWrapper, identifier } from "./types.js";
 
 export const txnStorage = new AsyncLocalStorage<Transaction>();
 
+
+const PREVENT_PERSIST_DESCRIPTOR = {
+    get() {
+        throw new DatabaseError("Operation not allowed after preventPersist()", "NO_PERSIST");
+    },
+};
+
 /**
  * Returns the current transaction from AsyncLocalStorage.
  * Throws if called outside a transact() callback.
@@ -116,10 +123,11 @@ export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     if (AnyOrgModel._isMock) return OrgModel;
     if (AnyOrgModel._mock) return AnyOrgModel._mock;
 
-    const MockModel = function(this: any, initial?: Record<string,any>) {
+    const MockModel = function(this: any, initial?: Record<string,any> | undefined, txn: Transaction = currentTxn()) {
         // This constructor should only be called when the user does 'new Model'. We'll bypass this when
         // loading objects. Add to 'instances', so the object will be saved.
-        currentTxn().instances.add(this);
+        this._txn = txn;
+        txn.instances.add(this);
         if (initial) {
             Object.assign(this, initial);
         }
@@ -201,6 +209,7 @@ export abstract class Model<SUB> {
     _oldValues: Record<string, any> | undefined | null;
     _primaryKey: Uint8Array | undefined;
     _primaryKeyHash: number | undefined;
+    _txn!: Transaction;
 
     constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
         // This constructor will only be called once, from `initModels`. All other instances will
@@ -289,7 +298,7 @@ export abstract class Model<SUB> {
     getPrimaryKey(): Uint8Array {
         let key = this._primaryKey;
         if (key === undefined) {
-            key = this.constructor._primary!._instanceToKeyBytes(this).toUint8Array();
+            key = this.constructor._primary!._serializeKeyFields(this).toUint8Array();
             this._setPrimaryKey(key);
         }
         return key;
@@ -311,16 +320,17 @@ export abstract class Model<SUB> {
 
     isLazyField(field: keyof this) {
         const descr = this.constructor._primary!._lazyDescriptors[field];
-        return descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, field)?.get;
+        return !!(descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, field)?.get);
     }
 
     _write(txn: Transaction): undefined | Change {
         const oldValues = this._oldValues;
 
         if (oldValues === null) { // Delete instance
-            this.constructor._primary._delete(txn, this);
+            const pk = this._primaryKey;
+            this.constructor._primary._delete(txn, pk!, this);
             for(const index of this.constructor._secondaries || []) {
-                index._delete(txn, this);
+                index._delete(txn, pk!, this);
             }
             
             return "deleted";
@@ -330,16 +340,17 @@ export abstract class Model<SUB> {
             this.validate(true);
 
             // Make sure the primary key does not already exist
-            if (dbGet(txn.id, this.getPrimaryKey())) {
+            const pk = this.getPrimaryKey();
+            if (dbGet(txn.id, pk!)) {
                 throw new DatabaseError("Unique constraint violation", "UNIQUE_CONSTRAINT");
             }
 
             // Insert the primary index
-            this.constructor._primary!._write(txn, this);
+            this.constructor._primary!._write(txn, pk!, this);
 
             // Insert all secondaries
             for (const index of this.constructor._secondaries || []) {
-                index._write(txn, this);
+                index._write(txn, pk!, this);
             }
 
             return "created";
@@ -352,9 +363,9 @@ export abstract class Model<SUB> {
         // Add old values of changed fields to 'changed'.
         const fields = this.constructor.fields;
         let changed : Record<any, any> = {};
-        for(const fieldName of Object.keys(oldValues) as Iterable<keyof Model<SUB>>) {
+        for(const fieldName in oldValues) {
             const oldValue = oldValues[fieldName];
-            if (!(fields[fieldName] as FieldConfig<unknown>).type.equals(this[fieldName], oldValue)) {
+            if (!(fields[fieldName] as FieldConfig<unknown>).type.equals(this[fieldName as keyof Model<SUB>], oldValue)) {
                 changed[fieldName] = oldValue;
             }
         }
@@ -373,15 +384,16 @@ export abstract class Model<SUB> {
         this.validate(true);
 
         // Update the primary index
-        this.constructor._primary!._write(txn, this);
+        const pk = this._primaryKey!;
+        this.constructor._primary!._write(txn, pk, this);
 
         // Update any secondaries with changed fields
         for (const index of this.constructor._secondaries || []) {
             for (const field of index._fieldTypes.keys()) {
                 if (changed.hasOwnProperty(field)) {
                     // We need to update this index - first delete the old one
-                    index._delete(txn, oldValues);
-                    index._write(txn, this)
+                    index._delete(txn, pk, oldValues);
+                    index._write(txn, pk, this)
                     break;
                 }
             }
@@ -402,7 +414,9 @@ export abstract class Model<SUB> {
      * ```
      */
     preventPersist() {
-        currentTxn().instances.delete(this);
+        this._txn.instances.delete(this);
+        // Have access to '_txn' throw a descriptive error:
+        Object.defineProperty(this, "_txn", PREVENT_PERSIST_DESCRIPTOR);
         return this;
     }
 
@@ -482,7 +496,7 @@ export abstract class Model<SUB> {
 
     toString(): string {
         const primary = this.constructor._primary;
-        const pk = primary._keyToArray(this._primaryKey || primary._instanceToKeyBytes(this).toUint8Array(false));
+        const pk = primary._keyToArray(this._primaryKey || primary._serializeKeyFields(this).toUint8Array(false));
         return `{Model:${this.constructor.tableName} ${this.getState()} ${pk}}`;
     }
 

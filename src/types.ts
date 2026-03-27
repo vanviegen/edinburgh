@@ -504,12 +504,11 @@ class IdentifierType extends TypeWrapper<string> {
     }
     
     default(model: Model<any>): string {
-        const txn = currentTxn();
         // Generate a random ID, and if it already exists in the database, retry.
         let id: string;
         do {
             id = DataPack.generateIdentifier();
-        } while (dbGet(txn.id, new DataPack().write(model.constructor._primary!._indexId!).writeIdentifier(id).toUint8Array()));
+        } while (dbGet(model._txn.id, new DataPack().write(model.constructor._primary!._indexId!).writeIdentifier(id).toUint8Array()));
         return id;
     }
 }
