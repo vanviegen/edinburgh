@@ -1489,125 +1489,222 @@ test("preCommit() is called before writes", async () => {
     });
 });
 
-test("migrate() is called for old-version rows", async () => {
-    // Step 1: Create a model and save a row
+test("lazy migration adds a new non-key field", async () => {
+    // Step 1: Register V1 model and write data
     @E.registerModel
-    class MigrateTest extends E.Model<MigrateTest> {
-        static pk = E.primary(MigrateTest, "id");
-        static tableName = "MigrateTest";
+    class LazyMigV1 extends E.Model<LazyMigV1> {
+        static pk = E.primary(LazyMigV1, "id");
+        static tableName = "LazyMigrateTest";
         id = E.field(E.string);
-        value = E.field(E.number, {default: 0});
+        name = E.field(E.string);
     }
 
     await E.transact(() => {
-        new MigrateTest({id: "row1", value: 42});
+        new LazyMigV1({id: "row1", name: "Alice"});
+        new LazyMigV1({id: "row2", name: "Bob"});
     });
 
-    // Verify basic read
+    // Step 2: Deregister V1, register V2 with a new field and a migrate() function
+    E.deregisterModel(LazyMigV1);
+
+    @E.registerModel
+    class LazyMigV2 extends E.Model<LazyMigV2> {
+        static pk = E.primary(LazyMigV2, "id");
+        static tableName = "LazyMigrateTest";
+        id = E.field(E.string);
+        name = E.field(E.string);
+        role = E.field(E.string, {default: "user"});
+
+        static migrate(record: Record<string, any>) {
+            record.role ??= "user";
+        }
+    }
+
+    // Step 3: Read old rows through V2 — migrate() is called lazily on read
     await E.transact(() => {
-        const m = MigrateTest.pk.get("row1")!;
-        expect(m.value).toBe(42);
+        const r1 = LazyMigV2.pk.get("row1")!;
+        expect(r1.name).toBe("Alice");
+        expect(r1.role).toBe("user");
+
+        const r2 = LazyMigV2.pk.get("row2")!;
+        expect(r2.name).toBe("Bob");
+        expect(r2.role).toBe("user");
     });
 });
 
-test("runMigration upgrades rows", async () => {
+test("runMigration converts rows from old primary key format", async () => {
+    // Step 1: Register V1 with string primary key and write rows
     @E.registerModel
-    class MigTarget extends E.Model<MigTarget> {
-        static pk = E.primary(MigTarget, "id");
-        static tableName = "MigTarget";
+    class PkConvertV1 extends E.Model<PkConvertV1> {
+        static pk = E.primary(PkConvertV1, "id");
+        static tableName = "PkConvertTest";
         id = E.field(E.string);
-        score = E.field(E.number, {default: 0});
     }
 
-    // Create some rows
     await E.transact(() => {
-        new MigTarget({id: "a", score: 1});
-        new MigTarget({id: "b", score: 2});
-        new MigTarget({id: "c", score: 3});
+        new PkConvertV1({id: "1"});
+        new PkConvertV1({id: "2"});
+        new PkConvertV1({id: "3"});
     });
 
-    // Run migration - all rows are already current version, so nothing should upgrade
-    const result = await E.runMigration({tables: ["MigTarget"]});
-    expect(result.secondaries["MigTarget"] ?? 0).toBe(0);
+    // Step 2: Deregister V1, register V2 with a numeric primary key
+    E.deregisterModel(PkConvertV1);
+
+    @E.registerModel
+    class PkConvertV2 extends E.Model<PkConvertV2> {
+        static pk = E.primary(PkConvertV2, "id");
+        static tableName = "PkConvertTest";
+        id = E.field(E.number);
+
+        static migrate(record: Record<string, any>) {
+            if (typeof record.id === "string") record.id = parseInt(record.id, 10);
+        }
+    }
+
+    // Step 3: Run migration — Phase 2 should convert 3 rows to the new key format
+    const result = await E.runMigration({tables: ["PkConvertTest"]});
+    expect(result.primaries["PkConvertTest"]).toBe(3);
+
+    // Step 4: Verify rows are accessible via the new numeric key
+    await E.transact(() => {
+        expect(PkConvertV2.pk.get(1)?.id).toBe(1);
+        expect(PkConvertV2.pk.get(2)?.id).toBe(2);
+        expect(PkConvertV2.pk.get(3)?.id).toBe(3);
+    });
 });
 
 test("runMigration populates new secondary indexes", async () => {
-    // Step 1: Register model without secondary index and create data
+    // Step 1: Register V1 model without secondary index and write data
     @E.registerModel
-    class IndexedModel extends E.Model<IndexedModel> {
-        static pk = E.primary(IndexedModel, "id");
-        static tableName = "IndexedModel";
+    class SecPopV1 extends E.Model<SecPopV1> {
+        static pk = E.primary(SecPopV1, "id");
+        static tableName = "SecondaryPopTest";
         id = E.field(E.string);
         category = E.field(E.string);
         score = E.field(E.number, {default: 0});
     }
 
     await E.transact(() => {
-        new IndexedModel({id: "a", category: "x", score: 10});
-        new IndexedModel({id: "b", category: "y", score: 20});
-        new IndexedModel({id: "c", category: "x", score: 30});
+        new SecPopV1({id: "a", category: "x", score: 10});
+        new SecPopV1({id: "b", category: "y", score: 20});
+        new SecPopV1({id: "c", category: "x", score: 30});
     });
 
-    // Step 2: Add a new secondary index — auto-initialized at next transact()
-    const byCategory = E.index(IndexedModel, "category");
+    // Step 2: Deregister V1, register V2 with a new secondary index
+    E.deregisterModel(SecPopV1);
 
-    // Step 3: Run migration — should upgrade all 3 rows and populate the new secondary
-    const result = await E.runMigration({tables: ["IndexedModel"]});
-    expect(result.secondaries["IndexedModel"]).toBe(3);
+    @E.registerModel
+    class SecPopV2 extends E.Model<SecPopV2> {
+        static pk = E.primary(SecPopV2, "id");
+        static tableName = "SecondaryPopTest";
+        id = E.field(E.string);
+        category = E.field(E.string);
+        score = E.field(E.number, {default: 0});
+        static byCategory = E.index(SecPopV2, "category");
+    }
+
+    // Step 3: Run migration — should populate the new secondary index for all 3 rows
+    const result = await E.runMigration({tables: ["SecondaryPopTest"]});
+    expect(result.secondaries["SecondaryPopTest"]).toBe(3);
 
     // Step 4: Verify the new secondary index works
     await E.transact(() => {
-        const xItems = [...byCategory.find({is: "x"})];
+        const xItems = [...SecPopV2.byCategory.find({is: "x"})];
         expect(xItems.length).toBe(2);
         expect(xItems.map((i: any) => i.id).sort()).toEqual(["a", "c"]);
 
-        const yItems = [...byCategory.find({is: "y"})];
+        const yItems = [...SecPopV2.byCategory.find({is: "y"})];
         expect(yItems.length).toBe(1);
         expect(yItems[0].id).toBe("b");
     });
 });
 
 test("runMigration fixes secondaries affected by migrate()", async () => {
-    // Step 1: Register model with secondary and create data
+    // Step 1: Register V1 with a secondary index and write data
     @E.registerModel
-    class MigModel extends E.Model<MigModel> {
-        static pk = E.primary(MigModel, "id");
-        static tableName = "MigModel";
+    class SecMigV1 extends E.Model<SecMigV1> {
+        static pk = E.primary(SecMigV1, "id");
+        static tableName = "SecMigrateTest";
         id = E.field(E.string);
         tag = E.field(E.string);
-        static byTag = E.index(MigModel, "tag");
+        static byTag = E.index(SecMigV1, "tag");
     }
 
     await E.transact(() => {
-        new MigModel({id: "a", tag: "old"});
-        new MigModel({id: "b", tag: "keep"});
+        new SecMigV1({id: "a", tag: "old"});
+        new SecMigV1({id: "b", tag: "keep"});
     });
 
     // Verify initial state
     await E.transact(() => {
-        expect([...MigModel.byTag.find({is: "old"})].length).toBe(1);
-        expect([...MigModel.byTag.find({is: "keep"})].length).toBe(1);
+        expect([...SecMigV1.byTag.find({is: "old"})].length).toBe(1);
+        expect([...SecMigV1.byTag.find({is: "keep"})].length).toBe(1);
     });
 
-    // Step 2: Add a migrate() that transforms 'tag' values, triggering a new version
-    (MigModel as any).migrate = (record: any) => {
-        if (record.tag === "old") record.tag = "new";
-    };
-    // Re-init versioning so _currentVersion reflects the new migrate hash
-    await MigModel.pk._initVersioning();
+    // Step 2: Deregister V1, register V2 with a migrate() that changes indexed tag values
+    E.deregisterModel(SecMigV1);
 
-    // Step 3: Run migration
-    const result = await E.runMigration({tables: ["MigModel"]});
-    expect(result.secondaries["MigModel"]).toBe(1);
+    @E.registerModel
+    class SecMigV2 extends E.Model<SecMigV2> {
+        static pk = E.primary(SecMigV2, "id");
+        static tableName = "SecMigrateTest";
+        id = E.field(E.string);
+        tag = E.field(E.string);
+        static byTag = E.index(SecMigV2, "tag");
+
+        static migrate(record: Record<string, any>) {
+            if (record.tag === "old") record.tag = "new";
+        }
+    }
+
+    // Step 3: Run migration — should update the secondary index for the changed row
+    const result = await E.runMigration({tables: ["SecMigrateTest"]});
+    expect(result.secondaries["SecMigrateTest"]).toBe(1);
 
     // Step 4: Verify secondary index reflects migrated values
     await E.transact(() => {
-        // "old" entries should be gone, replaced by "new"
-        expect([...MigModel.byTag.find({is: "old"})].length).toBe(0);
-        expect([...MigModel.byTag.find({is: "new"})].length).toBe(1);
-        expect([...MigModel.byTag.find({is: "new"})][0].id).toBe("a");
-        // "keep" unchanged
-        expect([...MigModel.byTag.find({is: "keep"})].length).toBe(1);
+        expect([...SecMigV2.byTag.find({is: "old"})].length).toBe(0);
+        expect([...SecMigV2.byTag.find({is: "new"})].length).toBe(1);
+        expect([...SecMigV2.byTag.find({is: "new"})][0].id).toBe("a");
+        expect([...SecMigV2.byTag.find({is: "keep"})].length).toBe(1);
+    });
+});
+
+test("runMigration removes orphaned secondary index entries", async () => {
+    // Step 1: Register V1 with a secondary index and write data
+    @E.registerModel
+    class OrphanV1 extends E.Model<OrphanV1> {
+        static pk = E.primary(OrphanV1, "id");
+        static tableName = "OrphanedSecTest";
+        id = E.field(E.string);
+        tag = E.field(E.string);
+        static byTag = E.index(OrphanV1, "tag");
+    }
+
+    await E.transact(() => {
+        new OrphanV1({id: "a", tag: "x"});
+        new OrphanV1({id: "b", tag: "y"});
+    });
+
+    // Step 2: Deregister V1, register V2 without the secondary index
+    E.deregisterModel(OrphanV1);
+
+    @E.registerModel
+    class OrphanV2 extends E.Model<OrphanV2> {
+        static pk = E.primary(OrphanV2, "id");
+        static tableName = "OrphanedSecTest";
+        id = E.field(E.string);
+        tag = E.field(E.string);
+    }
+
+    // Step 3: Run migration — Phase 3 should delete the 2 orphaned secondary index entries
+    const result = await E.runMigration({tables: ["OrphanedSecTest"]});
+    expect(result.orphaned).toBe(2);
+
+    // Step 4: Verify rows are still accessible via primary key
+    await E.transact(() => {
+        expect(OrphanV2.pk.get("a")?.tag).toBe("x");
+        expect(OrphanV2.pk.get("b")?.tag).toBe("y");
     });
 });
 

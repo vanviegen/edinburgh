@@ -10,6 +10,7 @@ export function scheduleInit() { initNeeded = true; }
 export {
     Model,
     registerModel,
+    deregisterModel,
     field,
 } from "./models.js";
 

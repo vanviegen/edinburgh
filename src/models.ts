@@ -118,6 +118,18 @@ export function registerModel<T extends typeof Model<unknown>>(MyModel: T): T {
     return MockModel;   
 }
 
+/**
+ * Remove a model from the registry. Useful for testing migration scenarios where the same
+ * table name needs to be re-registered with changed field or index definitions.
+ * 
+ * @param model - The model class to deregister (the value returned by @registerModel).
+ */
+export function deregisterModel(model: typeof Model<unknown>): void {
+    const tableName = model.tableName;
+    if (!(tableName in modelRegistry)) throw new DatabaseError(`Model with table name '${tableName}' is not registered`, 'INIT_ERROR');
+    delete modelRegistry[tableName];
+}
+
 export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     const AnyOrgModel = OrgModel as any;
     if (AnyOrgModel._isMock) return OrgModel;
