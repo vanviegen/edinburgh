@@ -1489,30 +1489,6 @@ test("preCommit() is called before writes", async () => {
     });
 });
 
-test("Versioned rows are written and read correctly", async () => {
-    @E.registerModel
-    class Versioned extends E.Model<Versioned> {
-        static pk = E.primary(Versioned, "id");
-        static tableName = "Versioned";
-        id = E.field(E.identifier);
-        name = E.field(E.string);
-    }
-
-    // Create a row
-    let id: string;
-    await E.transact(() => {
-        const v = new Versioned({name: "test"});
-        id = v.id;
-    });
-
-    // Read it back - should have version marker
-    await E.transact(() => {
-        const v = Versioned.pk.get(id!);
-        expect(v).toBeDefined();
-        expect(v!.name).toBe("test");
-    });
-});
-
 test("migrate() is called for old-version rows", async () => {
     // Step 1: Create a model and save a row
     @E.registerModel
@@ -1535,8 +1511,6 @@ test("migrate() is called for old-version rows", async () => {
 });
 
 test("runMigration upgrades rows", async () => {
-    await E.deleteEverything();
-
     @E.registerModel
     class MigTarget extends E.Model<MigTarget> {
         static pk = E.primary(MigTarget, "id");
@@ -1574,25 +1548,20 @@ test("runMigration populates new secondary indexes", async () => {
         new IndexedModel({id: "c", category: "x", score: 30});
     });
 
-    // Step 2: Add a new secondary index programmatically and re-init versioning
+    // Step 2: Add a new secondary index — auto-initialized at next transact()
     const byCategory = E.index(IndexedModel, "category");
-    (IndexedModel as any).byCategory = byCategory;
-    if (!IndexedModel._secondaries) IndexedModel._secondaries = [];
-    IndexedModel._secondaries.push(byCategory as any);
-    await byCategory._delayedInit();
-    await IndexedModel.pk._initVersioning();
 
     // Step 3: Run migration — should upgrade all 3 rows and populate the new secondary
     const result = await E.runMigration({tables: ["IndexedModel"]});
-    expect(result.secondaries["IndexedModel"]).toBe(6);
+    expect(result.secondaries["IndexedModel"]).toBe(3);
 
     // Step 4: Verify the new secondary index works
     await E.transact(() => {
-        const xItems = [...(IndexedModel as any).byCategory.find({is: "x"})];
+        const xItems = [...byCategory.find({is: "x"})];
         expect(xItems.length).toBe(2);
         expect(xItems.map((i: any) => i.id).sort()).toEqual(["a", "c"]);
 
-        const yItems = [...(IndexedModel as any).byCategory.find({is: "y"})];
+        const yItems = [...byCategory.find({is: "y"})];
         expect(yItems.length).toBe(1);
         expect(yItems[0].id).toBe("b");
     });

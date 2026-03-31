@@ -2,6 +2,7 @@ import * as lowlevel from "olmdb/lowlevel";
 import { DatabaseError } from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
 import { FieldConfig, getMockModel, Model, Transaction, currentTxn } from "./models.js";
+import { scheduleInit } from "./edinburgh.js";
 import { assert, logLevel, dbGet, dbPut, dbDel, hashBytes, toBuffer } from "./utils.js";
 import { deserializeType, serializeType, TypeWrapper } from "./types.js";
 
@@ -133,6 +134,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     }
 
     async _delayedInit() {
+        if (this._indexId != null) return; // Already initialized
         for(const fieldName of this._fieldNames) {
             assert(typeof fieldName === 'string', 'Field names must be strings');
             this._fieldTypes.set(fieldName, this._MyModel.fields[fieldName].type);
@@ -417,6 +419,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     }
 
     async _delayedInit() {
+        if (this._indexId != null) return; // Already initialized
         await super._delayedInit();
         const MyModel = this._MyModel;
         this._nonKeyFields = Object.keys(MyModel.fields).filter(fieldName => !this._fieldNames.includes(fieldName as any)) as any;
@@ -765,6 +768,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
     constructor(MyModel: M, fieldNames: F) {
         super(MyModel, fieldNames);
         (this._MyModel._secondaries ||= []).push(this);
+        scheduleInit();
     }
 
     /**
@@ -860,6 +864,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     constructor(MyModel: M, fieldNames: F) {
         super(MyModel, fieldNames);
         (this._MyModel._secondaries ||= []).push(this);
+        scheduleInit();
     }
 
     _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, _valueBuffer: ArrayBuffer): InstanceType<M> {

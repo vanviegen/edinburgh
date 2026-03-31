@@ -1,6 +1,9 @@
 import * as lowlevel from "olmdb/lowlevel";
 import { init as olmdbInit, DatabaseError } from "olmdb/lowlevel";
-import { modelsNeedingDelayedInit, modelRegistry, txnStorage, currentTxn } from "./models.js";
+import { modelRegistry, txnStorage, currentTxn } from "./models.js";
+
+let initNeeded = false;
+export function scheduleInit() { initNeeded = true; }
 
 
 // Re-export public API from models
@@ -114,7 +117,7 @@ const STALE_INSTANCE_DESCRIPTOR = {
 * ```
 */
 export async function transact<T>(fn: () => T): Promise<T> {
-    while (modelsNeedingDelayedInit.size) {
+    while (initNeeded || pendingInit) {
         // Make sure only one async task is doing the inits, the rest should wait for it
         if (pendingInit) {
             await pendingInit;
@@ -123,9 +126,9 @@ export async function transact<T>(fn: () => T): Promise<T> {
                 if (!olmdbReady) olmdbInit('.edinburgh');
                 olmdbReady = true;
 
-                for (const model of modelsNeedingDelayedInit) {
+                initNeeded = false;
+                for (const model of Object.values(modelRegistry)) {
                     await model._delayedInit();
-                    modelsNeedingDelayedInit.delete(model);
                 }
                 pendingInit = undefined;
             })();
@@ -226,11 +229,9 @@ export async function deleteEverything(): Promise<void> {
             lowlevel.closeIterator(iteratorId);
         }
     });
-    // Re-assign index IDs and version info since metadata was deleted
+    // Re-init indexes since metadata was deleted
     for (const model of Object.values(modelRegistry)) {
-        if (modelsNeedingDelayedInit.has(model)) continue; // Will be done in the pendingInit loop in transact()
-        await model._primary._retrieveIndexId();
-        await model._primary._initVersioning();
-        for (const sec of model._secondaries || []) await sec._retrieveIndexId();
+        if (!model.fields) continue;
+        await model._delayedInit(true);
     }
 }

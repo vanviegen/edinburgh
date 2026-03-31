@@ -1,6 +1,7 @@
 import { DatabaseError } from "olmdb/lowlevel";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { TypeWrapper, identifier } from "./types.js";
+import { scheduleInit } from "./edinburgh.js";
 
 export const txnStorage = new AsyncLocalStorage<Transaction>();
 
@@ -71,7 +72,6 @@ export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> 
 
 // Model registration and initialization
 export const modelRegistry: Record<string, typeof Model> = {};
-export const modelsNeedingDelayedInit: Set<typeof Model> = new Set();
 
 function isObjectEmpty(obj: object) {
     for (let _ of Object.keys(obj)) {
@@ -142,7 +142,7 @@ export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
     (MockModel as any)._isMock = true;
     (MockModel as any)._original = OrgModel;
     AnyOrgModel._mock = MockModel;
-    modelsNeedingDelayedInit.add(MockModel);
+    scheduleInit();
     return MockModel;
 }
 
@@ -306,62 +306,71 @@ export abstract class Model<SUB> {
      */
     preCommit?(): void;
 
-    static async _delayedInit(): Promise<void> {
+    static async _delayedInit(cleared?: boolean): Promise<void> {
         const MockModel = getMockModel(this);
-        // Create an instance (the only one to ever exist) of the actual class,
-        // in order to gather field config data.
-        const OrgModel = (MockModel as any)._original || this;
-        const instance = new (OrgModel as any)(INIT_INSTANCE_SYMBOL);
 
-        // If no primary key exists, create one using 'id' field
-        if (!MockModel._primary) {
-            // If no `id` field exists, add it automatically
-            if (!instance.id) {
-                instance.id = { type: identifier }; 
-            }
-            // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
-            new PrimaryIndex(MockModel, ['id']);
+        if (cleared) {
+            MockModel._primary._indexId = undefined;
+            MockModel._primary._versions.clear();
+            for (const sec of MockModel._secondaries || []) sec._indexId = undefined;
         }
 
-        MockModel.fields = {};
-        for (const key in instance) {
-            const value = instance[key] as FieldConfig<unknown>;
-            // Check if this property contains field metadata
-            if (value && value.type instanceof TypeWrapper) {
-                // Set the configuration on the constructor's `fields` property
-                MockModel.fields[key] = value;
+        if (!MockModel.fields) {
+            // First-time init: gather field configs from a temporary instance of the original class.
+            const OrgModel = (MockModel as any)._original || this;
+            const instance = new (OrgModel as any)(INIT_INSTANCE_SYMBOL);
 
-                // Set default value on the prototype
-                const defObj = value.default===undefined ? value.type : value;
-                const def = defObj.default;
-                if (typeof def === 'function') {
-                    // The default is a function. We'll define a getter on the property in the model prototype,
-                    // and once it is read, we'll run the function and set the value as a plain old property
-                    // on the instance object.
-                    Object.defineProperty(MockModel.prototype, key, {    
-                        get() {
-                            // This will call set(), which will define the property on the instance.
-                            return (this[key] = def.call(defObj, this));
-                        },
-                        set(val: any) {
-                            Object.defineProperty(this, key, {
-                                value: val,
-                                configurable: true,
-                                writable: true,
-                                enumerable: true,
-                            })
-                        },
-                        configurable: true,    
-                    });
-                } else if (def !== undefined) {
-                    (MockModel.prototype as any)[key] = def;
+            // If no primary key exists, create one using 'id' field
+            if (!MockModel._primary) {
+                if (!instance.id) {
+                    instance.id = { type: identifier }; 
+                }
+                // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
+                new PrimaryIndex(MockModel, ['id']);
+            }
+
+            MockModel.fields = {};
+            for (const key in instance) {
+                const value = instance[key] as FieldConfig<unknown>;
+                // Check if this property contains field metadata
+                if (value && value.type instanceof TypeWrapper) {
+                    // Set the configuration on the constructor's `fields` property
+                    MockModel.fields[key] = value;
+
+                    // Set default value on the prototype
+                    const defObj = value.default===undefined ? value.type : value;
+                    const def = defObj.default;
+                    if (typeof def === 'function') {
+                        // The default is a function. We'll define a getter on the property in the model prototype,
+                        // and once it is read, we'll run the function and set the value as a plain old property
+                        // on the instance object.
+                        Object.defineProperty(MockModel.prototype, key, {    
+                            get() {
+                                // This will call set(), which will define the property on the instance.
+                                return (this[key] = def.call(defObj, this));
+                            },
+                            set(val: any) {
+                                Object.defineProperty(this, key, {
+                                    value: val,
+                                    configurable: true,
+                                    writable: true,
+                                    enumerable: true,
+                                })
+                            },
+                            configurable: true,    
+                        });
+                    } else if (def !== undefined) {
+                        (MockModel.prototype as any)[key] = def;
+                    }
                 }
             }
+
+            if (logLevel >= 1) {
+                console.log(`Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
+            }
         }
 
-        if (logLevel >= 1) {
-            console.log(`Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
-        }
+        // Always run index inits (idempotent — they skip if already initialized)
         await MockModel._primary._delayedInit();
         for (const sec of MockModel._secondaries || []) await sec._delayedInit();
         await MockModel._primary._initVersioning();

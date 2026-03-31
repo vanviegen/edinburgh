@@ -95,6 +95,9 @@ async function forEachRow(
  * convert old primary indices, and clean up orphaned secondary indices.
  */
 export async function runMigration(options: MigrationOptions = {}): Promise<MigrationResult> {
+    // Ensure any pending model/index inits are completed before building index maps
+    await transact(() => {});
+
     const convertOldPrimaries = options.convertOldPrimaries ?? true;
     const deleteOrphanedIndexes = options.deleteOrphanedIndexes ?? true;
     const upgradeVersions = options.upgradeVersions ?? true;
