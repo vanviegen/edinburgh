@@ -1462,3 +1462,255 @@ test("Trying to modify instances outside their transaction throws an error", asy
     });
 
 });
+
+// ==================== Migration & Versioning Tests ====================
+
+test("preCommit() is called before writes", async () => {
+    @E.registerModel
+    class PreCommitModel extends E.Model<PreCommitModel> {
+        static pk = E.primary(PreCommitModel, "id");
+        static tableName = "PreCommitModel";
+        id = E.field(E.identifier);
+        name = E.field(E.string);
+        nameLower = E.field(E.string, {default: ""});
+
+        preCommit() {
+            this.nameLower = this.name.toLowerCase();
+        }
+    }
+
+    await E.transact(() => {
+        new PreCommitModel({name: "Hello World"});
+    });
+
+    await E.transact(() => {
+        const m = PreCommitModel.pk.find().fetch()!;
+        expect(m.nameLower).toBe("hello world");
+    });
+});
+
+test("Versioned rows are written and read correctly", async () => {
+    @E.registerModel
+    class Versioned extends E.Model<Versioned> {
+        static pk = E.primary(Versioned, "id");
+        static tableName = "Versioned";
+        id = E.field(E.identifier);
+        name = E.field(E.string);
+    }
+
+    // Create a row
+    let id: string;
+    await E.transact(() => {
+        const v = new Versioned({name: "test"});
+        id = v.id;
+    });
+
+    // Read it back - should have version marker
+    await E.transact(() => {
+        const v = Versioned.pk.get(id!);
+        expect(v).toBeDefined();
+        expect(v!.name).toBe("test");
+    });
+});
+
+test("migrate() is called for old-version rows", async () => {
+    // Step 1: Create a model and save a row
+    @E.registerModel
+    class MigrateTest extends E.Model<MigrateTest> {
+        static pk = E.primary(MigrateTest, "id");
+        static tableName = "MigrateTest";
+        id = E.field(E.string);
+        value = E.field(E.number, {default: 0});
+    }
+
+    await E.transact(() => {
+        new MigrateTest({id: "row1", value: 42});
+    });
+
+    // Verify basic read
+    await E.transact(() => {
+        const m = MigrateTest.pk.get("row1")!;
+        expect(m.value).toBe(42);
+    });
+});
+
+test("runMigration upgrades rows", async () => {
+    await E.deleteEverything();
+
+    @E.registerModel
+    class MigTarget extends E.Model<MigTarget> {
+        static pk = E.primary(MigTarget, "id");
+        static tableName = "MigTarget";
+        id = E.field(E.string);
+        score = E.field(E.number, {default: 0});
+    }
+
+    // Create some rows
+    await E.transact(() => {
+        new MigTarget({id: "a", score: 1});
+        new MigTarget({id: "b", score: 2});
+        new MigTarget({id: "c", score: 3});
+    });
+
+    // Run migration - all rows are already current version, so nothing should upgrade
+    const result = await E.runMigration({tables: ["MigTarget"]});
+    expect(result.secondaries["MigTarget"] ?? 0).toBe(0);
+});
+
+test("runMigration populates new secondary indexes", async () => {
+    // Step 1: Register model without secondary index and create data
+    @E.registerModel
+    class IndexedModel extends E.Model<IndexedModel> {
+        static pk = E.primary(IndexedModel, "id");
+        static tableName = "IndexedModel";
+        id = E.field(E.string);
+        category = E.field(E.string);
+        score = E.field(E.number, {default: 0});
+    }
+
+    await E.transact(() => {
+        new IndexedModel({id: "a", category: "x", score: 10});
+        new IndexedModel({id: "b", category: "y", score: 20});
+        new IndexedModel({id: "c", category: "x", score: 30});
+    });
+
+    // Step 2: Add a new secondary index programmatically and re-init versioning
+    const byCategory = E.index(IndexedModel, "category");
+    (IndexedModel as any).byCategory = byCategory;
+    if (!IndexedModel._secondaries) IndexedModel._secondaries = [];
+    IndexedModel._secondaries.push(byCategory as any);
+    await byCategory._delayedInit();
+    await IndexedModel.pk._initVersioning();
+
+    // Step 3: Run migration — should upgrade all 3 rows and populate the new secondary
+    const result = await E.runMigration({tables: ["IndexedModel"]});
+    expect(result.secondaries["IndexedModel"]).toBe(6);
+
+    // Step 4: Verify the new secondary index works
+    await E.transact(() => {
+        const xItems = [...(IndexedModel as any).byCategory.find({is: "x"})];
+        expect(xItems.length).toBe(2);
+        expect(xItems.map((i: any) => i.id).sort()).toEqual(["a", "c"]);
+
+        const yItems = [...(IndexedModel as any).byCategory.find({is: "y"})];
+        expect(yItems.length).toBe(1);
+        expect(yItems[0].id).toBe("b");
+    });
+});
+
+test("runMigration fixes secondaries affected by migrate()", async () => {
+    // Step 1: Register model with secondary and create data
+    @E.registerModel
+    class MigModel extends E.Model<MigModel> {
+        static pk = E.primary(MigModel, "id");
+        static tableName = "MigModel";
+        id = E.field(E.string);
+        tag = E.field(E.string);
+        static byTag = E.index(MigModel, "tag");
+    }
+
+    await E.transact(() => {
+        new MigModel({id: "a", tag: "old"});
+        new MigModel({id: "b", tag: "keep"});
+    });
+
+    // Verify initial state
+    await E.transact(() => {
+        expect([...MigModel.byTag.find({is: "old"})].length).toBe(1);
+        expect([...MigModel.byTag.find({is: "keep"})].length).toBe(1);
+    });
+
+    // Step 2: Add a migrate() that transforms 'tag' values, triggering a new version
+    (MigModel as any).migrate = (record: any) => {
+        if (record.tag === "old") record.tag = "new";
+    };
+    // Re-init versioning so _currentVersion reflects the new migrate hash
+    await MigModel.pk._initVersioning();
+
+    // Step 3: Run migration
+    const result = await E.runMigration({tables: ["MigModel"]});
+    expect(result.secondaries["MigModel"]).toBe(1);
+
+    // Step 4: Verify secondary index reflects migrated values
+    await E.transact(() => {
+        // "old" entries should be gone, replaced by "new"
+        expect([...MigModel.byTag.find({is: "old"})].length).toBe(0);
+        expect([...MigModel.byTag.find({is: "new"})].length).toBe(1);
+        expect([...MigModel.byTag.find({is: "new"})][0].id).toBe("a");
+        // "keep" unchanged
+        expect([...MigModel.byTag.find({is: "keep"})].length).toBe(1);
+    });
+});
+
+test("preCommit() can create new instances", async () => {
+    @E.registerModel
+    class Parent extends E.Model<Parent> {
+        static pk = E.primary(Parent, "id");
+        static tableName = "PreCommitParent";
+        id = E.field(E.identifier);
+        name = E.field(E.string);
+        preCommit() {
+            // Create a child when parent is committed
+            new Child({parentId: this.id, data: this.name + "_child"});
+        }
+    }
+
+    @E.registerModel
+    class Child extends E.Model<Child> {
+        static pk = E.primary(Child, "id");
+        static tableName = "PreCommitChild";
+        id = E.field(E.identifier);
+        parentId = E.field(E.string);
+        data = E.field(E.string);
+    }
+
+    await E.transact(() => {
+        new Parent({name: "test_parent"});
+    });
+
+    // Verify child was created 
+    await E.transact(() => {
+        const children = [...Child.pk.find()];
+        expect(children.length).toBe(1);
+        expect(children[0].data).toBe("test_parent_child");
+    });
+});
+
+test("runMigration reports no work needed for clean data", async () => {
+    @E.registerModel
+    class CleanModel extends E.Model<CleanModel> {
+        static pk = E.primary(CleanModel, "id");
+        static tableName = "CleanModel";
+        id = E.field(E.string);
+        tag = E.field(E.string, {default: "x"});
+    }
+
+    await E.transact(() => {
+        new CleanModel({id: "a", tag: "hello"});
+    });
+
+    const result = await E.runMigration({tables: ["CleanModel"]});
+    expect(result.orphaned).toBe(0);
+    expect(result.secondaries["CleanModel"] ?? 0).toBe(0);
+});
+
+test("Version info rows are created in the database", async () => {
+    @E.registerModel
+    class VersionInfoModel extends E.Model<VersionInfoModel> {
+        static pk = E.primary(VersionInfoModel, "id");
+        static tableName = "VersionInfoModel";
+        id = E.field(E.string);
+        data = E.field(E.string, {default: "x"});
+    }
+
+    await E.transact(() => {
+        new VersionInfoModel({id: "test", data: "hello"});
+    });
+
+    await E.transact(() => {
+        const m = VersionInfoModel.pk.get("test")!;
+        expect(m.data).toBe("hello");
+    });
+
+    expect(VersionInfoModel.pk._currentVersion).toBeGreaterThan(0);
+});

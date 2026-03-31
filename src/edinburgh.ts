@@ -42,10 +42,13 @@ export {
     setLogLevel
 } from "./utils.js";
 
-export { BaseIndex, UniqueIndex, PrimaryIndex } from './indexes.js';
+export { BaseIndex, UniqueIndex, PrimaryIndex, SecondaryIndex } from './indexes.js';
 
+export { modelRegistry } from './models.js';
 export type { Transaction } from './models.js';
 export { DatabaseError } from "olmdb/lowlevel";
+export { runMigration } from './migrate.js';
+export type { MigrationOptions, MigrationResult } from './migrate.js';
 
 let olmdbReady = false;
 
@@ -140,6 +143,13 @@ export async function transact<T>(fn: () => T): Promise<T> {
                 await txnStorage.run(txn, async function() {
                     result = await fn();
 
+                    // Call preCommit() on all instances before writing.
+                    // Note: Set iteration visits newly added items, so preCommit() creating
+                    // new instances is handled correctly.
+                    for (const instance of txn.instances) {
+                        instance.preCommit?.();
+                    }
+
                     // Save all modified instances before committing
                     // This needs to happen inside txnStorage.run, because resolving default values
                     // for identifiers requires database access.
@@ -216,10 +226,11 @@ export async function deleteEverything(): Promise<void> {
             lowlevel.closeIterator(iteratorId);
         }
     });
-    // Re-assign index IDs since metadata was deleted
+    // Re-assign index IDs and version info since metadata was deleted
     for (const model of Object.values(modelRegistry)) {
         if (modelsNeedingDelayedInit.has(model)) continue; // Will be done in the pendingInit loop in transact()
         await model._primary._retrieveIndexId();
+        await model._primary._initVersioning();
         for (const sec of model._secondaries || []) await sec._retrieveIndexId();
     }
 }

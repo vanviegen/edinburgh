@@ -12,8 +12,26 @@ type IndexArgTypes<M extends typeof Model<any>, F extends readonly (keyof Instan
 
 const MAX_INDEX_ID_PREFIX = -1;
 const INDEX_ID_PREFIX = -2;
+const VERSION_INFO_PREFIX = -3;
 
 const MAX_INDEX_ID_BUFFER = new DataPack().write(MAX_INDEX_ID_PREFIX).toUint8Array();
+
+/** Cached information about a specific version of a primary index's value format. */
+interface VersionInfo {
+    migrateHash: number;
+    /** Non-key field names → TypeWrappers for deserialization of this version's data. */
+    nonKeyFields: Map<string, TypeWrapper<any>>;
+    /** Set of serialized secondary index signatures that existed in this version. */
+    secondaryKeys: Set<string>;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
+}
 
 /**
  * Iterator for range queries on indexes.
@@ -122,6 +140,10 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         this._fieldCount = this._fieldNames.length;
         await this._retrieveIndexId();
 
+        // Human-readable signature for version tracking, e.g. "secondary category:string"
+        this._signature = this._getTypeName() + ' ' +
+            Array.from(this._fieldTypes.entries()).map(([n, t]) => n + ':' + t).join(' ');
+
         for(const fieldName of this._fieldTypes.keys()) {
             this._resetIndexFieldDescriptors[fieldName] = {
                 writable: true,
@@ -132,6 +154,9 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     }
 
     _indexId?: number;
+
+    /** Human-readable signature for version tracking, e.g. "secondary category:string" */
+    _signature?: string;
 
     /**
      * Serialize array of key values to a (index-id prefixed) Bytes instance that can be used as a key.
@@ -194,6 +219,15 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         for(let name of this._fieldNames) {
             indexNameBytes.write(name);
             serializeType(this._MyModel.fields[name].type, indexNameBytes);
+        }
+        // For non-primary indexes, include primary key field info to avoid misinterpreting
+        // values when the primary key schema changes.
+        if (this._MyModel._primary !== (this as any)) {
+            indexNameBytes.write(undefined); // separator
+            for (const name of this._MyModel._primary._fieldNames) {
+                indexNameBytes.write(name);
+                serializeType(this._MyModel.fields[name].type, indexNameBytes);
+            }
         }
         const indexNameBuf = indexNameBytes.toUint8Array();
 
@@ -367,6 +401,13 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     _resetDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
     _freezePrimaryKeyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
 
+    /** Current version number for this primary index's value format. */
+    _currentVersion!: number;
+    /** Hash of the current migrate() function source, or 0 if none. */
+    _currentMigrateHash!: number;
+    /** Cached version info for old versions (loaded on demand). */
+    _versions: Map<number, VersionInfo> = new Map();
+
     constructor(MyModel: M, fieldNames: F) {
         super(MyModel, fieldNames);
         if (MyModel._primary) {
@@ -404,6 +445,97 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
                 writable: false,
                 enumerable: true
             };
+        }
+
+    }
+
+    /** Serialize the current version fingerprint as a DataPack object. */
+    _serializeVersionValue(): Uint8Array {
+        const fields: [string, Uint8Array][] = [];
+        for (const fieldName of this._nonKeyFields) {
+            const tp = new DataPack();
+            serializeType(this._MyModel.fields[fieldName].type, tp);
+            fields.push([fieldName, tp.toUint8Array()]);
+        }
+        return new DataPack().write({
+            migrateHash: this._currentMigrateHash,
+            fields,
+            secondaryKeys: new Set((this._MyModel._secondaries || []).map(sec => sec._signature!)),
+        }).toUint8Array();
+    }
+
+    /** Look up or create the current version number for this primary index. */
+    async _initVersioning(): Promise<void> {
+        // Compute migrate hash from function source
+        const migrateFn = (this._MyModel as any)._original?.migrate ?? (this._MyModel as any).migrate;
+        this._currentMigrateHash = migrateFn ? hashBytes(new TextEncoder().encode(migrateFn.toString().replace(/\s\s+/g, ' ').trim())) : 0;
+
+        const currentValueBytes = this._serializeVersionValue();
+
+        // Scan last 20 version info rows for this primary index
+        const scanStart = new DataPack().write(VERSION_INFO_PREFIX).write(this._indexId!);
+        const scanEnd = scanStart.clone(true).increment();
+
+        while (true) {
+            const txnId = lowlevel.startTransaction();
+            try {
+                const iteratorId = lowlevel.createIterator(
+                    txnId,
+                    scanEnd ? toBuffer(scanEnd.toUint8Array()) : undefined,
+                    toBuffer(scanStart.toUint8Array()),
+                    true // reverse - scan newest versions first
+                );
+
+                let count = 0;
+                let maxVersion = 0;
+                let found = false;
+
+                try {
+                    while (count < 20) {
+                        const raw = lowlevel.readIterator(iteratorId);
+                        if (!raw) break;
+                        count++;
+
+                        const keyPack = new DataPack(new Uint8Array(raw.key));
+                        keyPack.readNumber(); // skip VERSION_INFO_PREFIX
+                        keyPack.readNumber(); // skip indexId
+                        const versionNum = keyPack.readNumber();
+                        maxVersion = Math.max(maxVersion, versionNum);
+
+                        const valueBytes = new Uint8Array(raw.value);
+                        if (bytesEqual(valueBytes, currentValueBytes)) {
+                            this._currentVersion = versionNum;
+                            found = true;
+                            break;
+                        }
+                    }
+                } finally {
+                    lowlevel.closeIterator(iteratorId);
+                }
+
+                if (found) {
+                    lowlevel.abortTransaction(txnId);
+                    return;
+                }
+
+                // No match found - create new version
+                this._currentVersion = maxVersion + 1;
+                const versionKey = new DataPack()
+                    .write(VERSION_INFO_PREFIX)
+                    .write(this._indexId!)
+                    .write(this._currentVersion)
+                    .toUint8Array();
+                dbPut(txnId, versionKey, currentValueBytes);
+                if (logLevel >= 1) console.log(`Create version ${this._currentVersion} for ${this}`);
+
+                const commitResult = lowlevel.commitTransaction(txnId);
+                const commitSeq = typeof commitResult === 'number' ? commitResult : await commitResult;
+                if (commitSeq > 0) return;
+                // Race - retry
+            } catch (e) {
+                try { lowlevel.abortTransaction(txnId); } catch {}
+                throw e;
+            }
         }
     }
 
@@ -521,12 +653,64 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     }
 
     _setNonKeyValues(model: InstanceType<M>, valueArray: Uint8Array) {
-        const valuePack = new DataPack(valueArray);
         const fieldConfigs = this._MyModel.fields;
+        const valuePack = new DataPack(valueArray);
+        const version = valuePack.readNumber();
 
+        if (version === this._currentVersion) {
+            for (const fieldName of this._nonKeyFields) {
+                model._setLoadedField(fieldName, fieldConfigs[fieldName].type.deserialize(valuePack));
+            }
+        } else {
+            this._migrateFromVersion(model, version, valuePack);
+        }
+    }
+
+    /** Load a version's info from DB, caching the result. */
+    _loadVersionInfo(txnId: number, version: number): VersionInfo {
+        let info = this._versions.get(version);
+        if (info) return info;
+
+        const key = new DataPack()
+            .write(VERSION_INFO_PREFIX)
+            .write(this._indexId!)
+            .write(version)
+            .toUint8Array();
+        const raw = dbGet(txnId, key);
+        if (!raw) throw new DatabaseError(`Version ${version} info not found for index ${this}`, 'CONSISTENCY_ERROR');
+
+        const obj = new DataPack(raw).read() as any;
+        if (!obj || typeof obj.migrateHash !== 'number' || !Array.isArray(obj.fields) || !(obj.secondaryKeys instanceof Set))
+            throw new DatabaseError(`Version ${version} info is corrupted for index ${this}`, 'CONSISTENCY_ERROR');
+
+        const nonKeyFields = new Map<string, TypeWrapper<any>>();
+        for (const [name, typeBytes] of obj.fields) {
+            nonKeyFields.set(name, deserializeType(new DataPack(typeBytes), 0));
+        }
+
+        info = { migrateHash: obj.migrateHash, nonKeyFields, secondaryKeys: obj.secondaryKeys as Set<string> };
+        this._versions.set(version, info);
+        return info;
+    }
+
+    /** Deserialize and migrate a row from an old version. */
+    _migrateFromVersion(model: InstanceType<M>, version: number, valuePack: DataPack) {
+        const versionInfo = this._loadVersionInfo(model._txn.id, version);
+
+        // Deserialize using old field types into a plain record
+        const record: Record<string, any> = {};
+        for (const [name] of this._fieldTypes.entries()) record[name] = (model as any)[name]; // pk fields
+        for (const [name, type] of versionInfo.nonKeyFields.entries()) {
+            record[name] = type.deserialize(valuePack);
+        }
+
+        // Run migrate() if it exists
+        const migrateFn = (this._MyModel as any).migrate;
+        if (migrateFn) migrateFn(record);
+
+        // Set non-key fields on model from the (possibly migrated) record
         for (const fieldName of this._nonKeyFields) {
-            const value = fieldConfigs[fieldName].type.deserialize(valuePack);
-            model._setLoadedField(fieldName, value);
+            model._setLoadedField(fieldName, record[fieldName]);
         }
     }
 
@@ -550,6 +734,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
 
     _write(txn: Transaction, primaryKey: Uint8Array, data: Record<string, any>) {
         let valueBytes = new DataPack();
+        valueBytes.write(this._currentVersion);
         const fieldConfigs = this._MyModel.fields as any;
         for (const fieldName of this._nonKeyFields) {
             const fieldConfig = fieldConfigs[fieldName] as FieldConfig<unknown>;

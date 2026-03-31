@@ -246,6 +246,8 @@ class ArrayType<T> extends TypeWrapper<T[]> {
         return true;
     }
 
+    toString() { return `array<${this.inner}>`; }
+
     getLinkedModel() {
         return this.inner.getLinkedModel();
     }
@@ -332,6 +334,8 @@ export class SetType<T> extends TypeWrapper<Set<T>> {
         return true;
     }
 
+    toString() { return `set<${this.inner}>`; }
+
     getLinkedModel() {
         return this.inner.getLinkedModel();
     }
@@ -414,6 +418,8 @@ class OrType<const T> extends TypeWrapper<T> {
         return ca === cb && this.choices[ca].equals(a, b);
     }
 
+    toString() { return `or<${this.choices.join('|')}>`; }
+
     getLinkedModel() {
         let model;
         for (const choice of this.choices) {
@@ -470,6 +476,8 @@ class LiteralType<const T> extends TypeWrapper<T> {
         return new LiteralType(value);
     }
     
+    toString() { return `literal<${JSON.stringify(this.value)}>`; }
+
     default(): T {
         return this.value;
     }
@@ -554,6 +562,8 @@ export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<Insta
         if (!targetModel) throw new DatabaseError(`Could not deserialize undefined model ${tableName}`, 'DESERIALIZATION_ERROR');
         return new LinkType(targetModel);
     }
+
+    toString() { return `link<${this.TargetModel.tableName}>`; }
 
     getLinkedModel() {
         return this.TargetModel;

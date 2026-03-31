@@ -164,19 +164,49 @@ export interface Model<SUB> {
  * change tracking, and relationship management. All model classes should extend
  * this base class and be decorated with `@registerModel`.
  *
+ * ### Schema Evolution
+ *
+ * Edinburgh tracks the schema version of each model automatically. When you add, remove, or
+ * change the types of fields, or add/remove indexes, Edinburgh detects the new schema version.
+ *
+ * **Lazy migration:** Changes to non-key field values are migrated lazily — when a row with an
+ * old schema version is read from disk, it is deserialized using the old schema and optionally
+ * transformed by the static `migrate()` function. This happens transparently on every read
+ * and requires no downtime or batch processing.
+ *
+ * **Batch migration (via `migrate-edinburgh` or `runMigration()`):** Certain schema changes
+ * require an explicit migration run:
+ * - Adding or removing secondary/unique indexes
+ * - Changing the fields or types of an existing index
+ * - A `migrate()` function that changes values used in secondary index fields
+ *
+ * The batch migration tool populates new indexes, deletes orphaned ones, and updates index
+ * entries whose values were changed by `migrate()`. It does *not* rewrite primary data rows
+ * (lazy migration handles that).
+ *
+ * ### Lifecycle Hooks
+ *
+ * - **`static migrate(record)`** — Called when deserializing rows written with an older schema
+ *   version. Receives a plain record object; mutate it in-place to match the current schema.
+ *   See {@link Model.migrate}.
+ *
+ * - **`preCommit()`** — Called on each modified instance right before the transaction commits.
+ *   Useful for computing derived fields, enforcing cross-field invariants, or creating related
+ *   instances. See {@link Model.preCommit}.
+ *
  * @template SUB - The concrete model subclass (for proper typing).
  * 
  * @example
  * ```typescript
  * ⁣@E.registerModel
  * class User extends E.Model<User> {
- *   static pk = E.index(User, ["id"], "primary");
+ *   static pk = E.primary(User, "id");
  *   
  *   id = E.field(E.identifier);
  *   name = E.field(E.string);
  *   email = E.field(E.string);
  *   
- *   static byEmail = E.index(User, "email", "unique");
+ *   static byEmail = E.unique(User, "email");
  * }
  * ```
  */
@@ -193,6 +223,37 @@ export abstract class Model<SUB> {
 
     /** Field configuration metadata. */
     static fields: Record<string | symbol | number, FieldConfig<unknown>>;
+
+    /**
+     * Optional migration function called when deserializing rows written with an older schema version.
+     * Receives a plain record with all fields (primary key fields + value fields) and should mutate it
+     * in-place to match the current schema.
+     *
+     * This is called both during lazy loading (when a row is read from disk) and during batch
+     * migration (via `runMigration()` / `migrate-edinburgh`). The function's source code is hashed
+     * to detect changes — modifying `migrate()` triggers a new schema version.
+     *
+     * If `migrate()` changes values of fields used in secondary or unique indexes, those indexes
+     * will only be updated when `runMigration()` is run (not during lazy loading).
+     *
+     * @param record - A plain object with all field values from the old schema version.
+     *
+     * @example
+     * ```typescript
+     * ⁣@E.registerModel
+     * class User extends E.Model<User> {
+     *   static pk = E.primary(User, "id");
+     *   id = E.field(E.identifier);
+     *   name = E.field(E.string);
+     *   role = E.field(E.string);  // new field
+     *
+     *   static migrate(record: Record<string, any>) {
+     *     record.role ??= "user";  // default for rows that predate the 'role' field
+     *   }
+     * }
+     * ```
+     */
+    static migrate?(record: Record<string, any>): void;
 
     /*
      * IMPORTANT: We cannot use instance property initializers here, because we will be
@@ -217,6 +278,33 @@ export abstract class Model<SUB> {
         if (initial as any === INIT_INSTANCE_SYMBOL) return;
         throw new DatabaseError("The model needs a @registerModel decorator", 'INIT_ERROR');
     }
+
+    /**
+     * Optional hook called on each modified instance right before the transaction commits.
+     * Runs before data is written to disk, so changes made here are included in the commit.
+     *
+     * Common use cases:
+     * - Computing derived or denormalized fields
+     * - Enforcing cross-field validation rules
+     * - Creating or updating related model instances (newly created instances will also
+     *   have their `preCommit()` called)
+     *
+     * @example
+     * ```typescript
+     * ⁣@E.registerModel
+     * class Post extends E.Model<Post> {
+     *   static pk = E.primary(Post, "id");
+     *   id = E.field(E.identifier);
+     *   title = E.field(E.string);
+     *   slug = E.field(E.string);
+     *
+     *   preCommit() {
+     *     this.slug = this.title.toLowerCase().replace(/\s+/g, "-");
+     *   }
+     * }
+     * ```
+     */
+    preCommit?(): void;
 
     static async _delayedInit(): Promise<void> {
         const MockModel = getMockModel(this);
@@ -276,6 +364,7 @@ export abstract class Model<SUB> {
         }
         await MockModel._primary._delayedInit();
         for (const sec of MockModel._secondaries || []) await sec._delayedInit();
+        await MockModel._primary._initVersioning();
     }
 
     _setLoadedField(fieldName: string, value: any) {
@@ -365,7 +454,8 @@ export abstract class Model<SUB> {
         let changed : Record<any, any> = {};
         for(const fieldName in oldValues) {
             const oldValue = oldValues[fieldName];
-            if (!(fields[fieldName] as FieldConfig<unknown>).type.equals(this[fieldName as keyof Model<SUB>], oldValue)) {
+            const newValue = this[fieldName as keyof Model<SUB>];
+            if (newValue !== oldValue  && !(fields[fieldName] as FieldConfig<unknown>).type.equals(newValue, oldValue)) {
                 changed[fieldName] = oldValue;
             }
         }
@@ -391,9 +481,8 @@ export abstract class Model<SUB> {
         for (const index of this.constructor._secondaries || []) {
             for (const field of index._fieldTypes.keys()) {
                 if (changed.hasOwnProperty(field)) {
-                    // We need to update this index - first delete the old one
                     index._delete(txn, pk, oldValues);
-                    index._write(txn, pk, this)
+                    index._write(txn, pk, this);
                     break;
                 }
             }
