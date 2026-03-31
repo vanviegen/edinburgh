@@ -5,9 +5,9 @@
   "devDependencies": {
     "@types/bun": "^1.2.16",
     "@types/node": "^22.10.6",
+    "readme-tsdoc": "^1.1.4",
     "typescript": "^5.8.3",
-    "vitest": "^3.2.4",
-    "readme-tsdoc": "^1.1.4"
+    "vitest": "^3.2.4"
   },
   "exports": {
     ".": {
@@ -52,5 +52,8 @@
   "trustedDependencies": [
     "olmdb"
   ],
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "olmdb": "^0.3.1"
+  }
 }
