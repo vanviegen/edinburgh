@@ -1020,6 +1020,7 @@ export function index(MyModel: typeof Model, fields: any): SecondaryIndex<any, a
 export function dump() {
     const txn = currentTxn();
     let indexesById = new Map<number, {name: string, type: string, fields: Record<string, TypeWrapper<any>>}>();
+    let versions = new Map<number, Map<number, Map<string, TypeWrapper<any>>>>();
     console.log("--- Database dump ---")
     const iteratorId = lowlevel.createIterator(txn.id, undefined, undefined, false);
     try {
@@ -1031,6 +1032,17 @@ export function dump() {
         const indexId = kb.readNumber();
         if (indexId === MAX_INDEX_ID_PREFIX) {
             console.log("* Max index id", vb.readNumber());
+        } else if (indexId === VERSION_INFO_PREFIX) {
+            const idxId = kb.readNumber();
+            const version = kb.readNumber();
+            const obj = vb.read() as any;
+            const nonKeyFields = new Map<string, TypeWrapper<any>>();
+            for (const [name, typeBytes] of obj.fields) {
+                nonKeyFields.set(name, deserializeType(new DataPack(typeBytes), 0));
+            }
+            if (!versions.has(idxId)) versions.set(idxId, new Map());
+            versions.get(idxId)!.set(version, nonKeyFields);
+            console.log(`* Version ${version} for index ${idxId}: fields=[${[...nonKeyFields.keys()].join(',')}]`);
         } else if (indexId === INDEX_ID_PREFIX) {
             const name = kb.readString();
             const type = kb.readString();
@@ -1046,14 +1058,27 @@ export function dump() {
             indexesById.set(indexId, {name, type, fields});
         } else if (indexId > 0 && indexesById.has(indexId)) {
             const index = indexesById.get(indexId)!;
-            const {name, type, fields} = index;
-            const rowKey: any = {};
-            for(const [fieldName, fieldType] of Object.entries(fields)) {
-                rowKey[fieldName] = fieldType.deserialize(kb);
+            let name, type, rowKey: any, rowValue: any;
+            if (index) {
+                name = index.name;
+                type = index.type;
+                const fields = index.fields;
+                rowKey = {};
+                for(const [fieldName, fieldType] of Object.entries(fields)) {
+                    rowKey[fieldName] = fieldType.deserialize(kb);
+                }
+                if (type === 'primary') {
+                    const version = vb.readNumber();
+                    const vFields = versions.get(indexId)?.get(version);
+                    if (vFields) {
+                        rowValue = {};
+                        for (const [fieldName, fieldType] of vFields) {
+                            rowValue[fieldName] = fieldType.deserialize(vb);
+                        }
+                    }
+                }
             }
-            // const Model = modelRegistry[name]!;
-            // TODO: once we're storing schemas (serializeType) in the db, we can deserialize here
-            console.log(`* Row for ${indexId}:${name}:${type}[${Object.keys(fields).join(',')}] key=${kb} value=${vb}`);
+            console.log(`* Row for ${indexId}:${name}:${type}`, rowKey ?? kb, rowValue ?? vb);
         } else {
             console.log(`* Unhandled '${indexId}' key=${kb} value=${vb}`);
         }

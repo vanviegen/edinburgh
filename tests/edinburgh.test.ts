@@ -124,9 +124,6 @@ function noNeedToRunThis() {
     p.ownedData[0].mode = "manual";
     p.ownedData[0].createdAt = 3;
 
-    // TODO: Hmm, why is TypeScript not complaining about owner_data[0] being possibly undefined?
-
-    if (p.ownedData[0].owner) p.ownedData[0].owner.name = "Frank";
     // @ts-expect-error
     if (p.ownedData[0].owner) p.ownedData[0].owner.name = 42; // error: number is not assignable to string
     // @ts-expect-error
