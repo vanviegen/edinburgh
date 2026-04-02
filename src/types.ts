@@ -1,6 +1,6 @@
 import DataPack from "./datapack.js";
 import { DatabaseError } from "olmdb/lowlevel";
-import { Model, modelRegistry, getMockModel, FieldConfig, currentTxn } from "./models.js";
+import { Model, modelRegistry, FieldConfig, currentTxn } from "./models.js";
 import { assert, addErrorPath, dbGet } from "./utils.js";
 import { PrimaryIndex, BaseIndex, IndexRangeIterator } from "./indexes.js";
 
@@ -527,15 +527,15 @@ class IdentifierType extends TypeWrapper<string> {
 */
 export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<InstanceType<T>> {
     kind = 'link';
-    TargetModel: T;
-    
+    tableName: string;
+
     /**
     * Create a new LinkType.
     * @param TargetModel - The model class this link points to.
     */
     constructor(TargetModel: T) {
         super();
-        this.TargetModel = getMockModel(TargetModel);
+        this.tableName = (TargetModel as any).tableName || TargetModel.name;
     }
     
     serialize(model: InstanceType<T>, pack: DataPack) {
@@ -543,17 +543,17 @@ export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<Insta
     }
     
     deserialize(pack: DataPack) {
-        return this.TargetModel._primary!._get(currentTxn(), pack.readUint8Array(), false);
+        return modelRegistry[this.tableName]._primary!._get(currentTxn(), pack.readUint8Array(), false);
     }
     
     getError(value: InstanceType<T>) {
-        if (!(value instanceof this.TargetModel)) {
-            return new DatabaseError(`Expected instance of ${this.TargetModel.tableName}, got ${typeof value}`, 'VALUE_ERROR');
+        if (!(value instanceof modelRegistry[this.tableName])) {
+            return new DatabaseError(`Expected instance of ${this.tableName}, got ${typeof value}`, 'VALUE_ERROR');
         }
     }
     
     serializeType(pack: DataPack): void {
-        pack.write(this.TargetModel.tableName);
+        pack.write(this.tableName);
     }
     
     static deserializeType(pack: DataPack, featureFlags: number): LinkType<any> {
@@ -563,10 +563,10 @@ export class LinkType<T extends typeof Model<unknown>> extends TypeWrapper<Insta
         return new LinkType(targetModel);
     }
 
-    toString() { return `link<${this.TargetModel.tableName}>`; }
+    toString() { return `link<${this.tableName}>`; }
 
-    getLinkedModel() {
-        return this.TargetModel;
+    getLinkedModel(): T {
+        return modelRegistry[this.tableName] as T;
     }
 }
 

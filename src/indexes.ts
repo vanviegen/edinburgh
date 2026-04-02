@@ -713,7 +713,14 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
 
         // Set non-key fields on model from the (possibly migrated) record
         for (const fieldName of this._nonKeyFields) {
-            model._setLoadedField(fieldName, record[fieldName]);
+            if (fieldName in record) {
+                model._setLoadedField(fieldName, record[fieldName]);
+            } else if (fieldName in model) {
+                // Instantiate the default value
+                model._setLoadedField(fieldName, (model as any)[fieldName]);
+            } else {
+                throw new DatabaseError(`Field ${fieldName} is missing in migrated data for ${model}`, 'MIGRATION_ERROR');
+            }
         }
     }
 
@@ -1029,9 +1036,11 @@ export function dump() {
             const type = kb.readString();
             const fields: Record<string, TypeWrapper<any>> = {};
             while(kb.readAvailable()) {
-                const name = kb.readString();
+                const name = kb.read();
+                if (name === undefined) break; // what follows are primary key fields (when this is a secondary index)
                 fields[name] = deserializeType(kb, 0);
             }
+
             const indexId = vb.readNumber();
             console.log(`* Index definition ${indexId}:${name}:${type}[${Object.keys(fields).join(',')}]`);
             indexesById.set(indexId, {name, type, fields});

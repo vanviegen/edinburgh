@@ -104,15 +104,19 @@ export function registerModel<T extends typeof Model<unknown>>(MyModel: T): T {
 
     // Copy own static methods/properties
     for(const name of Object.getOwnPropertyNames(MyModel)) {
-        if (name !== 'length' && name !== 'prototype' && name !== 'name' && name !== 'mock') {
+        if (name !== 'length' && name !== 'prototype' && name !== 'name' && name !== 'mock' && name !== 'override') {
             (MockModel as any)[name] = (MyModel as any)[name];
         }
     }
-
-    MockModel.tableName ||= MyModel.name; // Set the table name to the class name if not already set
+    MockModel.tableName ||= MyModel.name;
 
     // Register the constructor by name
-    if (MockModel.tableName in modelRegistry) throw new DatabaseError(`Model with table name '${MockModel.tableName}' already registered`, 'INIT_ERROR');
+    if (MockModel.tableName in modelRegistry) {
+        if (!(MyModel as any).override) {
+            throw new DatabaseError(`Model with table name '${MockModel.tableName}' already registered`, 'INIT_ERROR');
+        }
+        delete modelRegistry[MockModel.tableName];
+    }
     modelRegistry[MockModel.tableName] = MockModel;
 
     return MockModel;   
@@ -220,6 +224,9 @@ export abstract class Model<SUB> {
 
     /** The database table name (defaults to class name). */
     static tableName: string;
+
+    /** When true, registerModel replaces an existing model with the same tableName. */
+    static override?: boolean;
 
     /** Field configuration metadata. */
     static fields: Record<string | symbol | number, FieldConfig<unknown>>;
@@ -468,6 +475,7 @@ export abstract class Model<SUB> {
                 changed[fieldName] = oldValue;
             }
         }
+
         if (isObjectEmpty(changed)) return; // No changes, nothing to do
 
         // Make sure primary has not been changed
