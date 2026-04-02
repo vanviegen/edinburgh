@@ -2,7 +2,7 @@ import * as lowlevel from "olmdb/lowlevel";
 import { DatabaseError } from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
 import { FieldConfig, getMockModel, Model, Transaction, currentTxn } from "./models.js";
-import { scheduleInit } from "./edinburgh.js";
+import { scheduleInit, transact } from "./edinburgh.js";
 import { assert, logLevel, dbGet, dbPut, dbDel, hashBytes, toBuffer } from "./utils.js";
 import { deserializeType, serializeType, TypeWrapper } from "./types.js";
 
@@ -323,41 +323,39 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * }
      * ```
      */
-    public find(opts: FindOptions<IndexArgTypes<M, F>> = {}): IndexRangeIterator<M> {
-        const txn = currentTxn();
-        const indexId = this._indexId!;
-        
+    _computeKeyBounds(opts: FindOptions<IndexArgTypes<M, F>>): [DataPack | undefined, DataPack | undefined] | null {
         let startKey: DataPack | undefined;
         let endKey: DataPack | undefined;
-
         if ('is' in opts) {
-            // Exact match - set both 'from' and 'to' to the same value
             startKey = this._argsToKeyBytes(toArray(opts.is), true);
             endKey = startKey.clone(true).increment();
         } else {
-            // Range query
             if ('from' in opts) {
                 startKey = this._argsToKeyBytes(toArray(opts.from), true);
             } else if ('after' in opts) {
                 startKey = this._argsToKeyBytes(toArray(opts.after), true);
-                if (!startKey.increment()) {
-                    // There can be nothing 'after' - return an empty iterator
-                    return new IndexRangeIterator(txn, -1, indexId, this);
-                }
+                if (!startKey.increment()) return null;
             } else {
-                // Open start: begin at first key for this index id
                 startKey = this._argsToKeyBytes([], true);
             }
-            
             if ('to' in opts) {
                 endKey = this._argsToKeyBytes(toArray(opts.to), true).increment();
             } else if ('before' in opts) {
                 endKey = this._argsToKeyBytes(toArray(opts.before), true);
             } else {
-                // Open end: end at first key of the next index id
-                endKey = this._argsToKeyBytes([], true).increment(); // Next indexId
+                endKey = this._argsToKeyBytes([], true).increment();
             }
         }
+        return [startKey, endKey];
+    }
+
+    public find(opts: FindOptions<IndexArgTypes<M, F>> = {}): IndexRangeIterator<M> {
+        const txn = currentTxn();
+        const indexId = this._indexId!;
+
+        const bounds = this._computeKeyBounds(opts);
+        if (!bounds) return new IndexRangeIterator(txn, -1, indexId, this);
+        const [startKey, endKey] = bounds;
 
         // For reverse scans, swap start/end keys since OLMDB expects it
         const scanStart = opts.reverse ? endKey : startKey;
@@ -376,6 +374,72 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         );
         
         return new IndexRangeIterator(txn, iteratorId, indexId, this);
+    }
+
+    /**
+     * Process all matching rows in batched transactions.
+     *
+     * Uses the same query options as {@link find}. The batch is committed and a new
+     * transaction started once either `limitSeconds` or `limitRows` is exceeded.
+     *
+     * @param opts - Query options (same as `find()`), plus:
+     * @param opts.limitSeconds - Max seconds per transaction batch (default: 1)
+     * @param opts.limitRows - Max rows per transaction batch (default: 4096)
+     * @param callback - Called for each matching row within a transaction
+     */
+    public async batchProcess(
+        opts: FindOptions<IndexArgTypes<M, F>> & { limitSeconds?: number; limitRows?: number } = {} as any,
+        callback: (row: InstanceType<M>) => void | Promise<void>
+    ): Promise<void> {
+        const limitMs = (opts.limitSeconds ?? 1) * 1000;
+        const limitRows = opts.limitRows ?? 4096;
+        const reverse = opts.reverse ?? false;
+
+        const bounds = this._computeKeyBounds(opts);
+        if (!bounds) return;
+        const startKey = bounds[0]?.toUint8Array();
+        const endKey = bounds[1]?.toUint8Array();
+        let cursor: Uint8Array | undefined;
+
+        while (true) {
+            const next = await transact(async (): Promise<Uint8Array | null> => {
+                const txn = currentTxn();
+                const batchStart = cursor && !reverse ? cursor : startKey;
+                const batchEnd = cursor && reverse ? cursor : endKey;
+                const scanStart = reverse ? batchEnd : batchStart;
+                const scanEnd = reverse ? batchStart : batchEnd;
+
+                const iteratorId = lowlevel.createIterator(
+                    txn.id,
+                    scanStart ? toBuffer(scanStart) : undefined,
+                    scanEnd ? toBuffer(scanEnd) : undefined,
+                    reverse,
+                );
+
+                const t0 = Date.now();
+                let count = 0;
+                let lastRawKey: Uint8Array | undefined;
+                try {
+                    while (true) {
+                        const raw = lowlevel.readIterator(iteratorId);
+                        if (!raw) return null;
+                        lastRawKey = new Uint8Array(raw.key);
+                        await callback(this._pairToInstance(txn, raw.key, raw.value));
+                        if (++count >= limitRows || Date.now() - t0 >= limitMs) break;
+                    }
+                } finally {
+                    lowlevel.closeIterator(iteratorId);
+                }
+
+                lastRawKey = lastRawKey.slice(); // Copy for use outside of transaction
+                if (reverse) return lastRawKey!;
+                const nk = new DataPack(lastRawKey!);
+                return nk.increment() ? nk.toUint8Array() : null;
+            });
+
+            if (next === null) break;
+            cursor = next;
+        }
     }
 
     abstract _getTypeName(): string;

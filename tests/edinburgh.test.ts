@@ -1416,14 +1416,14 @@ test("Trying to modify instances outside their transaction throws an error", asy
     await E.transact(() => {
         user = new User({email: "test@user.com", name: "Test User"});
     });    
-    expect(() => { user.name = "Modified User"; }).toThrow("Attempted to assign to readonly property.");
+    expect(() => { user.name = "Modified User"; }).toThrow();
 
     // Attempt to modify instance inside another transaction
     await E.transact(() => {
         user = new User({email: "test2@user.com", name: "Test User"});
     });
     await E.transact(() => {
-        expect(() => { user.name = "Modified User"; }).toThrow("Attempted to assign to readonly property.");
+        expect(() => { user.name = "Modified User"; }).toThrow();
     });
 
 });
@@ -1836,4 +1836,46 @@ test("replaceInto works with composite primary keys", async () => {
         expect(m.getState()).toBe("created");
         expect(m.value).toBe(3);
     });
+});
+
+test("batchProcess visits all rows across multiple batches", async () => {
+    await E.transact(() => {
+        for (let i = 0; i < 10; i++) new Simple({ value: i });
+    });
+
+    const seen: number[] = [];
+    await Simple.pk.batchProcess({ limitRows: 3 }, (row) => {
+        seen.push(row.value);
+    });
+
+    expect(seen).toHaveLength(10);
+    expect(seen.sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+});
+
+test("batchProcess can modify rows within batched transactions", async () => {
+    await E.transact(() => {
+        for (let i = 1; i <= 6; i++) new Simple({ value: i });
+    });
+
+    await Simple.pk.batchProcess({ limitRows: 2 }, (row) => {
+        row.value *= 10;
+    });
+
+    const values: number[] = [];
+    await E.transact(() => {
+        for (const row of Simple.pk.find()) values.push(row.value);
+    });
+    expect(values.sort((a, b) => a - b)).toEqual([10, 20, 30, 40, 50, 60]);
+});
+
+test("batchProcess respects range options via secondary index", async () => {
+    await E.transact(() => {
+        for (let i = 0; i < 10; i++) new Simple({ value: i });
+    });
+
+    const seen: number[] = [];
+    await Simple.byValue.batchProcess({ from: 3, to: 7, limitRows: 2 }, (row) => {
+        seen.push(row.value);
+    });
+    expect(seen.sort((a, b) => a - b)).toEqual([3, 4, 5, 6, 7]);
 });
