@@ -537,6 +537,38 @@ export abstract class Model<SUB> {
     }
 
     /**
+     * Load an existing instance by primary key and update it, or create a new one.
+     *
+     * The provided object must contain all primary key fields. If a matching row exists,
+     * the remaining properties from `obj` are set on the loaded instance. Otherwise a
+     * new instance is created with `obj` as its initial properties.
+     *
+     * @param obj - Partial model data that **must** include every primary key field.
+     * @returns The loaded-and-updated or newly created instance.
+     */
+    static replaceInto<T extends typeof Model<any>>(this: T, obj: Partial<Omit<InstanceType<T>, "constructor">>): InstanceType<T> {
+        const pk = this._primary!;
+        const keyArgs = [];
+        for (const fieldName of pk._fieldTypes.keys()) {
+            if (!(fieldName in (obj as any))) {
+                throw new DatabaseError(`replaceInto: missing primary key field '${fieldName}'`, "MISSING_PRIMARY_KEY");
+            }
+            keyArgs.push((obj as any)[fieldName]);
+        }
+
+        const existing = pk.get(...keyArgs as any) as InstanceType<T> | undefined;
+        if (existing) {
+            for (const key in obj as any) {
+                if (!pk._fieldTypes.has(key as any)) {
+                    (existing as any)[key] = (obj as any)[key];
+                }
+            }
+            return existing;
+        }
+        return new (this as any)(obj) as InstanceType<T>;
+    }
+
+    /**
      * Delete this model instance from the database.
      * 
      * Removes the instance and all its index entries from the database and prevents further persistence.

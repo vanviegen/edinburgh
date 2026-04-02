@@ -1538,7 +1538,7 @@ test("runMigration converts rows from old primary key format", async () => {
         id = E.field(E.number);
 
         static migrate(record: Record<string, any>) {
-            if (typeof record.id === "string") record.id = parseInt(record.id, 10);
+            if (typeof record.id === "string") record.id = 10 * parseInt(record.id, 10);
         }
     }
 
@@ -1548,9 +1548,9 @@ test("runMigration converts rows from old primary key format", async () => {
 
     // Step 4: Verify rows are accessible via the new numeric key
     await E.transact(() => {
-        expect(PkConvertV2.pk.get(1)?.id).toBe(1);
-        expect(PkConvertV2.pk.get(2)?.id).toBe(2);
-        expect(PkConvertV2.pk.get(3)?.id).toBe(3);
+        expect(PkConvertV2.pk.get(10)?.id).toBe(10);
+        expect(PkConvertV2.pk.get(20)?.id).toBe(20);
+        expect(PkConvertV2.pk.get(30)?.id).toBe(30);
     });
 });
 
@@ -1639,6 +1639,7 @@ test("runMigration fixes secondaries affected by migrate()", async () => {
     // Step 3: Run migration — should update the secondary index for the changed row
     const result = await E.runMigration({tables: ["SecMigrateTest"]});
     expect(result.secondaries["SecMigrateTest"]).toBe(1);
+    expect(result.primaries).toEqual({}); // Primaries should be updated lazily
 
     // Step 4: Verify secondary index reflects migrated values
     await E.transact(() => {
@@ -1675,11 +1676,23 @@ test("runMigration removes orphaned secondary index entries", async () => {
         tag = E.field(E.string);
     }
 
-    // Step 3: Run migration — Phase 3 should delete the 2 orphaned secondary index entries
+    // Step 3: Verify that indexes still exist on disk, by going through V1
+    await E.transact(() => {
+        expect(OrphanV1.byTag.find({is: "x"}).count()).toBe(1);
+        expect(OrphanV1.byTag.find({is: "y"}).count()).toBe(1);
+    });
+
+    // Step 4: Run migration — Phase 3 should delete the 2 orphaned secondary index entries
     const result = await E.runMigration({tables: ["OrphanedSecTest"]});
     expect(result.orphaned).toBe(2);
 
-    // Step 4: Verify rows are still accessible via primary key
+    // Step 5: Verify that indexes no longer exist on disk
+    await E.transact(() => {
+        expect(OrphanV1.byTag.find({is: "x"}).count()).toBe(0);
+        expect(OrphanV1.byTag.find({is: "y"}).count()).toBe(0);
+    });
+
+    // Step 6: Verify rows are still accessible via primary key
     await E.transact(() => {
         expect(OrphanV2.pk.get("a")?.tag).toBe("x");
         expect(OrphanV2.pk.get("b")?.tag).toBe("y");
@@ -1695,15 +1708,14 @@ test("preCommit() can create new instances", async () => {
         name = E.field(E.string);
         preCommit() {
             // Create a child when parent is committed
-            new Child({parentId: this.id, data: this.name + "_child"});
+            Child.replaceInto({parentId: this.id, data: this.name + "_child"});
         }
     }
 
     @E.registerModel
     class Child extends E.Model<Child> {
-        static pk = E.primary(Child, "id");
+        static pk = E.primary(Child, "parentId");
         static tableName = "PreCommitChild";
-        id = E.field(E.identifier);
         parentId = E.field(E.string);
         data = E.field(E.string);
     }
@@ -1717,6 +1729,18 @@ test("preCommit() can create new instances", async () => {
         const children = [...Child.pk.find()];
         expect(children.length).toBe(1);
         expect(children[0].data).toBe("test_parent_child");
+    });
+
+    await E.transact(() => {
+        const parent = [...Parent.findAll()][0];
+        parent.name = 'updated_parent';
+    });
+
+    // Verify child was updated
+    await E.transact(() => {
+        const children = [...Child.pk.find()];
+        expect(children.length).toBe(1);
+        expect(children[0].data).toBe("updated_parent_child");
     });
 });
 
@@ -1757,4 +1781,62 @@ test("Version info rows are created in the database", async () => {
     });
 
     expect(VersionInfoModel.pk._currentVersion).toBeGreaterThan(0);
+});
+
+test("replaceInto creates a new instance when not found", async () => {
+    await E.transact(() => {
+        const p = Person.replaceInto({name: "ri-new-person", age: 30, cars: ["tesla"]});
+        expect(p.name).toBe("ri-new-person");
+        expect(p.age).toBe(30);
+        expect(p.getState()).toBe("created");
+    });
+
+    // Verify it was persisted
+    await E.transact(() => {
+        const loaded = Person.pk.get("ri-new-person");
+        expect(loaded).toBeDefined();
+        expect(loaded!.age).toBe(30);
+    });
+});
+
+test("replaceInto updates an existing instance", async () => {
+    await E.transact(() => {
+        new Person({name: "ri-exist-person", age: 10, cars: []});
+    });
+
+    await E.transact(() => {
+        const p = Person.replaceInto({name: "ri-exist-person", age: 20});
+        expect(p.getState()).toBe("loaded");
+        expect(p.age).toBe(20);
+    });
+
+    // Verify the update was persisted
+    await E.transact(() => {
+        const loaded = Person.pk.get("ri-exist-person")!;
+        expect(loaded.age).toBe(20);
+    });
+});
+
+test("replaceInto throws when primary key fields are missing", async () => {
+    await E.transact(() => {
+        expect(() => Person.replaceInto({age: 5} as any)).toThrow("missing primary key");
+    });
+});
+
+test("replaceInto works with composite primary keys", async () => {
+    await E.transact(() => {
+        new CompositeKeyModel({category: "a", subcategory: "b", name: "c", value: 1});
+    });
+
+    await E.transact(() => {
+        const m = CompositeKeyModel.replaceInto({category: "a", subcategory: "b", name: "c", value: 2});
+        expect(m.getState()).toBe("loaded");
+        expect(m.value).toBe(2);
+    });
+
+    await E.transact(() => {
+        const m = CompositeKeyModel.replaceInto({category: "a", subcategory: "b", name: "new", value: 3});
+        expect(m.getState()).toBe("created");
+        expect(m.value).toBe(3);
+    });
 });
