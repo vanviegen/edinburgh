@@ -1,56 +1,73 @@
 # Edinburgh
-**Very fast object persistence for TypeScript, supporting optimistic transactions, lazy loading and indexes.**
+**TypeScript objects that live in the database.**
 
-Edinburgh is a high-performance ORM built on [OLMDB](https://github.com/vanviegen/olmdb), providing type-safe model definitions with automatic field validation, ACID transactions, and efficient LMDB-based storage.
+Edinburgh blurs the line between in-memory objects and database records. Define a model class, and its instances *are* the database rows. They are read directly from a memory-mapped [LMDB](http://www.lmdb.tech/doc/) store on first access, and mutations are written back in an ACID transaction on commit. There is no SQL layer, no query builder, no network round-trip, and no result-set marshalling. A primary-key lookup completes in about 1 µs.
 
-**Features:**
+This makes problems like n+1 queries irrelevant: traversing `post.author.department.manager` is just a chain of microsecond memory-mapped reads, not a cascade of network calls.
 
-- 🚀 **Type-Safe Models**: Define models with automatic TypeScript type inference and runtime validation
-- 🔒 **ACID Transactions**: Optimistic locking with automatic retry on conflicts  
-- 🔗 **Relationships**: Model instances can reference each other, and will be lazy-loaded on access
-- 📦 **Embedded Database**: Negligible query latency, due to a blazing fast embedded database (LMDB)
-- 📊 **Custom Indexing**: Efficient querying with primary, unique, and multi-value indexes
+Built on [OLMDB](https://github.com/vanviegen/olmdb) (an optimistic-locking wrapper around LMDB).
+
+- **Objects are records**: model fields are backed by memory-mapped storage; no serialization boundary between your code and the database
+- **Sub-microsecond reads**: embedded B+ tree in the same process, no network hop, no query parsing
+- **Type-safe at every layer**: TypeScript inference at compile time, runtime validation at write time
+- **First-class relationships**: `E.link(OtherModel)` fields load lazily and transparently on access
+- **Indexes**: primary, unique, and secondary indexes with efficient range queries
+- **ACID transactions**: optimistic locking with automatic retry on conflict (up to 6 attempts)
+- **Zero-downtime schema evolution**: old rows are lazily migrated on read; no batch DDL required
 
 ## Quick Demo
 ```typescript
 import * as E from "edinburgh";
 
-// Initialize the database (optional, defaults to "./.olmdb")
+// Initialize the database (optional, defaults to ".edinburgh")
 E.init("./my-database");
 
 // Define a model
 @E.registerModel
 class User extends E.Model<User> {
-  // Define a primary key (optional, defaults to using the "id" field)
-  static pk = E.index(User, ["id"], "primary");
-  // Define a unique index on the email field
-  static byEmail = E.index(User, "email", "unique");
+    // Define a primary key (optional, defaults to using the "id" field)
+    static pk = E.primary(User, "id");
+    // Define a unique index on the email field
+    static byEmail = E.unique(User, "email");
 
-  // Define fields with simple types -- they will be type-checked at compile time and validated at runtime.
-  id = E.field(E.identifier);
-  name = E.field(E.string);
-  email = E.field(E.string);
-  age = E.field(E.opt(E.number));
+    // Define fields with simple types -- they will be type-checked at compile time and validated at runtime.
+    id = E.field(E.identifier);
+    name = E.field(E.string);
+    age = E.field(E.number);
+    email = E.field(E.opt(E.string)); // TypeScript: undefined | string
 
-  // A field with a more elaborate type. In Typescript: `User | User[] | "self" | "spouse"`
-  supervisor = E.field(E.choice(E.link(User), E.array(E.link(User)), E.literal("self"), E.literal("spouse")));
+    // Link to another instance of this model
+    supervisor = E.field(E.opt(E.link(User)));
+
+    // A field with a more elaborate type. In TypeScript: `User | User[] | "unknown" | "whatever"`
+    something = E.field(E.or(E.link(User), E.array(E.link(User)), E.literal("unknown"), E.literal("whatever")), { default: "unknown" });
 }
 
 // Use in transactions
 await E.transact(() => {
-  const user = new User({
-    name: "John Doe", 
-    email: "john@example.com"
-  });
+    const boss = new User({
+        name: "Big Boss",
+        age: 50,
+    });
+    const john = new User({ // Unique 'id' is automatically generated if not provided
+        name: "John Doe", 
+        age: 41,
+        email: "john@example.com",
+        supervisor: boss, // Link to another model instance
+    });
 });
 
 await E.transact(() => {
-  // Query by unique index
-  const user = User.byEmail.get("john@example.com")!;
-  // The transaction will retry if there's a conflict, such as another transaction
-  // modifying the same user (from another async function or another process)
-  user.age++;
-});
+    // Query by unique index
+    const john = User.byEmail.get("john@example.com")!;
+
+    // The transaction will retry if there's a conflict, such as another transaction
+    // modifying the same user (from another async function or another process)
+    john.age++;
+
+    // The supervisor object is lazy loaded on first access
+    console.log(`${john.supervisor!.name} is ${john.name}'s supervisor`);  
+});    
 ```
 
 ## TypeScript Configuration
@@ -59,10 +76,10 @@ When using TypeScript to transpile to JavaScript, make sure to enable the follow
 
 ```json
 {
-  "compilerOptions": {
-    "target": "es2022",
-    "experimentalDecorators": true
-  }
+    "compilerOptions": {
+        "target": "es2022",
+        "experimentalDecorators": true
+    }
 }
 ```
 
@@ -198,7 +215,7 @@ in-place to match the current schema.
 
 This is called both during lazy loading (when a row is read from disk) and during batch
 migration (via `runMigration()` / `migrate-edinburgh`). The function's source code is hashed
-to detect changes — modifying `migrate()` triggers a new schema version.
+to detect changes. Modifying `migrate()` triggers a new schema version.
 
 If `migrate()` changes values of fields used in secondary or unique indexes, those indexes
 will only be updated when `runMigration()` is run (not during lazy loading).
@@ -981,7 +998,7 @@ Edinburgh automatically tracks the schema version of each model. When you change
 
 ### What happens automatically (lazy migration)
 
-Changes to regular (non-index) field values are migrated lazily — when a row with an old schema version is loaded from disk, it is deserialized using the old field types and transformed by the optional static `migrate()` function. This is transparent and requires no downtime.
+Changes to regular (non-index) field values are migrated lazily. When a row with an old schema version is loaded from disk, it is deserialized using the old field types and transformed by the optional static `migrate()` function. This is transparent and requires no downtime.
 
 ```typescript
 @E.registerModel

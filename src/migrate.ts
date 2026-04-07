@@ -176,11 +176,11 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
                 // Handle secondaries (primary is left as-is for lazy migration on read)
                 for (const sec of secondaries) {
                     if (!versionInfo.secondaryKeys.has(sec._signature!)) {
-                        // New secondary — write entry
+                        // New secondary, write entry
                         sec._write(txn, keyBuf, record as any);
                         upgraded++;
                     } else if (preMigrate) {
-                        // Existing secondary — update if migrate changed any of its fields
+                        // Existing secondary, update if migrate changed any of its fields
                         for (const [field, type] of sec._fieldTypes.entries()) {
                             if (!type.equals(preMigrate[field], record[field])) {
                                 sec._delete(txn, keyBuf, preMigrate as any);

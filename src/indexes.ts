@@ -431,7 +431,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
                     lowlevel.closeIterator(iteratorId);
                 }
 
-                lastRawKey = lastRawKey.slice(); // Copy for use outside of transaction
+                lastRawKey = lastRawKey.slice(); // Copy, as lastRawKey points at OLMDB's internal read-only mmap
                 if (reverse) return lastRawKey!;
                 const nk = new DataPack(lastRawKey!);
                 return nk.increment() ? nk.toUint8Array() : null;

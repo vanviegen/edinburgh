@@ -54,7 +54,7 @@ function parseArgs(args: string[]): { importPath: string, options: MigrationOpti
     }
     
     if (!importPath) {
-        console.error('Usage: migrate-edinburgh --import <path> [options]');
+        console.error('Usage: npx migrate-edinburgh --import <path> [options]');
         console.error('  --import <path>     Module that registers all models (required)');
         console.error('  --db <path>         Database directory (default: .edinburgh)');
         console.error('  --tables <names>    Comma-separated table names');

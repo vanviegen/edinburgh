@@ -23,7 +23,7 @@
   },
   "description": "Very fast object persistence for TypeScript, supporting optimistic transactions, lazy loading and indexes.",
   "bin": {
-    "migrate-edinburgh": "./build/src/migrate-edinburgh.js"
+    "migrate-edinburgh": "./build/src/migrate-cli.js"
   },
   "files": [
     "src",
@@ -52,5 +52,8 @@
   "trustedDependencies": [
     "olmdb"
   ],
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "olmdb": "^0.4.0"
+  }
 }

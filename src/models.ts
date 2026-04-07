@@ -173,12 +173,12 @@ export interface Model<SUB> {
  * Edinburgh tracks the schema version of each model automatically. When you add, remove, or
  * change the types of fields, or add/remove indexes, Edinburgh detects the new schema version.
  *
- * **Lazy migration:** Changes to non-key field values are migrated lazily — when a row with an
+ * **Lazy migration:** Changes to non-key field values are migrated lazily, when a row with an
  * old schema version is read from disk, it is deserialized using the old schema and optionally
  * transformed by the static `migrate()` function. This happens transparently on every read
  * and requires no downtime or batch processing.
  *
- * **Batch migration (via `migrate-edinburgh` or `runMigration()`):** Certain schema changes
+ * **Batch migration (via `npx migrate-edinburgh` or `runMigration()`):** Certain schema changes
  * require an explicit migration run:
  * - Adding or removing secondary/unique indexes
  * - Changing the fields or types of an existing index
@@ -190,11 +190,11 @@ export interface Model<SUB> {
  *
  * ### Lifecycle Hooks
  *
- * - **`static migrate(record)`** — Called when deserializing rows written with an older schema
+ * - **`static migrate(record)`**: Called when deserializing rows written with an older schema
  *   version. Receives a plain record object; mutate it in-place to match the current schema.
  *   See {@link Model.migrate}.
  *
- * - **`preCommit()`** — Called on each modified instance right before the transaction commits.
+ * - **`preCommit()`**: Called on each modified instance right before the transaction commits.
  *   Useful for computing derived fields, enforcing cross-field invariants, or creating related
  *   instances. See {@link Model.preCommit}.
  *
@@ -237,8 +237,8 @@ export abstract class Model<SUB> {
      * in-place to match the current schema.
      *
      * This is called both during lazy loading (when a row is read from disk) and during batch
-     * migration (via `runMigration()` / `migrate-edinburgh`). The function's source code is hashed
-     * to detect changes — modifying `migrate()` triggers a new schema version.
+     * migration (via `runMigration()` / `npx migrate-edinburgh`). The function's source code is hashed
+     * to detect changes. Modifying `migrate()` triggers a new schema version.
      *
      * If `migrate()` changes values of fields used in secondary or unique indexes, those indexes
      * will only be updated when `runMigration()` is run (not during lazy loading).
@@ -377,7 +377,7 @@ export abstract class Model<SUB> {
             }
         }
 
-        // Always run index inits (idempotent — they skip if already initialized)
+        // Always run index inits (idempotent, skip if already initialized)
         await MockModel._primary._delayedInit();
         for (const sec of MockModel._secondaries || []) await sec._delayedInit();
         await MockModel._primary._initVersioning();

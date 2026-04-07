@@ -3,7 +3,7 @@ import * as E from '../src/edinburgh.js';
 import { Change } from "../src/models.js";
 
 try {
-    E.init("./.olmdb_test");
+    E.init("./.edinburgh_test");
 } catch (error: any) {
     if (error.code !== "DUP_INIT") {
         throw error; // Rethrow if it's not the expected error
@@ -1477,7 +1477,7 @@ test("lazy migration adds a new non-key field", async () => {
         role = E.field(E.string, {default: "user"});
     }
 
-    // Step 3: Read old rows through V2 — migrate() is called lazily on read
+    // Step 3: Read old rows through V2 - migrate() is called lazily on read
     await E.transact(() => {
         const r1 = LazyMigV2.pk.get("row1")!;
         expect((r1 as any).name).toBeUndefined();
@@ -1539,7 +1539,7 @@ test("runMigration converts rows from old primary key format", async () => {
         }
     }
 
-    // Step 3: Run migration — Phase 2 should convert 3 rows to the new key format
+    // Step 3: Run migration - Phase 2 should convert 3 rows to the new key format
     const result = await E.runMigration({tables: ["PkConvertTest"]});
     expect(result.primaries["PkConvertTest"]).toBe(3);
 
@@ -1580,7 +1580,7 @@ test("runMigration populates new secondary indexes", async () => {
         static byCategory = E.index(SecPopV2, "category");
     }
 
-    // Step 3: Run migration — should populate the new secondary index for all 3 rows
+    // Step 3: Run migration - should populate the new secondary index for all 3 rows
     const result = await E.runMigration({tables: ["SecondaryPopTest"]});
     expect(result.secondaries["SecondaryPopTest"]).toBe(3);
 
@@ -1633,7 +1633,7 @@ test("runMigration fixes secondaries affected by migrate()", async () => {
         }
     }
 
-    // Step 3: Run migration — should update the secondary index for the changed row
+    // Step 3: Run migration - should update the secondary index for the changed row
     const result = await E.runMigration({tables: ["SecMigrateTest"]});
     expect(result.secondaries["SecMigrateTest"]).toBe(1);
     expect(result.primaries).toEqual({}); // Primaries should be updated lazily
@@ -1679,7 +1679,7 @@ test("runMigration removes orphaned secondary index entries", async () => {
         expect(OrphanV1.byTag.find({is: "y"}).count()).toBe(1);
     });
 
-    // Step 4: Run migration — Phase 3 should delete the 2 orphaned secondary index entries
+    // Step 4: Run migration - Phase 3 should delete the 2 orphaned secondary index entries
     const result = await E.runMigration({tables: ["OrphanedSecTest"]});
     expect(result.orphaned).toBe(2);
 
@@ -1879,3 +1879,4 @@ test("batchProcess respects range options via secondary index", async () => {
     });
     expect(seen.sort((a, b) => a - b)).toEqual([3, 4, 5, 6, 7]);
 });
+
