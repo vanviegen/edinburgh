@@ -373,7 +373,7 @@ export abstract class Model<SUB> {
             }
 
             if (logLevel >= 1) {
-                console.log(`Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
+                console.log(`[edinburgh] Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
             }
         }
 

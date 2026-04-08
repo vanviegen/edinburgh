@@ -41,10 +41,6 @@ export {
     dump,
 } from "./indexes.js";
 
-export {
-    setLogLevel
-} from "./utils.js";
-
 export { BaseIndex, UniqueIndex, PrimaryIndex, SecondaryIndex } from './indexes.js';
 
 export { type Change } from './models.js';

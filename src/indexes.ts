@@ -246,7 +246,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
                     const idBuf = new DataPack().write(id).toUint8Array();
                     dbPut(txnId, indexNameBuf, idBuf);
                     dbPut(txnId, MAX_INDEX_ID_BUFFER, idBuf);
-                    if (logLevel >= 1) console.log(`Create index ${this}`);
+                    if (logLevel >= 1) console.log(`[edinburgh] Create index ${this}`);
                 }
                 const commitResult = lowlevel.commitTransaction(txnId);
                 const commitSeq = typeof commitResult === 'number' ? commitResult : await commitResult;
@@ -362,7 +362,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         const scanEnd = opts.reverse ? startKey : endKey;
 
         if (logLevel >= 3) {
-            console.log(`Scan ${this} start=${scanStart} end=${scanEnd} reverse=${opts.reverse||false}`);
+            console.log(`[edinburgh] Scan ${this} start=${scanStart} end=${scanEnd} reverse=${opts.reverse||false}`);
         }
         const startBuf = scanStart?.toUint8Array();
         const endBuf = scanEnd?.toUint8Array();
@@ -593,7 +593,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
                     .write(this._currentVersion)
                     .toUint8Array();
                 dbPut(txnId, versionKey, currentValueBytes);
-                if (logLevel >= 1) console.log(`Create version ${this._currentVersion} for ${this}`);
+                if (logLevel >= 1) console.log(`[edinburgh] Create version ${this._currentVersion} for ${this}`);
 
                 const commitResult = lowlevel.commitTransaction(txnId);
                 const commitSeq = typeof commitResult === 'number' ? commitResult : await commitResult;
@@ -658,7 +658,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
             if (loadNow === true) {
                 valueBuffer = dbGet(txn.id, key);
                 if (logLevel >= 3) {
-                    console.log(`Get ${this} key=${new DataPack(key)} result=${valueBuffer && new DataPack(valueBuffer)}`);
+                    console.log(`[edinburgh] Get ${this} key=${new DataPack(key)} result=${valueBuffer && new DataPack(valueBuffer)}`);
                 }
                 if (!valueBuffer) return;
             } else {
@@ -712,7 +712,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     _lazyNow(model: InstanceType<M>) {
         let valueBuffer = dbGet(model._txn.id, model._primaryKey!);
         if (logLevel >= 3) {
-            console.log(`Lazy retrieve ${this} key=${new DataPack(model._primaryKey)} result=${valueBuffer && new DataPack(valueBuffer)}`);
+            console.log(`[edinburgh] Lazy retrieve ${this} key=${new DataPack(model._primaryKey)} result=${valueBuffer && new DataPack(valueBuffer)}`);
         }
         if (!valueBuffer) throw new DatabaseError(`Lazy-loaded ${model.constructor.name}#${model._primaryKey} does not exist`, 'LAZY_FAIL');
         Object.defineProperties(model, this._resetDescriptors);
@@ -815,14 +815,14 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
             fieldConfig.type.serialize(data[fieldName], valueBytes);
         }
         if (logLevel >= 2) {
-            console.log(`Write ${this} key=${new DataPack(primaryKey)} value=${valueBytes}`);
+            console.log(`[edinburgh] Write ${this} key=${new DataPack(primaryKey)} value=${valueBytes}`);
         }
         dbPut(txn.id, primaryKey, valueBytes.toUint8Array());
     }
 
     _delete(txn: Transaction, primaryKey: Uint8Array, _data: Record<string, any>) {
         if (logLevel >= 2) {
-            console.log(`Delete ${this} key=${new DataPack(primaryKey)}`);
+            console.log(`[edinburgh] Delete ${this} key=${new DataPack(primaryKey)}`);
         }
         dbDel(txn.id, primaryKey);
     }
@@ -858,7 +858,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
 
         let valueBuffer = dbGet(txn.id, keyBuffer);
         if (logLevel >= 3) {
-            console.log(`Get ${this} key=${new DataPack(keyBuffer)} result=${valueBuffer}`);
+            console.log(`[edinburgh] Get ${this} key=${new DataPack(keyBuffer)} result=${valueBuffer}`);
         }
         if (!valueBuffer) return;
 
@@ -876,7 +876,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         if (!this._hasNullIndexValues(data)) {
             const key = this._serializeKey(primaryKey, data);
             if (logLevel >= 2) {
-                console.log(`Delete ${this} key=${key}`);
+                console.log(`[edinburgh] Delete ${this} key=${key}`);
             }
             dbDel(txn.id, key);
         }
@@ -886,7 +886,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         if (!this._hasNullIndexValues(data)) {
             const key = this._serializeKey(primaryKey, data);
             if (logLevel >= 2) {
-                console.log(`Write ${this} key=${key} value=${new DataPack(primaryKey)}`);
+                console.log(`[edinburgh] Write ${this} key=${key} value=${new DataPack(primaryKey)}`);
             }
             if (dbGet(txn.id, key)) {
                 throw new DatabaseError(`Unique constraint violation for ${this} key ${key}`, 'UNIQUE_CONSTRAINT');
@@ -977,7 +977,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
         if (this._hasNullIndexValues(model)) return;
         const key = this._serializeKey(primaryKey, model);
         if (logLevel >= 2) {
-            console.log(`Write ${this} key=${key}`);
+            console.log(`[edinburgh] Write ${this} key=${key}`);
         }
         dbPut(txn.id, key, SECONDARY_VALUE);
     }
@@ -986,7 +986,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
         if (this._hasNullIndexValues(model)) return;
         const key = this._serializeKey(primaryKey, model);
         if (logLevel >= 2) {
-            console.log(`Delete ${this} key=${key}`);
+            console.log(`[edinburgh] Delete ${this} key=${key}`);
         }
         dbDel(txn.id, key);
     }
@@ -1085,7 +1085,7 @@ export function dump() {
     const txn = currentTxn();
     let indexesById = new Map<number, {name: string, type: string, fields: Record<string, TypeWrapper<any>>}>();
     let versions = new Map<number, Map<number, Map<string, TypeWrapper<any>>>>();
-    console.log("--- Database dump ---")
+    console.log("--- edinburgh database dump ---")
     const iteratorId = lowlevel.createIterator(txn.id, undefined, undefined, false);
     try {
     while (true) {
@@ -1148,5 +1148,5 @@ export function dump() {
         }
     }
     } finally { lowlevel.closeIterator(iteratorId); }
-    console.log("--- End of database dump ---")
+    console.log("--- end ---")
 }

@@ -58,16 +58,9 @@ export function addErrorPath<T>(error: T, path: string | number): T {
     return error;
 }
 
-// Get initial log level from environment variable
-export let logLevel = parseInt(process.env.EDINBURGH_LOG_LEVEL || "0") || 0;
-
-/**
- * Global log level for debugging output.
- * 0 = no logging, 1 = model-level logs, 2 = update logs, 3 = read logs.
- */
-export function setLogLevel(level: number) {
-    logLevel = level;
-}
+// Get log level from environment variable
+// 0: no logging (default), 1: model-level logs, 2: add update logs, 3: add read logs
+export const logLevel = parseInt(process.env.EDINBURGH_LOG_LEVEL || "0") || 0;
 
 /** @internal Symbol used to access the underlying model from a proxy */
 export declare const TARGET_SYMBOL: unique symbol;

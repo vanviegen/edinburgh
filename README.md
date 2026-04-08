@@ -83,6 +83,15 @@ When using TypeScript to transpile to JavaScript, make sure to enable the follow
 }
 ```
 
+## Logging
+
+You can enable debug logging to stdout by setting the `EDINBURGH_LOG_LEVEL` environment variable to a number from 0 to 3. Higher numbers produce more verbose logs, including model-level operations, updates, and reads.
+
+- 0: no logging (default)
+- 1: model-level logs
+- 2: + update logs
+- 3: + read logs
+
 ## API Reference
 
 The following is auto-generated from `src/edinburgh.ts`:
@@ -724,17 +733,6 @@ Prints all indexes and their data to the console for inspection.
 This is primarily useful for development and debugging purposes.
 
 **Signature:** `() => void`
-
-### setLogLevel · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L86)
-
-Global log level for debugging output.
-0 = no logging, 1 = model-level logs, 2 = update logs, 3 = read logs.
-
-**Signature:** `(level: number) => void`
-
-**Parameters:**
-
-- `level: number`
 
 ### BaseIndex · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L128)
 
