@@ -47,13 +47,14 @@ export {
 
 export { BaseIndex, UniqueIndex, PrimaryIndex, SecondaryIndex } from './indexes.js';
 
-export { modelRegistry } from './models.js';
+export { type Change } from './models.js';
 export type { Transaction } from './models.js';
 export { DatabaseError } from "olmdb/lowlevel";
 export { runMigration } from './migrate.js';
 export type { MigrationOptions, MigrationResult } from './migrate.js';
 
 let olmdbReady = false;
+let maxRetryCount = 6;
 
 /**
  * Initialize the database with the specified directory path.
@@ -136,7 +137,7 @@ export async function transact<T>(fn: () => T): Promise<T> {
     }
 
     // try {
-        for (let retryCount = 0; retryCount < 6; retryCount++) {
+        for (let retryCount = 0; retryCount < maxRetryCount; retryCount++) {
             const txnId = lowlevel.startTransaction();
             const txn: Transaction = { id: txnId, instances: new Set(), instancesByPk: new Map() };
             const onSaveItems: Map<Model<unknown>, Change> | undefined = onSaveCallback ? new Map() : undefined;
@@ -200,6 +201,16 @@ export async function transact<T>(fn: () => T): Promise<T> {
     // }
 }
 
+/**
+ * Set the maximum number of retries for a transaction in case of conflicts.
+ * The default value is 6. Setting it to 0 will disable retries and cause transactions to fail immediately on conflict.
+ *
+ * @param count The maximum number of retries for a transaction.
+ */
+export function setMaxRetryCount(count: number) {
+    maxRetryCount = count;
+}
+
 let onSaveCallback: ((commitId: number, items: Map<Model<any>, Change>) => void) | undefined;
  
 /**
@@ -216,19 +227,25 @@ export function setOnSaveCallback(callback: ((commitId: number, items: Map<Model
 
 
 export async function deleteEverything(): Promise<void> {
-    await transact(() => {
-        const txn = currentTxn();
-        const iteratorId = lowlevel.createIterator(txn.id, undefined, undefined, false);
-        try {
-            while (true) {
-                const raw = lowlevel.readIterator(iteratorId);
-                if (!raw) break;
-                lowlevel.del(txn.id, raw.key);
+    let done = false;
+    while (!done) {
+        await transact(() => {
+            const txn = currentTxn();
+            const iteratorId = lowlevel.createIterator(txn.id, undefined, undefined, false);
+            const deadline = Date.now() + 150;
+            let count = 0;
+            try {
+                while (true) {
+                    const raw = lowlevel.readIterator(iteratorId);
+                    if (!raw) { done = true; break; }
+                    lowlevel.del(txn.id, raw.key);
+                    if (++count >= 4096 || Date.now() >= deadline) break;
+                }
+            } finally {
+                lowlevel.closeIterator(iteratorId);
             }
-        } finally {
-            lowlevel.closeIterator(iteratorId);
-        }
-    });
+        });
+    }
     // Re-init indexes since metadata was deleted
     for (const model of Object.values(modelRegistry)) {
         if (!model.fields) continue;

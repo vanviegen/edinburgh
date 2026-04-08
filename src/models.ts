@@ -626,9 +626,14 @@ export abstract class Model<SUB> {
         return this.validate().length === 0;
     }
 
-    getState(): "deleted" | "created" | "loaded" {
+    getState(): "deleted" | "created" | "loaded" | "lazy" {
         if (this._oldValues === null) return "deleted";
         if (this._oldValues === undefined) return "created";
+        for(const [key,descr] of Object.entries(this.constructor._primary!._lazyDescriptors)) {
+            if (descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, key)?.get) {
+                return "lazy";
+            }
+        }
         return "loaded";
     }
 

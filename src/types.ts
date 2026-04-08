@@ -726,13 +726,14 @@ export function serializeType(arg: TypeWrapper<any>, pack: DataPack) {
 const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (pack: DataPack, featureFlags: number) => TypeWrapper<any>}> = {
     string: string,
     number: number,
+    dateTime: dateTime,
+    boolean: boolean,
     array: ArrayType,
+    set: SetType,
     or: OrType,
     literal: LiteralType,
-    boolean: boolean,
     id: identifier,
     link: LinkType,
-    set: SetType
 };
 
 /**
@@ -744,6 +745,7 @@ const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (pack: 
 export function deserializeType(pack: DataPack, featureFlags: number): TypeWrapper<any> {
     const kind = pack.readString();
     const TypeWrapper = TYPE_WRAPPERS[kind];
+    if (!TypeWrapper) throw new DatabaseError(`Unknown field type in database: ${kind}`, 'CONSISTENCY_ERROR');
     if ('deserializeType' in TypeWrapper) {
         return TypeWrapper.deserializeType(pack, featureFlags);
     } else {
