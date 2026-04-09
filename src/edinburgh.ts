@@ -2,7 +2,7 @@ import * as lowlevel from "olmdb/lowlevel";
 import { init as olmdbInit, DatabaseError } from "olmdb/lowlevel";
 import { modelRegistry, txnStorage, currentTxn } from "./models.js";
 
-let initNeeded = false;
+let initNeeded = true;
 export function scheduleInit() { initNeeded = true; }
 
 
@@ -122,13 +122,13 @@ export async function transact<T>(fn: () => T): Promise<T> {
             pendingInit = (async () => {
                 if (!olmdbReady) olmdbInit('.edinburgh');
                 olmdbReady = true;
-
                 initNeeded = false;
                 for (const model of Object.values(modelRegistry)) {
                     await model._delayedInit();
                 }
-                pendingInit = undefined;
             })();
+            await pendingInit;
+            pendingInit = undefined;
         }
     }
 
