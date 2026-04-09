@@ -70,7 +70,9 @@ await E.transact(() => {
 });    
 ```
 
-## TypeScript Configuration
+## Tutorial
+
+### TypeScript Configuration
 
 When using TypeScript to transpile to JavaScript, make sure to enable the following options in your `tsconfig.json`:
 
@@ -83,14 +85,321 @@ When using TypeScript to transpile to JavaScript, make sure to enable the follow
 }
 ```
 
-## Logging
+### Defining Models
 
-You can enable debug logging to stdout by setting the `EDINBURGH_LOG_LEVEL` environment variable to a number from 0 to 3. Higher numbers produce more verbose logs, including model-level operations, updates, and reads.
+Models are classes that extend `E.Model<Self>` and use the `@E.registerModel` decorator:
+
+```typescript
+import * as E from "edinburgh";
+
+@E.registerModel
+class User extends E.Model<User> {
+  static pk = E.primary(User, "id");
+
+  id = E.field(E.identifier);
+  name = E.field(E.string);
+  email = E.field(E.string);
+  age = E.field(E.number);
+}
+```
+
+Instance fields are declared with `E.field(type, options?)`. Available types:
+
+| Type | TypeScript type | Notes |
+|------|----------------|-------|
+| `E.string` | `string` | |
+| `E.orderedString` | `string` | Lexicographic sort in indexes; no null bytes |
+| `E.number` | `number` | |
+| `E.boolean` | `boolean` | |
+| `E.dateTime` | `Date` | Defaults to `new Date()` |
+| `E.identifier` | `string` | Auto-generated 8-char unique ID |
+| `E.opt(T)` | `T \| undefined` | Makes any type optional |
+| `E.or(A, B, ...)` | `A \| B \| ...` | Union type; args can be types or literal values |
+| `E.literal(v)` | literal type | Constant value; defaults to that value |
+| `E.array(T)` | `T[]` | Optional `{min, max}` constraints |
+| `E.link(Model)` | `Model` | Foreign key, lazy-loaded on access |
+
+#### Defaults
+
+```typescript
+@E.registerModel
+class Post extends E.Model<Post> {
+  static pk = E.primary(Post, "id");
+
+  id = E.field(E.identifier);  // auto-generated
+  title = E.field(E.string);
+  status = E.field(E.or("draft", "published"), {default: "draft"});
+  tags = E.field(E.array(E.string), {default: () => []});  // use function for mutable defaults
+  createdAt = E.field(E.dateTime);  // dateTime defaults to new Date()
+}
+```
+
+### Transactions
+
+All database operations must run inside `E.transact()`:
+
+```typescript
+// Initialize (optional — defaults to ".edinburgh" directory)
+E.init("./my-database");
+
+// Create
+await E.transact(() => {
+  const user = new User({name: "Alice", email: "alice@example.com", age: 30});
+  // user.id is auto-generated
+});
+
+// Read + Update
+await E.transact(() => {
+  const user = User.byEmail.get("alice@example.com");
+  if (user) user.age++;
+});
+
+// Return values from transactions
+const name = await E.transact(() => {
+  const user = User.byEmail.get("alice@example.com");
+  return user?.name;
+});
+```
+
+Transactions auto-retry on conflict (up to 6 times by default). Keep transaction functions idempotent.
+
+### Indexes
+
+Edinburgh supports three index types:
+
+```typescript
+@E.registerModel
+class Product extends E.Model<Product> {
+  static pk = E.primary(Product, "sku");           // primary: one per model, stores data
+  static byName = E.unique(Product, "name");       // unique: enforces uniqueness + fast lookup
+  static byCategory = E.index(Product, "category");// secondary: non-unique, for queries
+
+  sku = E.field(E.string);
+  name = E.field(E.string);
+  category = E.field(E.string);
+  price = E.field(E.number);
+}
+```
+
+If no `E.primary()` is declared, Edinburgh auto-creates one on an `id` field (adding `E.identifier` if missing).
+
+#### Lookups
+
+```typescript
+await E.transact(() => {
+  // Primary key lookup
+  const p = Product.pk.get("SKU-001");
+
+  // Unique index lookup
+  const p2 = Product.byName.get("Widget");
+
+  // All return undefined if not found
+});
+```
+
+#### Range Queries
+
+All index types support `.find()` for range iteration:
+
+```typescript
+await E.transact(() => {
+  // Exact match
+  for (const p of Product.byCategory.find({is: "electronics"})) {
+    console.log(p.name);
+  }
+
+  // Range (inclusive)
+  for (const p of Product.pk.find({from: "A", to: "M"})) {
+    console.log(p.sku);
+  }
+
+  // Exclusive bounds
+  for (const p of Product.pk.find({after: "A", before: "M"})) { ... }
+
+  // Open-ended
+  for (const p of Product.pk.find({from: "M"})) { ... }
+
+  // Reverse
+  for (const p of Product.pk.find({reverse: true})) { ... }
+
+  // Count and fetch helpers
+  const count = Product.byCategory.find({is: "electronics"}).count();
+  const first = Product.byCategory.find({is: "electronics"}).fetch(); // first match or undefined
+});
+```
+
+#### Composite Indexes
+
+```typescript
+@E.registerModel
+class Event extends E.Model<Event> {
+  static pk = E.primary(Event, ["year", "month", "id"]);
+
+  year = E.field(E.number);
+  month = E.field(E.number);
+  id = E.field(E.identifier);
+  title = E.field(E.string);
+}
+
+await E.transact(() => {
+  // Prefix matching — find all events in 2025
+  for (const e of Event.pk.find({is: [2025]})) { ... }
+
+  // Find events in March 2025
+  for (const e of Event.pk.find({is: [2025, 3]})) { ... }
+});
+```
+
+### Relationships (Links)
+
+Use `E.link(Model)` for foreign keys:
+
+```typescript
+@E.registerModel
+class Author extends E.Model<Author> {
+  static pk = E.primary(Author, "id");
+  id = E.field(E.identifier);
+  name = E.field(E.string);
+}
+
+@E.registerModel
+class Book extends E.Model<Book> {
+  static pk = E.primary(Book, "id");
+  id = E.field(E.identifier);
+  title = E.field(E.string);
+  author = E.field(E.link(Author));
+}
+
+await E.transact(() => {
+  const author = new Author({name: "Tolkien"});
+  const book = new Book({title: "The Hobbit", author});
+
+  // Later: linked models are lazy-loaded on property access
+  const b = Book.pk.get(book.id)!;
+  console.log(b.author.name);  // loads Author automatically (~1µs)
+});
+```
+
+### Deleting
+
+```typescript
+await E.transact(() => {
+  const user = User.pk.get(someId);
+  if (user) user.delete();
+});
+```
+
+### Model Utilities
+
+```typescript
+await E.transact(() => {
+  const user = new User({name: "Bob", email: "bob@example.com", age: 25});
+
+  user.validate();     // returns Error[]
+  user.isValid();      // returns boolean
+  user.getState();     // "created" | "loaded" | "lazy" | "deleted"
+  user.getPrimaryKey(); // Uint8Array
+  user.preventPersist(); // exclude from commit
+});
+
+// findAll iterates all instances
+await E.transact(() => {
+  for (const user of User.findAll()) { ... }
+  for (const user of User.findAll({reverse: true})) { ... }
+});
+
+// replaceInto: upsert by primary key
+await E.transact(() => {
+  User.replaceInto({id: existingId, name: "Updated Name", email: "new@example.com", age: 30});
+});
+```
+
+### Batch Processing
+
+For large datasets, `batchProcess` auto-commits in batches:
+
+```typescript
+await Product.byCategory.batchProcess({is: "old"}, (product) => {
+  product.category = "archived";
+});
+// Commits every ~1 second or 4096 rows (configurable via limitSeconds, limitRows)
+```
+
+### Schema Evolution
+
+Edinburgh handles schema changes automatically:
+
+- **Adding/removing fields**: Old rows are lazily migrated on read. New fields use their default value.
+- **Changing field types**: Requires a `static migrate()` function.
+- **Adding/removing indexes**: Requires running `npx migrate-edinburgh`.
+
+```typescript
+@E.registerModel
+class User extends E.Model<User> {
+  static pk = E.primary(User, "id");
+  id = E.field(E.identifier);
+  name = E.field(E.string);
+  role = E.field(E.string, {default: "user"});  // new field
+
+  static migrate(record: Record<string, any>) {
+    record.role ??= "user";  // provide value for old rows
+  }
+}
+```
+
+Run `npx migrate-edinburgh` (or call `E.runMigration()`) after adding/removing indexes, changing index field types, or when a `migrate()` function affects indexed fields.
+
+### preCommit Hook
+
+Compute derived fields before data is written:
+
+```typescript
+@E.registerModel
+class Article extends E.Model<Article> {
+  static pk = E.primary(Article, "id");
+  id = E.field(E.identifier);
+  title = E.field(E.string);
+  slug = E.field(E.string);
+
+  preCommit() {
+    this.slug = this.title.toLowerCase().replace(/\s+/g, "-");
+  }
+}
+```
+
+### Change Tracking
+
+Monitor commits with `setOnSaveCallback`:
+
+```typescript
+E.setOnSaveCallback((commitId, items) => {
+  for (const [instance, change] of items) {
+    if (change === "created") { /* new record */ }
+    else if (change === "deleted") { /* removed */ }
+    else { /* change is an object with old values of modified fields */ }
+  }
+});
+```
+
+### Logging
+
+Enable debug logging by setting the `EDINBURGH_LOG_LEVEL` environment variable (0–3). Higher numbers produce more verbose logs.
 
 - 0: no logging (default)
 - 1: model-level logs
 - 2: + update logs
 - 3: + read logs
+
+### AI Integration
+
+If you use Claude Code, GitHub Copilot or another AI agent that supports Skills, Edinburgh includes a `skill/` directory in its npm package that provides specialized knowledge to the AI about how to use the library effectively.
+
+Symlink the skill into your project's `.claude/skills` directory:
+
+```bash
+mkdir -p .claude/skills
+ln -s ../../node_modules/edinburgh/skill .claude/skills/edinburgh
+```
 
 ## API Reference
 
