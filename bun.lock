@@ -5,7 +5,7 @@
     "": {
       "name": "edinburgh",
       "dependencies": {
-        "olmdb": "^0.4.0",
+        "olmdb": "^0.4.1",
       },
       "devDependencies": {
         "@types/bun": "^1.2.16",
@@ -278,7 +278,7 @@
 
     "nopt": ["nopt@8.1.0", "", { "dependencies": { "abbrev": "^3.0.0" }, "bin": { "nopt": "bin/nopt.js" } }, "sha512-ieGu42u/Qsa4TFktmaKEwM6MQH0pOWnaB3htzh0JRtx84+Mebc0cbZYN5bC+6WTZ4+77xrL9Pn5m7CV6VIkV7A=="],
 
-    "olmdb": ["olmdb@0.4.0", "", { "dependencies": { "node-gyp": "^11.2.0", "readme-tsdoc": "^1.1.4" } }, "sha512-gxJFuQ0l52cuD5WIH1MA8ASLrG5MJwmkWaodgteSVqPP+f9ZIMiJVttKSoievqcgEHVGoZeOK0Z+Ixo1kLECgg=="],
+    "olmdb": ["olmdb@0.4.1", "", { "dependencies": { "node-gyp": "^11.2.0", "readme-tsdoc": "^1.1.4" } }, "sha512-hLoreDvIUfCH5eE1T8gCtL5f5jSJEqcf7uP5JliFuBPnso4xoiPR18eaw9IBD1iW6XIAExpnvoji2F+9+taqaQ=="],
 
     "p-map": ["p-map@7.0.4", "", {}, "sha512-tkAQEw8ysMzmkhgw8k+1U/iPhWNhykKnSk4Rd5zLoPJCuJaGRPo6YposrZgaxHKzDHdDWWZvE/Sk7hsL2X/CpQ=="],
 

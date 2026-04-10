@@ -250,6 +250,32 @@ await E.transact(() => {
 });
 ```
 
+#### Non-Persistent Properties
+
+You can freely add regular methods, getters, and other non-persistent properties to model classes. These work normally in JavaScript but are **not stored in the database** and **not synchronized** across transactions or processes.
+
+```typescript
+@E.registerModel
+class User extends E.Model<User> {
+  static pk = E.primary(User, "id");
+  id = E.field(E.identifier);
+  firstName = E.field(E.string);
+  lastName = E.field(E.string);
+
+  // Non-persisted property
+  cachedFullName?: string;
+
+  get fullName(): string {
+    this.cachedFullName ??= `${this.firstName} ${this.lastName}`;
+    return this.cachedFullName;
+  }
+
+  greet(): string {
+    return `Hello, ${this.fullName}!`;
+  }
+}
+```
+
 ### Relationships (Links)
 
 Use `E.link(Model)` for foreign keys:

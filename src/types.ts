@@ -584,7 +584,7 @@ export const orderedString = new OrderedStringType() as TypeWrapper<string>;
 /** Type wrapper instance for the number type. */
 export const number = new NumberType() as TypeWrapper<number>;
 
-/** Type wrapper instance for the date/time type. */
+/** Type wrapper instance for the date/time type. Stored without timezone info, rounded to whole seconds. */
 export const dateTime = new DateTimeType() as TypeWrapper<Date>;
 
 /** Type wrapper instance for the boolean type. */
