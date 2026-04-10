@@ -1880,3 +1880,93 @@ test("batchProcess respects range options via secondary index", async () => {
     expect(seen.sort((a, b) => a - b)).toEqual([3, 4, 5, 6, 7]);
 });
 
+test("Record type stores and retrieves key-value objects", async () => {
+    @E.registerModel
+    class Config extends E.Model<Config> {
+        static pk = E.primary(Config, ["name"]);
+
+        name = E.field(E.string);
+        scores = E.field(E.record(E.number));
+        metadata = E.field(E.record(E.or(E.string, E.number)));
+    }
+
+    await E.transact(() => {
+        const c = new Config({ name: "test", scores: { alice: 10, bob: 20 }, metadata: { version: 1, env: "prod" } });
+        expect(c.scores).toEqual({ alice: 10, bob: 20 });
+        expect(c.metadata).toEqual({ version: 1, env: "prod" });
+    });
+
+    // Verify persistence across transactions
+    await E.transact(() => {
+        const c = Config.pk.get("test")!;
+        expect(c.scores).toEqual({ alice: 10, bob: 20 });
+        expect(c.metadata).toEqual({ version: 1, env: "prod" });
+
+        // Modify and confirm
+        c.scores = { charlie: 30 };
+    });
+
+    await E.transact(() => {
+        const c = Config.pk.get("test")!;
+        expect(c.scores).toEqual({ charlie: 30 });
+    });
+});
+
+test("Record type with numeric keys", async () => {
+    @E.registerModel
+    class NumKeyModel extends E.Model<NumKeyModel> {
+        static pk = E.primary(NumKeyModel, ["id"]);
+
+        id = E.field(E.identifier);
+        data = E.field(E.record(E.string));
+    }
+
+    await E.transact(() => {
+        const m = new NumKeyModel({ data: { 1: "one", 2: "two", hello: "world" } });
+        expect(m.data[1]).toBe("one");
+        expect(m.data[2]).toBe("two");
+        expect(m.data["hello"]).toBe("world");
+    });
+});
+
+test("Record type defaults to empty object", async () => {
+    @E.registerModel
+    class RecDefault extends E.Model<RecDefault> {
+        static pk = E.primary(RecDefault, ["id"]);
+
+        id = E.field(E.identifier);
+        tags = E.field(E.record(E.number));
+    }
+
+    await E.transact(() => {
+        const r = new RecDefault();
+        expect(r.tags).toEqual({});
+    });
+});
+
+test("Record type validates values", async () => {
+    @E.registerModel
+    class RecValidation extends E.Model<RecValidation> {
+        static pk = E.primary(RecValidation, ["id"]);
+
+        id = E.field(E.identifier);
+        counts = E.field(E.record(E.number));
+    }
+
+    await E.transact(() => {
+        const r = new RecValidation({ counts: { a: 1, b: 2 } });
+        expect(r.isValid()).toBe(true);
+
+        // @ts-expect-error - string value for number record
+        r.counts = { a: "not a number" };
+        expect(r.isValid()).toBe(false);
+
+        // @ts-expect-error - non-object value
+        r.counts = "not an object";
+        expect(r.isValid()).toBe(false);
+
+        r.counts = { x: 42 };
+        expect(r.isValid()).toBe(true);
+    });
+});
+

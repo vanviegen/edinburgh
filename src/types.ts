@@ -343,6 +343,86 @@ export class SetType<T> extends TypeWrapper<Set<T>> {
 
 
 /**
+* @internal Type wrapper for Record<string | number, T> values.
+* @template T - The type of record values.
+*/
+class RecordType<T> extends TypeWrapper<Record<string | number, T>> {
+    kind = 'record';
+
+    constructor(public inner: TypeWrapper<T>) {
+        super();
+    }
+
+    serialize(value: Record<string | number, T>, pack: DataPack) {
+        pack.writeCollectionBoundary('object');
+        for (const key of Object.keys(value)) {
+            pack.writeObjectKey(key);
+            this.inner.serialize(value[key], pack);
+        }
+        pack.writeCollectionBoundary('end');
+    }
+
+    deserialize(pack: DataPack): Record<string | number, T> {
+        pack.readCollectionBoundary('object');
+        const result: Record<string | number, T> = {};
+        while (true) {
+            const key = pack.read();
+            if (key === DataPack.EOD) break;
+            result[key] = this.inner.deserialize(pack);
+        }
+        return result;
+    }
+
+    getError(value: Record<string | number, T>) {
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+            return new DatabaseError(`Expected object, got ${typeof value}`, 'INVALID_TYPE');
+        }
+        for (const key of Object.keys(value)) {
+            const error = this.inner.getError(value[key]);
+            if (error) return addErrorPath(error, key);
+        }
+    }
+
+    serializeType(pack: DataPack): void {
+        serializeType(this.inner, pack);
+    }
+
+    static deserializeType(pack: DataPack, featureFlags: number): RecordType<any> {
+        const inner = deserializeType(pack, featureFlags);
+        return new RecordType(inner);
+    }
+
+    default(): Record<string | number, T> {
+        return {};
+    }
+
+    clone(value: Record<string | number, T>): Record<string | number, T> {
+        const result: Record<string | number, T> = {};
+        for (const key of Object.keys(value)) {
+            result[key] = this.inner.clone(value[key]);
+        }
+        return result;
+    }
+
+    equals(a: Record<string | number, T>, b: Record<string | number, T>): boolean {
+        const keysA = Object.keys(a);
+        const keysB = Object.keys(b);
+        if (keysA.length !== keysB.length) return false;
+        for (const key of keysA) {
+            if (!(key in b) || !this.inner.equals(a[key], b[key])) return false;
+        }
+        return true;
+    }
+
+    toString() { return `record<${this.inner}>`; }
+
+    getLinkedModel() {
+        return this.inner.getLinkedModel();
+    }
+}
+
+
+/**
 * @internal Type wrapper for union/discriminated union types.
 * @template T - The union type this wrapper represents.
 */
@@ -679,6 +759,21 @@ export function set<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: n
 }
 
 /**
+* Create a Record type wrapper for key-value objects with string or number keys.
+* @template T - The value type.
+* @param inner - Type wrapper for record values.
+* @returns A record type instance.
+*
+* @example
+* ```typescript
+* const scores = E.record(E.number);  // Record<string | number, number>
+* ```
+*/
+export function record<const T>(inner: TypeWrapper<T>): TypeWrapper<Record<string | number, T>> {
+    return new RecordType(wrapIfLiteral(inner));
+}
+
+/**
 * Create a link type wrapper for model relationships.
 * @template T - The target model class.
 * @param TargetModel - The model class this link points to.
@@ -730,6 +825,7 @@ const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (pack: 
     boolean: boolean,
     array: ArrayType,
     set: SetType,
+    record: RecordType,
     or: OrType,
     literal: LiteralType,
     id: identifier,

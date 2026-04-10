@@ -29,6 +29,8 @@ export {
     opt,
     or,
     array,
+    set,
+    record,
     literal,
     link,
 } from "./types.js";

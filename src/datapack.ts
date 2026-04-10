@@ -14,6 +14,8 @@ const COLORS = USE_COLORS ? ['\x1b[32m', '\x1b[33m', '\x1b[34m', '\x1b[35m'] : [
 const RESET_COLOR = USE_COLORS ? '\x1b[0m' : '';
 const ERROR_COLOR = USE_COLORS ? '\x1b[31m' : ''; // red
 
+const COLLECTION_BOUNDARIES = {'array': 5, 'object': 6, 'map': 7, 'set': 8, 'end': 9};
+
 let toStringTermCount = 0;
 let useExtendedLogging = typeof process !== 'undefined' ? !!process.env?.DATAPACK_EXTENDED_LOGGING : false;
 
@@ -32,6 +34,8 @@ export default class DataPack {
 
     public readPos: number = 0;
     public writePos: number = 0;
+
+    static EOD = EOD;
     
     /**
      * Backward compatibility: Access to the internal buffer
@@ -578,22 +582,60 @@ export default class DataPack {
      * });
      */
     writeCollection(type: 'array' | 'set', bodyFunc: (addField: (value: any) => void) => void): DataPack;
-    writeCollection(type: 'object', bodyFunc: (addField: (field: number|string|symbol, value: any) => void) => void): DataPack;
+    writeCollection(type: 'object', bodyFunc: (addField: (field: number|string, value: any) => void) => void): DataPack;
     writeCollection(type: 'map', bodyFunc: (addField: (field: any, value: any) => void) => void): DataPack;
 
-    writeCollection(type: string, bodyFunc: (addField: (a: any, b?: any) => void) => void): DataPack {
-        let subType = {'array': 5, 'object': 6, 'map': 7, 'set': 8}[type];
-        if (!subType) throw new Error(`Invalid collection type: ${type}`);
-        this.buffer[this.writePos++] = (4 << 5) | subType; // Collection start
+    writeCollection(type: 'array' | 'set' | 'object' | 'map', bodyFunc: (addField: (a: any, b?: any) => void) => void): DataPack {
+        this.writeCollectionBoundary(type);
 
         bodyFunc((type === 'array' || type === 'set') ? (value: any) => {
             this.write(value);
-        } : (name, value) => {
+        } : (type === 'object') ? (name, value) => {
+            this.writeObjectKey(name);
+            this.write(value);
+        } : (name, value) => { // map
             this.write(name);
             this.write(value);
         });
-        this.buffer[this.writePos++] = (4 << 5) | 9; // EOD
+
+        return this.writeCollectionBoundary('end');
+    }
+
+    /**
+     * Write a collection boundary marker (start or end) for arrays, sets, objects, or maps.
+     * This is a low-level method for advanced use cases. Use `writeCollection` (or just `write`)
+     * if possible.
+     */
+    writeCollectionBoundary(marker: 'array' | 'set' | 'object' | 'map' | 'end'): DataPack {
+        let subType = COLLECTION_BOUNDARIES[marker];
+        if (!subType) throw new Error(`Invalid collection type: ${marker}`);
+        this.buffer[this.writePos++] = (4 << 5) | subType;
         return this;
+    }
+
+    /**
+     * Writes either a string or a number, converting strings to numbers if they represent javascript-safe integers.
+     * This is useful for writing object keys, which are always strings but may be more compactly represented as numbers.
+     */
+    writeObjectKey(key: number | string): void {
+        if (typeof key === 'string') {
+            const num = parseInt(key, 10);
+            if (num.toString() == key) key = num;
+
+        } else if (typeof key !== 'number') {
+            key = '' + key;
+        }
+        this.write(key);
+    }
+
+    /**
+     * Read and consume a collection boundary marker, validating it matches the expected type.
+     */
+    readCollectionBoundary(expected: 'array' | 'set' | 'object' | 'map' | 'end'): void {
+        if (this.readPos >= this.writePos) this.notEnoughData('collection boundary');
+        const byte = this.buffer[this.readPos++];
+        const expectedByte = (4 << 5) | COLLECTION_BOUNDARIES[expected];
+        if (byte !== expectedByte) throw new Error(`Expected ${expected} boundary but got byte ${byte}`);
     }
 
     /** 
