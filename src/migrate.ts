@@ -1,7 +1,7 @@
 import * as lowlevel from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
 import { modelRegistry, currentTxn, Transaction } from "./models.js";
-import { dbDel, toBuffer } from "./utils.js";
+import { dbDel, toBuffer, bytesEqual } from "./utils.js";
 import { PrimaryIndex } from "./indexes.js";
 import { deserializeType, TypeWrapper } from "./types.js";
 import { transact } from "./edinburgh.js";
@@ -134,10 +134,13 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
         const fieldNames: string[] = [];
         const fieldTypes: TypeWrapper<any>[] = [];
         // Read field names and types (may be followed by separator + pk fields for non-primary indexes)
+        // Computed indexes (fn-unique, fn-secondary) store a hash instead of field name/type pairs.
+        const isComputed = typeName.startsWith('fn-');
         while (kb.readAvailable()) {
             const name = kb.read();
             if (typeof name !== 'string') break; // 'undefined' separator before pk fields
             fieldNames.push(name);
+            if (isComputed) break; // computed: just the hash, no types
             fieldTypes.push(deserializeType(kb, 0));
         }
         const id = new DataPack(valueBuf).readNumber();
@@ -180,13 +183,24 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
                         sec._write(txn, keyBuf, record as any);
                         upgraded++;
                     } else if (preMigrate) {
-                        // Existing secondary, update if migrate changed any of its fields
-                        for (const [field, type] of sec._fieldTypes.entries()) {
-                            if (!type.equals(preMigrate[field], record[field])) {
+                        if (sec._computeFn) {
+                            // Computed indexes: compare serialized keys to avoid unnecessary re-indexing
+                            const oldKeyBytes = sec._serializeKeyFields(preMigrate).toUint8Array();
+                            const newKeyBytes = sec._serializeKeyFields(record).toUint8Array();
+                            if (!bytesEqual(oldKeyBytes, newKeyBytes)) {
                                 sec._delete(txn, keyBuf, preMigrate as any);
                                 sec._write(txn, keyBuf, record as any);
                                 upgraded++;
-                                break;
+                            }
+                        } else {
+                            // Existing secondary, update if migrate changed any of its fields
+                            for (const [field, type] of sec._fieldTypes.entries()) {
+                                if (!type.equals(preMigrate[field], record[field])) {
+                                    sec._delete(txn, keyBuf, preMigrate as any);
+                                    sec._write(txn, keyBuf, record as any);
+                                    upgraded++;
+                                    break;
+                                }
                             }
                         }
                     }

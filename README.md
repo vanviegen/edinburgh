@@ -278,6 +278,41 @@ class User extends E.Model<User> {
 }
 ```
 
+#### Computed Indexes
+
+Instead of naming fields, you can pass a **function** to `E.unique()` or `E.index()`. The function receives a model instance and returns an **array** of index key values. Each element creates a separate index entry, enabling multi-value indexes. Return `[]` to skip indexing for that instance (partial index).
+
+```typescript
+@E.registerModel
+class Article extends E.Model<Article> {
+  static pk = E.primary(Article, "id");
+  static byFullName = E.unique(Article, (a: Article) => [`${a.firstName} ${a.lastName}`]);
+  static byWord = E.index(Article, (a: Article) => a.title.toLowerCase().split(" "));
+  static byDomain = E.index(Article, (a: Article) => a.email ? [a.email.split("@")[1]] : []);
+
+  id = E.field(E.identifier);
+  firstName = E.field(E.string);
+  lastName = E.field(E.string);
+  title = E.field(E.string);
+  email = E.field(E.opt(E.string));
+}
+
+await E.transact(() => {
+  new Article({ firstName: "Jane", lastName: "Doe", title: "Hello World", email: "jane@acme.com" });
+
+  // Lookup via computed unique index
+  const jane = Article.byFullName.get("Jane Doe");
+
+  // Multi-value: each word in the title is indexed separately
+  for (const a of Article.byWord.find({is: "hello"})) { ... }
+
+  // Partial index: articles without email are skipped
+  for (const a of Article.byDomain.find({is: "acme.com"})) { ... }
+});
+```
+
+Computed indexes also support `find()` range queries and `batchProcess()`, just like field-based indexes.
+
 ### Relationships (Links)
 
 Use `E.link(Model)` for foreign keys:
@@ -1067,19 +1102,24 @@ class Post extends E.Model<Post> {
 
 ### index · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
-Create a secondary index on model fields.
+Create a secondary index on model fields, or a computed secondary index using a function.
 
-**Signature:** `{ <M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): SecondaryIndex<M, [F]>; <M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): SecondaryIndex<...>; }`
+For field-based indexes, pass a field name or array of field names.
+For computed indexes, pass a function that takes a model instance and returns an array of
+index keys. Return `[]` to skip indexing for that instance. Each array element creates a
+separate index entry, enabling multi-value indexes (e.g., indexing by each word in a name).
+
+**Signature:** `{ <M extends typeof Model, V>(MyModel: M, fn: (instance: InstanceType<M>) => V[]): SecondaryIndex<M, [], [V]>; <M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): SecondaryIndex<...>; <M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(...`
 
 **Type Parameters:**
 
 - `M extends typeof Model` - The model class.
-- `F extends (keyof InstanceType<M> & string)` - The field name (for single field index).
+- `V` - The computed index value type (for function-based indexes).
 
 **Parameters:**
 
 - `MyModel: M` - - The model class to create the index for.
-- `field: F` - - Single field name for simple indexes.
+- `fn: (instance: InstanceType<M>) => V[]`
 
 **Returns:** A new SecondaryIndex instance.
 
@@ -1089,6 +1129,7 @@ Create a secondary index on model fields.
 class User extends E.Model<User> {
   static byAge = E.index(User, "age");
   static byTagsDate = E.index(User, ["tags", "createdAt"]);
+  static byWord = E.index(User, (u: User) => u.name.split(" "));
 }
 ```
 
@@ -1121,19 +1162,24 @@ class User extends E.Model<User> {
 
 ### unique · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
-Create a unique index on model fields.
+Create a unique index on model fields, or a computed unique index using a function.
 
-**Signature:** `{ <M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): UniqueIndex<M, [F]>; <M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): UniqueIndex<...>; }`
+For field-based indexes, pass a field name or array of field names.
+For computed indexes, pass a function that takes a model instance and returns an array of
+index keys. Return `[]` to skip indexing for that instance. Each array element creates a
+separate index entry, enabling multi-value indexes (e.g., indexing by each word in a name).
+
+**Signature:** `{ <M extends typeof Model, V>(MyModel: M, fn: (instance: InstanceType<M>) => V[]): UniqueIndex<M, [], [V]>; <M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): UniqueIndex<...>; <M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyMode...`
 
 **Type Parameters:**
 
 - `M extends typeof Model` - The model class.
-- `F extends (keyof InstanceType<M> & string)` - The field name (for single field index).
+- `V` - The computed index value type (for function-based indexes).
 
 **Parameters:**
 
 - `MyModel: M` - - The model class to create the index for.
-- `field: F` - - Single field name for simple indexes.
+- `fn: (instance: InstanceType<M>) => V[]`
 
 **Returns:** A new UniqueIndex instance.
 
@@ -1143,6 +1189,7 @@ Create a unique index on model fields.
 class User extends E.Model<User> {
   static byEmail = E.unique(User, "email");
   static byNameAge = E.unique(User, ["name", "age"]);
+  static byFullName = E.unique(User, (u: User) => [`${u.firstName} ${u.lastName}`]);
 }
 ```
 
@@ -1155,7 +1202,7 @@ This is primarily useful for development and debugging purposes.
 
 **Signature:** `() => void`
 
-### BaseIndex · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L129)
+### BaseIndex · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L125)
 
 Base class for database indexes for efficient lookups on model fields.
 
@@ -1165,6 +1212,7 @@ Indexes enable fast queries on specific field combinations and enforce uniquenes
 
 - `M extends typeof Model` - The model class this index belongs to.
 - `F extends readonly (keyof InstanceType<M> & string)[]` - The field names that make up this index.
+- `ARGS extends readonly any[] = IndexArgTypes<M, F>`
 
 **Constructor Parameters:**
 
@@ -1173,21 +1221,21 @@ Indexes enable fast queries on specific field combinations and enforce uniquenes
 
 #### baseIndex.find · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
-**Signature:** `(opts?: FindOptions<IndexArgTypes<M, F>>) => IndexRangeIterator<M>`
+**Signature:** `(opts?: FindOptions<ARGS>) => IndexRangeIterator<M>`
 
 **Parameters:**
 
-- `opts: FindOptions<IndexArgTypes<M, F>>` (optional)
+- `opts: FindOptions<ARGS>` (optional)
 
 #### baseIndex.batchProcess · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
 [object Object],[object Object],[object Object]
 
-**Signature:** `(opts: FindOptions<IndexArgTypes<M, F>> & { limitSeconds?: number; limitRows?: number; }, callback: (row: InstanceType<M>) => void | Promise<...>) => Promise<...>`
+**Signature:** `(opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number; }, callback: (row: InstanceType<M>) => void | Promise<void>) => Promise<...>`
 
 **Parameters:**
 
-- `opts: FindOptions<IndexArgTypes<M, F>> & { limitSeconds?: number; limitRows?: number }` (optional) - - Query options (same as `find()`), plus:
+- `opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number }` (optional) - - Query options (same as `find()`), plus:
 - `callback: (row: InstanceType<M>) => void | Promise<void>` - - Called for each matching row within a transaction
 
 #### baseIndex.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
@@ -1205,16 +1253,17 @@ Unique index that stores references to the primary key.
 
 - `M extends typeof Model` - The model class this index belongs to.
 - `F extends readonly (keyof InstanceType<M> & string)[]` - The field names that make up this index.
+- `ARGS extends readonly any[] = IndexArgTypes<M, F>`
 
 #### uniqueIndex.get · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
 Get a model instance by unique index key values.
 
-**Signature:** `(...args: IndexArgTypes<M, F>) => InstanceType<M>`
+**Signature:** `(...args: ARGS) => InstanceType<M>`
 
 **Parameters:**
 
-- `args: IndexArgTypes<M, F>` - - The unique index key values.
+- `args: ARGS` - - The unique index key values.
 
 **Returns:** The model instance if found, undefined otherwise.
 
@@ -1273,6 +1322,7 @@ Secondary index for non-unique lookups.
 
 - `M extends typeof Model` - The model class this index belongs to.
 - `F extends readonly (keyof InstanceType<M> & string)[]` - The field names that make up this index.
+- `ARGS extends readonly any[] = IndexArgTypes<M, F>`
 
 ### Change · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L95)
 
@@ -1321,25 +1371,25 @@ Limit migration to specific table names.
 
 **Type:** `string[]`
 
-#### migrationOptions.convertOldPrimaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L22)
+#### migrationOptions.convertOldPrimaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L23)
 
 Whether to convert old primary indices for known tables (default: true).
 
 **Type:** `boolean`
 
-#### migrationOptions.deleteOrphanedIndexes · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L30)
+#### migrationOptions.deleteOrphanedIndexes · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L31)
 
 Whether to delete orphaned secondary/unique indices (default: true).
 
 **Type:** `boolean`
 
-#### migrationOptions.upgradeVersions · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L38)
+#### migrationOptions.upgradeVersions · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L39)
 
 Whether to upgrade rows to the latest version (default: true).
 
 **Type:** `boolean`
 
-#### migrationOptions.onProgress · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L43)
+#### migrationOptions.onProgress · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L44)
 
 Progress callback.
 
@@ -1347,7 +1397,7 @@ Progress callback.
 
 ### MigrationResult · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L49)
 
-#### migrationResult.secondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L50)
+#### migrationResult.secondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L51)
 
 Per-table stats for row upgrades.
 

@@ -1970,3 +1970,296 @@ test("Record type validates values", async () => {
     });
 });
 
+// =====================
+// Computed Index Tests
+// =====================
+
+test("computed unique index: basic CRUD and get", async () => {
+    @E.registerModel
+    class Employee extends E.Model<Employee> {
+        static override = true;
+        static pk = E.primary(Employee, "id");
+
+        id = E.field(E.identifier);
+        firstName = E.field(E.string);
+        lastName = E.field(E.string);
+
+        static byFullName = E.unique(Employee, (e: Employee) => [`${e.firstName} ${e.lastName}`]);
+    }
+
+    await E.transact(() => {
+        new Employee({ firstName: "John", lastName: "Doe" });
+        new Employee({ firstName: "Jane", lastName: "Smith" });
+    });
+
+    await E.transact(() => {
+        const john = Employee.byFullName.get("John Doe");
+        expect(john).toBeDefined();
+        expect(john!.firstName).toBe("John");
+        expect(john!.lastName).toBe("Doe");
+
+        const jane = Employee.byFullName.get("Jane Smith");
+        expect(jane).toBeDefined();
+        expect(jane!.firstName).toBe("Jane");
+
+        expect(Employee.byFullName.get("Nobody Here")).toBeUndefined();
+    });
+});
+
+test("computed unique index: unique constraint violation", async () => {
+    @E.registerModel
+    class UniqueComputed extends E.Model<UniqueComputed> {
+        static override = true;
+        static pk = E.primary(UniqueComputed, "id");
+
+        id = E.field(E.identifier);
+        a = E.field(E.string);
+        b = E.field(E.string);
+
+        static byAB = E.unique(UniqueComputed, (u: UniqueComputed) => [`${u.a}:${u.b}`]);
+    }
+
+    await E.transact(() => {
+        new UniqueComputed({ a: "x", b: "y" });
+    });
+
+    await expectErrorCode("UNIQUE_CONSTRAINT", () =>
+        E.transact(() => {
+            new UniqueComputed({ a: "x", b: "y" });
+        })
+    );
+});
+
+test("computed secondary index: basic find", async () => {
+    @E.registerModel
+    class Product extends E.Model<Product> {
+        static override = true;
+        static pk = E.primary(Product, "id");
+
+        id = E.field(E.identifier);
+        price = E.field(E.number);
+        category = E.field(E.string);
+
+        static byPriceBucket = E.index(Product, (p: Product) => [Math.floor(p.price / 100)]);
+    }
+
+    await E.transact(() => {
+        new Product({ price: 50, category: "A" });
+        new Product({ price: 150, category: "B" });
+        new Product({ price: 175, category: "C" });
+        new Product({ price: 250, category: "D" });
+    });
+
+    await E.transact(() => {
+        // Find all products in the $0-$99 bucket
+        const bucket0 = [...Product.byPriceBucket.find({is: 0})];
+        expect(bucket0.length).toBe(1);
+        expect(bucket0[0].price).toBe(50);
+
+        // Find all products in the $100-$199 bucket
+        const bucket1 = [...Product.byPriceBucket.find({is: 1})];
+        expect(bucket1.length).toBe(2);
+
+        // Range query
+        const buckets01 = [...Product.byPriceBucket.find({from: 0, to: 1})];
+        expect(buckets01.length).toBe(3);
+
+        // Find all
+        const all = [...Product.byPriceBucket.find()];
+        expect(all.length).toBe(4);
+    });
+});
+
+test("computed index: undefined return skips indexing (partial index)", async () => {
+    @E.registerModel
+    class MaybeIndexed extends E.Model<MaybeIndexed> {
+        static override = true;
+        static pk = E.primary(MaybeIndexed, "id");
+
+        id = E.field(E.identifier);
+        status = E.field(E.string);
+        priority = E.field(E.opt(E.number));
+
+        static byActivePriority = E.index(MaybeIndexed, (m: MaybeIndexed) =>
+            m.status === "active" ? [m.priority] : []
+        );
+    }
+
+    await E.transact(() => {
+        new MaybeIndexed({ status: "active", priority: 1 });
+        new MaybeIndexed({ status: "active", priority: 2 });
+        new MaybeIndexed({ status: "inactive", priority: 3 });
+    });
+
+    await E.transact(() => {
+        // Only active items should appear in the index
+        const all = [...MaybeIndexed.byActivePriority.find()];
+        expect(all.length).toBe(2);
+
+        const p1 = [...MaybeIndexed.byActivePriority.find({is: 1})];
+        expect(p1.length).toBe(1);
+        expect(p1[0].status).toBe("active");
+    });
+});
+
+test("computed index: updates re-index on any field change", async () => {
+    @E.registerModel
+    class Updatable extends E.Model<Updatable> {
+        static override = true;
+        static pk = E.primary(Updatable, "id");
+
+        id = E.field(E.identifier);
+        x = E.field(E.number);
+        y = E.field(E.number);
+
+        static bySum = E.index(Updatable, (u: Updatable) => [u.x + u.y]);
+    }
+
+    let savedId: string;
+    await E.transact(() => {
+        const u = new Updatable({ x: 3, y: 4 });
+        savedId = u.id;
+    });
+
+    await E.transact(() => {
+        // Sum is 7
+        const found7 = [...Updatable.bySum.find({is: 7})];
+        expect(found7.length).toBe(1);
+
+        // Update x, sum changes to 10
+        found7[0].x = 6;
+    });
+
+    await E.transact(() => {
+        const found7 = [...Updatable.bySum.find({is: 7})];
+        expect(found7.length).toBe(0);
+
+        const found10 = [...Updatable.bySum.find({is: 10})];
+        expect(found10.length).toBe(1);
+    });
+});
+
+test("computed index: delete removes index entries", async () => {
+    @E.registerModel
+    class Deletable extends E.Model<Deletable> {
+        static override = true;
+        static pk = E.primary(Deletable, "id");
+
+        id = E.field(E.identifier);
+        tag = E.field(E.string);
+
+        static byTag = E.index(Deletable, (d: Deletable) => [d.tag]);
+    }
+
+    await E.transact(() => {
+        new Deletable({ tag: "foo" });
+        new Deletable({ tag: "foo" });
+        new Deletable({ tag: "bar" });
+    });
+
+    await E.transact(() => {
+        expect([...Deletable.byTag.find({is: "foo"})].length).toBe(2);
+
+        // Delete one
+        const first = [...Deletable.byTag.find({is: "foo"})][0];
+        first.delete();
+    });
+
+    await E.transact(() => {
+        expect([...Deletable.byTag.find({is: "foo"})].length).toBe(1);
+        expect([...Deletable.byTag.find({is: "bar"})].length).toBe(1);
+    });
+});
+
+test("computed unique index: find with range and reverse", async () => {
+    @E.registerModel
+    class Scored extends E.Model<Scored> {
+        static override = true;
+        static pk = E.primary(Scored, "id");
+
+        id = E.field(E.identifier);
+        name = E.field(E.string);
+        score = E.field(E.number);
+
+        static byScore = E.unique(Scored, (s: Scored) => [s.score]);
+    }
+
+    await E.transact(() => {
+        new Scored({ name: "A", score: 10 });
+        new Scored({ name: "B", score: 20 });
+        new Scored({ name: "C", score: 30 });
+        new Scored({ name: "D", score: 40 });
+    });
+
+    await E.transact(() => {
+        // Range query
+        const mid = [...Scored.byScore.find({from: 20, to: 30})];
+        expect(mid.length).toBe(2);
+        expect(mid[0].name).toBe("B");
+        expect(mid[1].name).toBe("C");
+
+        // Reverse
+        const rev = [...Scored.byScore.find({reverse: true})];
+        expect(rev.length).toBe(4);
+        expect(rev[0].name).toBe("D");
+        expect(rev[3].name).toBe("A");
+
+        // Exclusive range
+        const excl = [...Scored.byScore.find({after: 10, before: 40})];
+        expect(excl.length).toBe(2);
+        expect(excl[0].name).toBe("B");
+        expect(excl[1].name).toBe("C");
+    });
+});
+
+test("computed index: multi-value indexing", async () => {
+    @E.registerModel
+    class Article extends E.Model<Article> {
+        static override = true;
+        static pk = E.primary(Article, "id");
+
+        id = E.field(E.identifier);
+        title = E.field(E.string);
+
+        static byWord = E.index(Article, (a: Article) => a.title.toLowerCase().split(" "));
+    }
+
+    await E.transact(() => {
+        new Article({ title: "Hello World" });
+        new Article({ title: "Hello There" });
+        new Article({ title: "Goodbye World" });
+    });
+
+    await E.transact(() => {
+        expect([...Article.byWord.find({is: "hello"})].length).toBe(2);
+        expect([...Article.byWord.find({is: "world"})].length).toBe(2);
+        expect([...Article.byWord.find({is: "there"})].length).toBe(1);
+        expect([...Article.byWord.find({is: "goodbye"})].length).toBe(1);
+    });
+
+    // Update "Hello There" → "Greetings Everyone" (pick via "there" to be deterministic)
+    await E.transact(() => {
+        const target = [...Article.byWord.find({is: "there"})][0];
+        target.title = "Greetings Everyone";
+    });
+
+    await E.transact(() => {
+        expect([...Article.byWord.find({is: "hello"})].length).toBe(1);
+        expect([...Article.byWord.find({is: "there"})].length).toBe(0);
+        expect([...Article.byWord.find({is: "greetings"})].length).toBe(1);
+        expect([...Article.byWord.find({is: "everyone"})].length).toBe(1);
+        expect([...Article.byWord.find({is: "world"})].length).toBe(2); // unchanged
+    });
+
+    // Delete the "Greetings Everyone" article
+    await E.transact(() => {
+        const greet = [...Article.byWord.find({is: "greetings"})][0];
+        greet.delete();
+    });
+
+    await E.transact(() => {
+        expect([...Article.byWord.find({is: "greetings"})].length).toBe(0);
+        expect([...Article.byWord.find({is: "everyone"})].length).toBe(0);
+        expect([...Article.byWord.find({is: "world"})].length).toBe(2);
+    });
+});

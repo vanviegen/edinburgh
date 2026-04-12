@@ -26,6 +26,18 @@ export function hashBytes(data: Uint8Array): number {
     return a + ((b & 0x1FFFFF) * 0x100000000);
 }
 
+export function hashFunction(fn: Function): number {
+    return hashBytes(new TextEncoder().encode(fn.toString().replace(/\s\s+/g, ' ').trim()));
+}
+
+export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
+}
+
 export function dbGet(txnId: number, key: Uint8Array): Uint8Array | undefined {
     const result = lowlevel.get(txnId, toBuffer(key));
     return result ? new Uint8Array(result) : undefined;

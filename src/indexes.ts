@@ -3,7 +3,7 @@ import { DatabaseError } from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
 import { FieldConfig, getMockModel, Model, Transaction, currentTxn } from "./models.js";
 import { scheduleInit, transact } from "./edinburgh.js";
-import { assert, logLevel, dbGet, dbPut, dbDel, hashBytes, toBuffer } from "./utils.js";
+import { assert, logLevel, dbGet, dbPut, dbDel, hashBytes, hashFunction, bytesEqual, toBuffer } from "./utils.js";
 import { deserializeType, serializeType, TypeWrapper } from "./types.js";
 
 // Index system types and utilities
@@ -24,14 +24,6 @@ interface VersionInfo {
     nonKeyFields: Map<string, TypeWrapper<any>>;
     /** Set of serialized secondary index signatures that existed in this version. */
     secondaryKeys: Set<string>;
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) return false;
-    }
-    return true;
 }
 
 /**
@@ -118,11 +110,12 @@ type FindOptions<ARG_TYPES extends readonly any[]> = (
  * @template M - The model class this index belongs to.
  * @template F - The field names that make up this index.
  */
-export abstract class BaseIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> {
+export abstract class BaseIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> {
     public _MyModel: M;
     public _fieldTypes: Map<keyof InstanceType<M> & string, TypeWrapper<any>> = new Map();
     public _fieldCount!: number;
     _resetIndexFieldDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
+    _computeFn?: (data: any) => any[];
     
     /**
      * Create a new index.
@@ -135,16 +128,24 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
 
     async _delayedInit() {
         if (this._indexId != null) return; // Already initialized
-        for(const fieldName of this._fieldNames) {
-            assert(typeof fieldName === 'string', 'Field names must be strings');
-            this._fieldTypes.set(fieldName, this._MyModel.fields[fieldName].type);
+        if (this._computeFn) {
+            this._fieldCount = 1;
+        } else {
+            for(const fieldName of this._fieldNames) {
+                assert(typeof fieldName === 'string', 'Field names must be strings');
+                this._fieldTypes.set(fieldName, this._MyModel.fields[fieldName].type);
+            }
+            this._fieldCount = this._fieldNames.length;
         }
-        this._fieldCount = this._fieldNames.length;
         await this._retrieveIndexId();
 
         // Human-readable signature for version tracking, e.g. "secondary category:string"
-        this._signature = this._getTypeName() + ' ' +
-            Array.from(this._fieldTypes.entries()).map(([n, t]) => n + ':' + t).join(' ');
+        if (this._computeFn) {
+            this._signature = this._getTypeName() + ' ' + hashFunction(this._computeFn);
+        } else {
+            this._signature = this._getTypeName() + ' ' +
+                Array.from(this._fieldTypes.entries()).map(([n, t]) => n + ':' + t).join(' ');
+        }
 
         for(const fieldName of this._fieldTypes.keys()) {
             this._resetIndexFieldDescriptors[fieldName] = {
@@ -167,17 +168,21 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @internal
      */
     _argsToKeyBytes(args: [], allowPartial: boolean): DataPack;
-    _argsToKeyBytes(args: Partial<IndexArgTypes<M, F>>, allowPartial: boolean): DataPack;
+    _argsToKeyBytes(args: Partial<ARGS>, allowPartial: boolean): DataPack;
 
     _argsToKeyBytes(args: any, allowPartial: boolean) {
         assert(allowPartial ? args.length <= this._fieldCount : args.length === this._fieldCount);
         const bytes = new DataPack();
         bytes.write(this._indexId!);
-        let index = 0;
-        for(const fieldType of this._fieldTypes.values()) {
-            // For partial keys, undefined values are acceptable and represent open range suffixes
-            if (index >= args.length) break;
-            fieldType.serialize(args[index++], bytes);
+        if (this._computeFn) {
+            if (args.length > 0) bytes.write(args[0]);
+        } else {
+            let index = 0;
+            for(const fieldType of this._fieldTypes.values()) {
+                // For partial keys, undefined values are acceptable and represent open range suffixes
+                if (index >= args.length) break;
+                fieldType.serialize(args[index++], bytes);
+            }
         }
         return bytes;
     }
@@ -192,6 +197,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     abstract _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M>;
 
     _hasNullIndexValues(data: Record<string, any>) {
+        assert(!this._computeFn);
         for(const fieldName of this._fieldTypes.keys()) {
             if (data[fieldName] == null) return true;
         }
@@ -206,8 +212,12 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     _serializeKeyFields(data: Record<string, any>): DataPack {
         const bytes = new DataPack();
         bytes.write(this._indexId!);
-        for(const [fieldName, fieldType] of this._fieldTypes.entries()) {
-            fieldType.serialize(data[fieldName], bytes);
+        if (this._computeFn) {
+            for (const v of this._computeFn(data)) bytes.write(v);
+        } else {
+            for(const [fieldName, fieldType] of this._fieldTypes.entries()) {
+                fieldType.serialize(data[fieldName], bytes);
+            }
         }
         return bytes;
     }
@@ -218,9 +228,13 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      */
     async _retrieveIndexId(): Promise<void> {
         const indexNameBytes = new DataPack().write(INDEX_ID_PREFIX).write(this._MyModel.tableName).write(this._getTypeName());
-        for(let name of this._fieldNames) {
-            indexNameBytes.write(name);
-            serializeType(this._MyModel.fields[name].type, indexNameBytes);
+        if (this._computeFn) {
+            indexNameBytes.write(hashFunction(this._computeFn));
+        } else {
+            for(let name of this._fieldNames) {
+                indexNameBytes.write(name);
+                serializeType(this._MyModel.fields[name].type, indexNameBytes);
+            }
         }
         // For non-primary indexes, include primary key field info to avoid misinterpreting
         // values when the primary key schema changes.
@@ -323,7 +337,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * }
      * ```
      */
-    _computeKeyBounds(opts: FindOptions<IndexArgTypes<M, F>>): [DataPack | undefined, DataPack | undefined] | null {
+    _computeKeyBounds(opts: FindOptions<ARGS>): [DataPack | undefined, DataPack | undefined] | null {
         let startKey: DataPack | undefined;
         let endKey: DataPack | undefined;
         if ('is' in opts) {
@@ -349,7 +363,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         return [startKey, endKey];
     }
 
-    public find(opts: FindOptions<IndexArgTypes<M, F>> = {}): IndexRangeIterator<M> {
+    public find(opts: FindOptions<ARGS> = {}): IndexRangeIterator<M> {
         const txn = currentTxn();
         const indexId = this._indexId!;
 
@@ -388,7 +402,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @param callback - Called for each matching row within a transaction
      */
     public async batchProcess(
-        opts: FindOptions<IndexArgTypes<M, F>> & { limitSeconds?: number; limitRows?: number } = {} as any,
+        opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number } = {} as any,
         callback: (row: InstanceType<M>) => void | Promise<void>
     ): Promise<void> {
         const limitMs = (opts.limitSeconds ?? 1) * 1000;
@@ -460,7 +474,7 @@ function toArray<ARG_TYPES extends readonly any[]>(args: ArrayOrOnlyItem<ARG_TYP
  * @template M - The model class this index belongs to.
  * @template F - The field names that make up this index.
  */
-export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
+export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F, IndexArgTypes<M, F>> {
 
     _nonKeyFields!: (keyof InstanceType<M> & string)[];
     _lazyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
@@ -535,7 +549,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     async _initVersioning(): Promise<void> {
         // Compute migrate hash from function source
         const migrateFn = (this._MyModel as any)._original?.migrate ?? (this._MyModel as any).migrate;
-        this._currentMigrateHash = migrateFn ? hashBytes(new TextEncoder().encode(migrateFn.toString().replace(/\s\s+/g, ' ').trim())) : 0;
+        this._currentMigrateHash = migrateFn ? hashFunction(migrateFn) : 0;
 
         const currentValueBytes = this._serializeVersionValue();
 
@@ -834,10 +848,11 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
  * @template M - The model class this index belongs to.
  * @template F - The field names that make up this index.
  */
-export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
+export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends BaseIndex<M, F, ARGS> {
 
-    constructor(MyModel: M, fieldNames: F) {
-        super(MyModel, fieldNames);
+    constructor(MyModel: M, fieldsOrFn: F | ((data: any) => any[])) {
+        super(MyModel, typeof fieldsOrFn === 'function' ? [] as any : fieldsOrFn);
+        if (typeof fieldsOrFn === 'function') this._computeFn = fieldsOrFn;
         (this._MyModel._secondaries ||= []).push(this);
         scheduleInit();
     }
@@ -852,7 +867,7 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
      * const userByEmail = User.byEmail.get("john@example.com");
      * ```
      */
-    get(...args: IndexArgTypes<M, F>): InstanceType<M> | undefined {
+    get(...args: ARGS): InstanceType<M> | undefined {
         const txn = currentTxn();
         let keyBuffer = this._argsToKeyBytes(args, false).toUint8Array();
 
@@ -873,6 +888,14 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
     }
 
     _delete(txn: Transaction, primaryKey: Uint8Array, data: Record<string, any>) {
+        if (this._computeFn) {
+            for (const value of this._computeFn(data)) {
+                const key = new DataPack().write(this._indexId!).write(value).toUint8Array();
+                if (logLevel >= 2) console.log(`[edinburgh] Delete ${this} fn-key=${key}`);
+                dbDel(txn.id, key);
+            }
+            return;
+        }
         if (!this._hasNullIndexValues(data)) {
             const key = this._serializeKey(primaryKey, data);
             if (logLevel >= 2) {
@@ -883,6 +906,15 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
     }
 
     _write(txn: Transaction, primaryKey: Uint8Array, data: Record<string, any>) {
+        if (this._computeFn) {
+            for (const value of this._computeFn(data)) {
+                const key = new DataPack().write(this._indexId!).write(value).toUint8Array();
+                if (logLevel >= 2) console.log(`[edinburgh] Write ${this} fn-key=${key} value=${new DataPack(primaryKey)}`);
+                if (dbGet(txn.id, key)) throw new DatabaseError(`Unique constraint violation for ${this} key ${key}`, 'UNIQUE_CONSTRAINT');
+                dbPut(txn.id, key, primaryKey);
+            }
+            return;
+        }
         if (!this._hasNullIndexValues(data)) {
             const key = this._serializeKey(primaryKey, data);
             if (logLevel >= 2) {
@@ -898,26 +930,28 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
     _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M> {
         // For unique indexes, the value contains the primary key
 
-        const keyPack = new DataPack(new Uint8Array(keyBuffer));
-        keyPack.readNumber(); // discard index id
-
         const pk = this._MyModel._primary!;
         const model = pk._get(txn, new Uint8Array(valueBuffer), false);
 
-        // _get will have created lazy-load getters for our indexed fields. Let's turn them back into
-        // regular properties:
-        Object.defineProperties(model, this._resetIndexFieldDescriptors);
+        if (!this._computeFn) {
+            const keyPack = new DataPack(new Uint8Array(keyBuffer));
+            keyPack.readNumber(); // discard index id
 
-        // Set the values for our indexed fields
-        for(const [name, fieldType] of this._fieldTypes.entries()) {
-            model._setLoadedField(name, fieldType.deserialize(keyPack));
+            // _get will have created lazy-load getters for our indexed fields. Let's turn them back into
+            // regular properties:
+            Object.defineProperties(model, this._resetIndexFieldDescriptors);
+
+            // Set the values for our indexed fields
+            for(const [name, fieldType] of this._fieldTypes.entries()) {
+                model._setLoadedField(name, fieldType.deserialize(keyPack));
+            }
         }
 
         return model;
     }
 
     _getTypeName(): string {
-        return 'unique';
+        return this._computeFn ? 'fn-unique' : 'unique';
     }
 }
 
@@ -930,10 +964,11 @@ const SECONDARY_VALUE = new DataPack().write(undefined).toUint8Array(); // Singl
  * @template M - The model class this index belongs to.
  * @template F - The field names that make up this index.
  */
-export class SecondaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F> {
+export class SecondaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends BaseIndex<M, F, ARGS> {
 
-    constructor(MyModel: M, fieldNames: F) {
-        super(MyModel, fieldNames);
+    constructor(MyModel: M, fieldsOrFn: F | ((data: any) => any[])) {
+        super(MyModel, typeof fieldsOrFn === 'function' ? [] as any : fieldsOrFn);
+        if (typeof fieldsOrFn === 'function') this._computeFn = fieldsOrFn;
         (this._MyModel._secondaries ||= []).push(this);
         scheduleInit();
     }
@@ -944,23 +979,28 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
         const keyPack = new DataPack(new Uint8Array(keyBuffer));
         keyPack.readNumber(); // discard index id
         
-        // Read the index fields, saving them for later
+        // Read the index fields (or skip computed value)
         const indexFields = new Map();
-        for(const [name, type] of this._fieldTypes.entries()) {
-            indexFields.set(name, type.deserialize(keyPack));
+        if (this._computeFn) {
+            keyPack.read(); // skip computed value
+        } else {
+            for(const [name, type] of this._fieldTypes.entries()) {
+                indexFields.set(name, type.deserialize(keyPack));
+            }
         }
 
         const primaryKey = keyPack.readUint8Array();
         const model = this._MyModel._primary!._get(txn, primaryKey, false);
 
+        if (indexFields.size > 0) {
+            // _get will have created lazy-load getters for our indexed fields. Let's turn them back into
+            // regular properties:
+            Object.defineProperties(model, this._resetIndexFieldDescriptors);
 
-        // _get will have created lazy-load getters for our indexed fields. Let's turn them back into
-        // regular properties:
-        Object.defineProperties(model, this._resetIndexFieldDescriptors);
-
-        // Set the values for our indexed fields
-        for(const [name, value] of indexFields) {
-            model._setLoadedField(name, value);
+            // Set the values for our indexed fields
+            for(const [name, value] of indexFields) {
+                model._setLoadedField(name, value);
+            }
         }
 
         return model;
@@ -974,6 +1014,14 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     }
 
     _write(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>) {
+        if (this._computeFn) {
+            for (const value of this._computeFn(model)) {
+                const key = new DataPack().write(this._indexId!).write(value).write(primaryKey).toUint8Array();
+                if (logLevel >= 2) console.log(`[edinburgh] Write ${this} fn-key=${key}`);
+                dbPut(txn.id, key, SECONDARY_VALUE);
+            }
+            return;
+        }
         if (this._hasNullIndexValues(model)) return;
         const key = this._serializeKey(primaryKey, model);
         if (logLevel >= 2) {
@@ -983,6 +1031,14 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     }
 
     _delete(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>): void {
+        if (this._computeFn) {
+            for (const value of this._computeFn(model)) {
+                const key = new DataPack().write(this._indexId!).write(value).write(primaryKey).toUint8Array();
+                if (logLevel >= 2) console.log(`[edinburgh] Delete ${this} fn-key=${key}`);
+                dbDel(txn.id, key);
+            }
+            return;
+        }
         if (this._hasNullIndexValues(model)) return;
         const key = this._serializeKey(primaryKey, model);
         if (logLevel >= 2) {
@@ -992,7 +1048,7 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     }
 
     _getTypeName(): string {
-        return 'secondary';
+        return this._computeFn ? 'fn-secondary' : 'secondary';
     }
 }
 
@@ -1026,13 +1082,19 @@ export function primary(MyModel: typeof Model, fields: any): PrimaryIndex<any, a
 }
 
 /**
- * Create a unique index on model fields.
+ * Create a unique index on model fields, or a computed unique index using a function.
+ *
+ * For field-based indexes, pass a field name or array of field names.
+ * For computed indexes, pass a function that takes a model instance and returns an array of
+ * index keys. Return `[]` to skip indexing for that instance. Each array element creates a
+ * separate index entry, enabling multi-value indexes (e.g., indexing by each word in a name).
+ *
  * @template M - The model class.
+ * @template V - The computed index value type (for function-based indexes).
  * @template F - The field name (for single field index).
  * @template FS - The field names array (for composite index).
  * @param MyModel - The model class to create the index for.
- * @param field - Single field name for simple indexes.
- * @param fields - Array of field names for composite indexes.
+ * @param field - Field name, array of field names, or a compute function.
  * @returns A new UniqueIndex instance.
  * 
  * @example
@@ -1040,24 +1102,32 @@ export function primary(MyModel: typeof Model, fields: any): PrimaryIndex<any, a
  * class User extends E.Model<User> {
  *   static byEmail = E.unique(User, "email");
  *   static byNameAge = E.unique(User, ["name", "age"]);
+ *   static byFullName = E.unique(User, (u: User) => [`${u.firstName} ${u.lastName}`]);
  * }
  * ```
  */
+export function unique<M extends typeof Model, V>(MyModel: M, fn: (instance: InstanceType<M>) => V[]): UniqueIndex<M, [], [V]>;
 export function unique<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): UniqueIndex<M, [F]>;
 export function unique<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): UniqueIndex<M, FS>;
 
-export function unique(MyModel: typeof Model, fields: any): UniqueIndex<any, any> {
-    return new UniqueIndex(MyModel, Array.isArray(fields) ? fields : [fields]);
+export function unique(MyModel: typeof Model, fields: any): UniqueIndex<any, any, any> {
+    return new UniqueIndex(MyModel, typeof fields === 'string' ? [fields] : fields);
 }
 
 /**
- * Create a secondary index on model fields.
+ * Create a secondary index on model fields, or a computed secondary index using a function.
+ *
+ * For field-based indexes, pass a field name or array of field names.
+ * For computed indexes, pass a function that takes a model instance and returns an array of
+ * index keys. Return `[]` to skip indexing for that instance. Each array element creates a
+ * separate index entry, enabling multi-value indexes (e.g., indexing by each word in a name).
+ *
  * @template M - The model class.
+ * @template V - The computed index value type (for function-based indexes).
  * @template F - The field name (for single field index).
  * @template FS - The field names array (for composite index).
  * @param MyModel - The model class to create the index for.
- * @param field - Single field name for simple indexes.
- * @param fields - Array of field names for composite indexes.
+ * @param field - Field name, array of field names, or a compute function.
  * @returns A new SecondaryIndex instance.
  * 
  * @example
@@ -1065,14 +1135,16 @@ export function unique(MyModel: typeof Model, fields: any): UniqueIndex<any, any
  * class User extends E.Model<User> {
  *   static byAge = E.index(User, "age");
  *   static byTagsDate = E.index(User, ["tags", "createdAt"]);
+ *   static byWord = E.index(User, (u: User) => u.name.split(" "));
  * }
  * ```
  */
+export function index<M extends typeof Model, V>(MyModel: M, fn: (instance: InstanceType<M>) => V[]): SecondaryIndex<M, [], [V]>;
 export function index<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): SecondaryIndex<M, [F]>;
 export function index<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): SecondaryIndex<M, FS>;
 
-export function index(MyModel: typeof Model, fields: any): SecondaryIndex<any, any> {
-    return new SecondaryIndex(MyModel, Array.isArray(fields) ? fields : [fields]);
+export function index(MyModel: typeof Model, fields: any): SecondaryIndex<any, any, any> {
+    return new SecondaryIndex(MyModel, typeof fields === 'string' ? [fields] : fields);
 }
 
 /**
@@ -1113,7 +1185,7 @@ export function dump() {
             const fields: Record<string, TypeWrapper<any>> = {};
             while(kb.readAvailable()) {
                 const name = kb.read();
-                if (name === undefined) break; // what follows are primary key fields (when this is a secondary index)
+                if (typeof name !== 'string') break; // undefined separator or computed hash
                 fields[name] = deserializeType(kb, 0);
             }
 

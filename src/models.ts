@@ -29,7 +29,7 @@ export interface Transaction {
     instancesByPk: Map<number, Model<unknown>>;
 }
 import { BaseIndex as BaseIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
-import { addErrorPath, logLevel, assert, dbGet, hashBytes } from "./utils.js";
+import { addErrorPath, logLevel, assert, dbGet, hashBytes, bytesEqual } from "./utils.js";
 
 /**
  * Configuration interface for model fields.
@@ -433,10 +433,12 @@ export abstract class Model<SUB> {
 
         if (oldValues === null) { // Delete instance
             const pk = this._primaryKey;
-            this.constructor._primary._delete(txn, pk!, this);
+            // Temporarily restore _oldValues so computed indexes can trigger lazy loads
+            this._oldValues = {};
             for(const index of this.constructor._secondaries || []) {
                 index._delete(txn, pk!, this);
             }
+            this.constructor._primary._delete(txn, pk!, this);
             
             return "deleted";
         }
@@ -496,11 +498,21 @@ export abstract class Model<SUB> {
 
         // Update any secondaries with changed fields
         for (const index of this.constructor._secondaries || []) {
-            for (const field of index._fieldTypes.keys()) {
-                if (changed.hasOwnProperty(field)) {
+            if (index._computeFn) {
+                // Computed indexes may depend on any field — compare serialized keys
+                const oldKeyBytes = index._serializeKeyFields(oldValues).toUint8Array();
+                const newKeyBytes = index._serializeKeyFields(this as any).toUint8Array();
+                if (!bytesEqual(oldKeyBytes, newKeyBytes)) {
                     index._delete(txn, pk, oldValues);
                     index._write(txn, pk, this);
-                    break;
+                }
+            } else {
+                for (const field of index._fieldTypes.keys()) {
+                    if (changed.hasOwnProperty(field)) {
+                        index._delete(txn, pk, oldValues);
+                        index._write(txn, pk, this);
+                        break;
+                    }
                 }
             }
         }
