@@ -1,22 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * migrate-edinburgh CLI tool
- * 
- * Runs database migrations: upgrades all rows to the latest schema version,
- * converts old primary indices, and cleans up orphaned secondary indices.
- * 
- * Usage:
- *   npx migrate-edinburgh --import ./src/models.ts [options]
- * 
- * Options:
- *   --import <path>     Path to the module that registers all models (required)
- *   --db <path>         Database directory (default: .edinburgh)
- *   --tables <names>    Comma-separated list of table names to migrate
- *   --batch-size <n>    Number of rows per transaction batch (default: 500)
- *   --no-convert        Skip converting old primary indices
- *   --no-cleanup        Skip deleting orphaned secondary indices
- *   --no-upgrade        Skip upgrading rows to latest version
+ * See `npx migrate-edinburgh --help` for usage.
  */
 
 import { runMigration, type MigrationOptions } from './migrate.js';
@@ -24,43 +9,49 @@ import { runMigration, type MigrationOptions } from './migrate.js';
 function parseArgs(args: string[]): { importPath: string, options: MigrationOptions & { dbDir?: string } } {
     let importPath = '';
     const options: MigrationOptions & { dbDir?: string } = {};
+    const tables: string[] = [];
     
     for (let i = 0; i < args.length; i++) {
-        switch (args[i]) {
-            case '--import':
-                importPath = args[++i];
-                break;
+        const arg = args[i];
+        switch (arg) {
             case '--db':
                 options.dbDir = args[++i];
                 break;
-            case '--tables':
-                options.tables = args[++i].split(',').map(s => s.trim());
-                break;
-            case '--no-convert':
-                options.convertOldPrimaries = false;
-                break;
-            case '--no-cleanup':
-                options.deleteOrphanedIndexes = false;
-                break;
-            case '--no-upgrade':
-                options.upgradeVersions = false;
-                break;
+            case '+secondaries': options.populateSecondaries = true; break;
+            case '-secondaries': options.populateSecondaries = false; break;
+            case '+primaries': options.migratePrimaries = true; break;
+            case '-primaries': options.migratePrimaries = false; break;
+            case '+data': options.rewriteData = true; break;
+            case '-data': options.rewriteData = false; break;
+            case '+orphans': options.removeOrphans = true; break;
+            case '-orphans': options.removeOrphans = false; break;
             default:
-                if (args[i].startsWith('-')) {
-                    console.error(`Unknown option: ${args[i]}`);
+                if (arg.startsWith('-') || arg.startsWith('+')) {
+                    console.error(`Unknown option: ${arg}`);
                     process.exit(1);
+                }
+                if (!importPath) {
+                    importPath = arg;
+                } else {
+                    tables.push(arg);
                 }
         }
     }
     
+    if (tables.length > 0) options.tables = tables;
+    
     if (!importPath) {
-        console.error('Usage: npx migrate-edinburgh --import <path> [options]');
-        console.error('  --import <path>     Module that registers all models (required)');
-        console.error('  --db <path>         Database directory (default: .edinburgh)');
-        console.error('  --tables <names>    Comma-separated table names');
-        console.error('  --no-convert        Skip old primary conversion');
-        console.error('  --no-cleanup        Skip orphaned index cleanup');
-        console.error('  --no-upgrade        Skip version upgrades');
+        console.error('Usage: npx migrate-edinburgh <import_path> [<table> ...] [options]');
+        console.error('');
+        console.error('  <import_path>     Module that registers all models (required)');
+        console.error('  <table>           Table names to migrate (default: all)');
+        console.error('');
+        console.error('Options:');
+        console.error('  --db <path>       Database directory (default: .edinburgh)');
+        console.error('  -secondaries      Skip populating secondary indexes');
+        console.error('  -primaries        Skip migrating old primary indexes');
+        console.error('  -orphans          Skip removing orphaned index entries');
+        console.error('  +data             Rewrite all row data to latest schema version');
         process.exit(1);
     }
     
@@ -99,14 +90,21 @@ async function main() {
     
     // Report results
     if (Object.keys(result.secondaries).length > 0) {
-        console.log('Upgraded rows:');
+        console.log('Populated secondary indexes:');
         for (const [table, count] of Object.entries(result.secondaries)) {
             console.log(`  ${table}: ${count}`);
         }
     }
     
+    if (Object.keys(result.rewritten).length > 0) {
+        console.log('Rewritten rows:');
+        for (const [table, count] of Object.entries(result.rewritten)) {
+            console.log(`  ${table}: ${count}`);
+        }
+    }
+    
     if (Object.keys(result.primaries).length > 0) {
-        console.log('Converted old primary rows:');
+        console.log('Migrated old primary rows:');
         for (const [table, count] of Object.entries(result.primaries)) {
             console.log(`  ${table}: ${count}`);
         }
@@ -121,11 +119,11 @@ async function main() {
         }
     }
     
-    if (result.orphaned > 0) {
-        console.log(`Deleted ${result.orphaned} orphaned index entries`);
+    if (result.orphans > 0) {
+        console.log(`Deleted ${result.orphans} orphaned index entries`);
     }
     
-    if (Object.keys(result.secondaries).length === 0 && Object.keys(result.primaries).length === 0 && result.orphaned === 0) {
+    if (Object.keys(result.secondaries).length === 0 && Object.keys(result.primaries).length === 0 && Object.keys(result.rewritten).length === 0 && result.orphans === 0) {
         console.log('No migration needed - database is up to date.');
     }
     

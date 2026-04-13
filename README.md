@@ -388,13 +388,9 @@ await Product.byCategory.batchProcess({is: "old"}, (product) => {
 // Commits every ~1 second or 4096 rows (configurable via limitSeconds, limitRows)
 ```
 
-### Schema Evolution
+### Lazy Schema Migrations
 
-Edinburgh handles schema changes automatically:
-
-- **Adding/removing fields**: Old rows are lazily migrated on read. New fields use their default value.
-- **Changing field types**: Requires a `static migrate()` function.
-- **Adding/removing indexes**: Requires running `npx migrate-edinburgh`.
+When you change a model's schema, Edinburgh will lazily try to migrate old records on access. This allows you to deploy code changes without downtime or a separate migration step. Optionally, you may provide a `static migrate(record: Record<string, any>)` function on the model to transform old records during lazy migration. If there is a migration error (like a new field without a default value, or an incompatible type change), a run-time error is thrown when loading the affected model instance.
 
 ```typescript
 @E.registerModel
@@ -402,15 +398,40 @@ class User extends E.Model<User> {
   static pk = E.primary(User, "id");
   id = E.field(E.identifier);
   name = E.field(E.string);
-  role = E.field(E.string, {default: "user"});  // new field
+  role = E.field(E.string);  // newly added field
 
   static migrate(record: Record<string, any>) {
-    record.role ??= "user";  // provide value for old rows
+    record.role ??= record.name.indexOf("admin") >= 0 ? "admin" : "user"; // set role based on name for old records
   }
 }
 ```
 
-Run `npx migrate-edinburgh` (or call `E.runMigration()`) after adding/removing indexes, changing index field types, or when a `migrate()` function affects indexed fields.
+Edinburgh will lazily (re)run the `migrate` function on an instance whenever its implementation (the literal function code) has changed. For robustness, make sure that your `migrate` function...
+- Is idempotent (meaning it can be safely run multiple times on the same row without changing the result after the first run), and
+- Should perform *all* transformation steps starting from the oldest version that could possibly still be in the database. (See the next section.)
+
+While lazy migration is convenient and often sufficient, in some cases you need migrations to happen immediately...
+
+### Forced Schema Migrations
+
+The `migrate-edinburgh` CLI tool will scan the entire database, pro-actively performing the following migrations:
+- **Populate secondary indexes**: If you added or changed secondary indexes, it will build them. Until you do, the indexes will be empty (or only contain instances that have been saved since the index was created).
+- **Migrate primary indexes**: In case you changed the primary key fields or field types (not recommended!) of a model, it will build the new primary index, as well as all secondary indexes (to point at the new primary keys). Until you do, all of your old data will appear to be missing! Note that this may fail on duplicates.
+- **Remove orphaned indexes**: If you removed or changed an index, the stale data will be deleted from the database.
+- **Rewrite primary data**: These are the types of migrations that would normally be done lazily on instance access. As there's usually not much benefit to doing this forcibly, and it can be very time-consuming (and generates a lot of I/O), this is *not* done by default. It may however be useful if you want to clean up the contents of your `migrate()` function, if you have control over all application deployments. Use the `--rewrite-data` flag to enable this.
+
+```bash
+npx migrate-edinburgh ./src/models.ts
+```
+
+Run `npx migrate-edinburgh` without arguments to see all options. You can also call `runMigration()` programmatically:
+
+```typescript
+import { runMigration } from "edinburgh";
+
+const result = await runMigration({ tables: ["User"] });
+console.log(result.secondaries);  // { User: 1500 }
+```
 
 ### preCommit Hook
 
@@ -687,9 +708,6 @@ Common use cases:
 
 **Signature:** `() => void`
 
-**Parameters:**
-
-
 **Examples:**
 
 ```typescript
@@ -710,17 +728,11 @@ class Post extends E.Model<Post> {
 
 **Signature:** `() => Uint8Array<ArrayBufferLike>`
 
-**Parameters:**
-
-
 **Returns:** The primary key for this instance.
 
 #### model.getPrimaryKeyHash · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
 **Signature:** `() => number`
-
-**Parameters:**
-
 
 **Returns:** A 53-bit positive integer non-cryptographic hash of the primary key, or undefined if not yet saved.
 
@@ -737,9 +749,6 @@ class Post extends E.Model<Post> {
 Prevent this instance from being persisted to the database.
 
 **Signature:** `() => this`
-
-**Parameters:**
-
 
 **Returns:** This model instance for chaining.
 
@@ -758,9 +767,6 @@ Delete this model instance from the database.
 Removes the instance and all its index entries from the database and prevents further persistence.
 
 **Signature:** `() => void`
-
-**Parameters:**
-
 
 **Examples:**
 
@@ -797,9 +803,6 @@ Check if this model instance is valid.
 
 **Signature:** `() => boolean`
 
-**Parameters:**
-
-
 **Returns:** true if all validations pass.
 
 **Examples:**
@@ -813,22 +816,13 @@ if (!user.isValid()) shoutAtTheUser();
 
 **Signature:** `() => "created" | "deleted" | "loaded" | "lazy"`
 
-**Parameters:**
-
-
 #### model.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
 **Signature:** `() => string`
 
-**Parameters:**
-
-
 #### model.[Symbol.for('nodejs.util.inspect.custom')] · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
 **Signature:** `() => string`
-
-**Parameters:**
-
 
 ### registerModel · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L113)
 
@@ -1242,9 +1236,6 @@ Indexes enable fast queries on specific field combinations and enforce uniquenes
 
 **Signature:** `() => string`
 
-**Parameters:**
-
-
 ### UniqueIndex · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L253)
 
 Unique index that stores references to the primary key.
@@ -1352,10 +1343,10 @@ Invalid function arguments will throw TypeError.
 
 **Value:** `DatabaseErrorConstructor`
 
-### runMigration · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L118)
+### runMigration · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L124)
 
-Run database migration: upgrade all rows to the latest schema version,
-convert old primary indices, and clean up orphaned secondary indices.
+Run database migration: populate secondary indexes for old-version rows,
+convert old primary indices, rewrite row data, and clean up orphaned indices.
 
 **Signature:** `(options?: MigrationOptions) => Promise<MigrationResult>`
 
@@ -1371,99 +1362,65 @@ Limit migration to specific table names.
 
 **Type:** `string[]`
 
-#### migrationOptions.convertOldPrimaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L23)
+#### migrationOptions.populateSecondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L23)
 
-Whether to convert old primary indices for known tables (default: true).
-
-**Type:** `boolean`
-
-#### migrationOptions.deleteOrphanedIndexes · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L31)
-
-Whether to delete orphaned secondary/unique indices (default: true).
+Populate secondary indexes for rows at old schema versions (default: true).
 
 **Type:** `boolean`
 
-#### migrationOptions.upgradeVersions · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L39)
+#### migrationOptions.migratePrimaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L32)
 
-Whether to upgrade rows to the latest version (default: true).
+Convert old primary indices when primary key fields changed (default: true).
 
 **Type:** `boolean`
 
-#### migrationOptions.onProgress · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L44)
+#### migrationOptions.rewriteData · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L40)
+
+Rewrite all row data to the latest schema version (default: false).
+
+**Type:** `boolean`
+
+#### migrationOptions.removeOrphans · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L46)
+
+Delete orphaned secondary/unique index entries (default: true).
+
+**Type:** `boolean`
+
+#### migrationOptions.onProgress · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L48)
 
 Progress callback.
 
 **Type:** `(info: ProgressInfo) => void`
 
-### MigrationResult · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L49)
+### MigrationResult · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L51)
 
-#### migrationResult.secondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L51)
+#### migrationResult.secondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L54)
 
-Per-table stats for row upgrades.
-
-**Type:** `Record<string, number>`
-
-#### migrationResult.primaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L52)
-
-Per-table stats for old primary conversions.
+Per-table counts of secondary index entries populated.
 
 **Type:** `Record<string, number>`
 
-#### migrationResult.conversionFailures · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L58)
+#### migrationResult.primaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L59)
+
+Per-table counts of old primary rows migrated.
+
+**Type:** `Record<string, number>`
+
+#### migrationResult.conversionFailures · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L59)
 
 Per-table conversion failure counts by reason.
 
 **Type:** `Record<string, Record<string, number>>`
 
-#### migrationResult.orphaned · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L59)
+#### migrationResult.rewritten · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L64)
+
+Per-table counts of rows rewritten to latest version.
+
+**Type:** `Record<string, number>`
+
+#### migrationResult.orphans · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L68)
 
 Number of orphaned index entries deleted.
 
 **Type:** `number`
 
-## Schema Migrations
-
-Edinburgh automatically tracks the schema version of each model. When you change fields, field types, indexes, or the `migrate()` function, Edinburgh detects a new schema version.
-
-### What happens automatically (lazy migration)
-
-Changes to regular (non-index) field values are migrated lazily. When a row with an old schema version is loaded from disk, it is deserialized using the old field types and transformed by the optional static `migrate()` function. This is transparent and requires no downtime.
-
-```typescript
-@E.registerModel
-class User extends E.Model<User> {
-  static pk = E.primary(User, "id");
-  id = E.field(E.identifier);
-  name = E.field(E.string);
-  role = E.field(E.string);  // newly added field
-
-  static migrate(record: Record<string, any>) {
-    record.role ??= "user";  // provide a default for old rows
-  }
-}
-```
-
-### What requires `migrate-edinburgh`
-
-The `migrate-edinburgh` CLI tool (or the `runMigration()` API) must be run when:
-
-- **Adding or removing** secondary or unique indexes
-- **Changing the fields or types** of an existing index
-- A **`migrate()` function changes values** that are used in index fields
-
-The tool populates new indexes, removes orphaned ones, and updates index entries whose values were changed by `migrate()`. It does *not* rewrite primary data rows - lazy migration handles that on read.
-
-```bash
-npx migrate-edinburgh --import ./src/models.ts
-```
-
-Run `npx migrate-edinburgh` to see all of its options.
-
-You can also call `runMigration()` programmatically:
-
-```typescript
-import { runMigration } from "edinburgh";
-
-const result = await runMigration({ tables: ["User"] });
-console.log(result.upgraded);  // { User: 1500 }
-```

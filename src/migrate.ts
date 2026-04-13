@@ -11,12 +11,14 @@ const INDEX_ID_PREFIX = -2;
 export interface MigrationOptions {
     /** Limit migration to specific table names. */
     tables?: string[];
-    /** Whether to convert old primary indices for known tables (default: true). */
-    convertOldPrimaries?: boolean;
-    /** Whether to delete orphaned secondary/unique indices (default: true). */
-    deleteOrphanedIndexes?: boolean;
-    /** Whether to upgrade rows to the latest version (default: true). */
-    upgradeVersions?: boolean;
+    /** Populate secondary indexes for rows at old schema versions (default: true). */
+    populateSecondaries?: boolean;
+    /** Convert old primary indices when primary key fields changed (default: true). */
+    migratePrimaries?: boolean;
+    /** Rewrite all row data to the latest schema version (default: false). */
+    rewriteData?: boolean;
+    /** Delete orphaned secondary/unique index entries (default: true). */
+    removeOrphans?: boolean;
     /** Progress callback. */
     onProgress?: (info: ProgressInfo) => void;
 }
@@ -29,14 +31,16 @@ export interface ProgressInfo {
 }
 
 export interface MigrationResult {
-    /** Per-table stats for row upgrades. */
+    /** Per-table counts of secondary index entries populated. */
     secondaries: Record<string, number>;
-    /** Per-table stats for old primary conversions. */
+    /** Per-table counts of old primary rows migrated. */
     primaries: Record<string, number>;
     /** Per-table conversion failure counts by reason. */
     conversionFailures: Record<string, Record<string, number>>;
+    /** Per-table counts of rows rewritten to latest version. */
+    rewritten: Record<string, number>;
     /** Number of orphaned index entries deleted. */
-    orphaned: number;
+    orphans: number;
 }
 
 interface IndexDef {
@@ -91,23 +95,25 @@ async function forEachRow(
 }
 
 /**
- * Run database migration: upgrade all rows to the latest schema version,
- * convert old primary indices, and clean up orphaned secondary indices.
+ * Run database migration: populate secondary indexes for old-version rows,
+ * convert old primary indices, rewrite row data, and clean up orphaned indices.
  */
 export async function runMigration(options: MigrationOptions = {}): Promise<MigrationResult> {
     // Ensure any pending model/index inits are completed before building index maps
     await transact(() => {});
 
-    const convertOldPrimaries = options.convertOldPrimaries ?? true;
-    const deleteOrphanedIndexes = options.deleteOrphanedIndexes ?? true;
-    const upgradeVersions = options.upgradeVersions ?? true;
+    const populateSecondaries = options.populateSecondaries ?? true;
+    const migratePrimaries = options.migratePrimaries ?? true;
+    const rewriteData = options.rewriteData ?? false;
+    const removeOrphans = options.removeOrphans ?? true;
     const onProgress = options.onProgress;
 
     const result: MigrationResult = {
         secondaries: {},
         primaries: {},
         conversionFailures: {},
-        orphaned: 0,
+        rewritten: {},
+        orphans: 0,
     };
 
     // Build maps of known index IDs
@@ -147,10 +153,11 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
         allIndexDefs.push({ id, tableName, typeName, fieldNames, fieldTypes });
     });
 
-    // Phase 1: Upgrade existing rows to latest version
-    if (upgradeVersions) {
+    // Phase 1: Populate secondary indexes and/or rewrite row data
+    if (populateSecondaries || rewriteData) {
         for (const [indexId, { model, primary }] of primaryByIndexId) {
-            let upgraded = 0;
+            let secondaryCount = 0;
+            let rewrittenCount = 0;
             const migrateFn = (model as any).migrate as ((record: Record<string, any>) => void) | undefined;
             const secondaries = model._secondaries || [];
 
@@ -176,45 +183,56 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
                 const preMigrate = migrateFn ? structuredClone(record) : undefined;
                 if (migrateFn) migrateFn(record);
 
-                // Handle secondaries (primary is left as-is for lazy migration on read)
-                for (const sec of secondaries) {
-                    if (!versionInfo.secondaryKeys.has(sec._signature!)) {
-                        // New secondary, write entry
-                        sec._write(txn, keyBuf, record as any);
-                        upgraded++;
-                    } else if (preMigrate) {
-                        if (sec._computeFn) {
-                            // Computed indexes: compare serialized keys to avoid unnecessary re-indexing
-                            const oldKeyBytes = sec._serializeKeyFields(preMigrate).toUint8Array();
-                            const newKeyBytes = sec._serializeKeyFields(record).toUint8Array();
-                            if (!bytesEqual(oldKeyBytes, newKeyBytes)) {
-                                sec._delete(txn, keyBuf, preMigrate as any);
-                                sec._write(txn, keyBuf, record as any);
-                                upgraded++;
-                            }
-                        } else {
-                            // Existing secondary, update if migrate changed any of its fields
-                            for (const [field, type] of sec._fieldTypes.entries()) {
-                                if (!type.equals(preMigrate[field], record[field])) {
+                // Populate/update secondary indexes
+                if (populateSecondaries) {
+                    for (const sec of secondaries) {
+                        if (!versionInfo.secondaryKeys.has(sec._signature!)) {
+                            // New secondary, write entry
+                            sec._write(txn, keyBuf, record as any);
+                            secondaryCount++;
+                        } else if (preMigrate) {
+                            if (sec._computeFn) {
+                                // Computed indexes: compare serialized keys to avoid unnecessary re-indexing
+                                const oldKeyBytes = sec._serializeKeyFields(preMigrate).toUint8Array();
+                                const newKeyBytes = sec._serializeKeyFields(record).toUint8Array();
+                                if (!bytesEqual(oldKeyBytes, newKeyBytes)) {
                                     sec._delete(txn, keyBuf, preMigrate as any);
                                     sec._write(txn, keyBuf, record as any);
-                                    upgraded++;
-                                    break;
+                                    secondaryCount++;
+                                }
+                            } else {
+                                // Existing secondary, update if migrate changed any of its fields
+                                for (const [field, type] of sec._fieldTypes.entries()) {
+                                    if (!type.equals(preMigrate[field], record[field])) {
+                                        sec._delete(txn, keyBuf, preMigrate as any);
+                                        sec._write(txn, keyBuf, record as any);
+                                        secondaryCount++;
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
+                // Rewrite primary row data to current version
+                if (rewriteData) {
+                    primary._write(txn, keyBuf, record);
+                    rewrittenCount++;
+                }
             });
 
-            onProgress?.({ phase: 'secondaries', processed: upgraded, table: model.tableName });
-            if (upgraded > 0) result.secondaries[model.tableName] = upgraded;
+            onProgress?.({ phase: 'secondaries', processed: secondaryCount, table: model.tableName });
+            if (secondaryCount > 0) result.secondaries[model.tableName] = secondaryCount;
+            if (rewrittenCount > 0) {
+                onProgress?.({ phase: 'rewritten', processed: rewrittenCount, table: model.tableName });
+                result.rewritten[model.tableName] = rewrittenCount;
+            }
         }
     }
 
     // Phase 2: Convert old primary indices with known table names
-    if (convertOldPrimaries) {
+    if (migratePrimaries) {
         for (const oldDef of allIndexDefs) {
             if (oldDef.typeName !== 'primary') continue;
             if (knownIndexIds.has(oldDef.id)) continue; // Known index, skip
@@ -266,14 +284,14 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
     }
 
     // Phase 3: Delete orphaned secondary/unique index entries
-    if (deleteOrphanedIndexes) {
+    if (removeOrphans) {
         for (const def of allIndexDefs) {
             if (knownIndexIds.has(def.id) || def.typeName === 'primary') continue;
             await forEachRow(def.id, (txn, keyBuf) => {
                 dbDel(txn.id, keyBuf);
-                result.orphaned++;
+                result.orphans++;
             });
-            onProgress?.({ phase: 'orphaned', processed: result.orphaned });
+            onProgress?.({ phase: 'orphans', processed: result.orphans });
         }
     }
 

@@ -1,11 +1,11 @@
 {
   "name": "edinburgh",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "author": "Frank van Viegen",
   "devDependencies": {
     "@types/bun": "^1.2.16",
     "@types/node": "^22.10.6",
-    "readme-tsdoc": "^1.1.4",
+    "readme-tsdoc": "^1.1.6",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   },
@@ -42,13 +42,15 @@
   ],
   "license": "ISC",
   "scripts": {
-    "build": "rm -rf build skill && tsc && bun run build:docs",
+    "build": "rm -rf build && tsc && bun run build:docs",
     "test": "npm run test:bun && npm run test:node",
     "test:watch": "bun x vitest --bail 1 --watch --silent=passed-only",
     "test:bun": "bun test --bail",
     "test:node": "bun x vitest --bail 1 --watch=false --silent=passed-only",
     "prepack": "npm run build && npm run test && npm run build:docs",
-    "build:docs": "readme-tsdoc && mkdir -p skill && cat skill-header.md README.md > skill/SKILL.md && readme-tsdoc --repo-url https://github.com/vanviegen/edinburgh",
+    "build:docs": "rm -rf skill ; mkdir skill ; cat skill-header.md README.md > skill/SKILL.md && readme-tsdoc --split --file skill/SKILL.md && readme-tsdoc --repo-url https://github.com/vanviegen/edinburgh",
+
+    
     "postinstall": "[ -f .local-post-install.sh ] && sh .local-post-install.sh || true"
   },
   "trustedDependencies": [

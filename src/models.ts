@@ -166,7 +166,7 @@ export interface Model<SUB> {
  * 
  * Models represent database entities with typed fields, automatic serialization,
  * change tracking, and relationship management. All model classes should extend
- * this base class and be decorated with `@registerModel`.
+ * this base class and be decorated with `@E.registerModel`.
  *
  * ### Schema Evolution
  *
@@ -283,7 +283,7 @@ export abstract class Model<SUB> {
         // This constructor will only be called once, from `initModels`. All other instances will
         // be created by the 'fake' constructor. The typing for `initial` *is* important though.
         if (initial as any === INIT_INSTANCE_SYMBOL) return;
-        throw new DatabaseError("The model needs a @registerModel decorator", 'INIT_ERROR');
+        throw new DatabaseError("The model needs a @E.registerModel decorator", 'INIT_ERROR');
     }
 
     /**

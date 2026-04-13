@@ -1681,7 +1681,7 @@ test("runMigration removes orphaned secondary index entries", async () => {
 
     // Step 4: Run migration - Phase 3 should delete the 2 orphaned secondary index entries
     const result = await E.runMigration({tables: ["OrphanedSecTest"]});
-    expect(result.orphaned).toBe(2);
+    expect(result.orphans).toBe(2);
 
     // Step 5: Verify that indexes no longer exist on disk
     await E.transact(() => {
@@ -1755,7 +1755,7 @@ test("runMigration reports no work needed for clean data", async () => {
     });
 
     const result = await E.runMigration({tables: ["CleanModel"]});
-    expect(result.orphaned).toBe(0);
+    expect(result.orphans).toBe(0);
     expect(result.secondaries["CleanModel"] ?? 0).toBe(0);
 });
 
