@@ -41,6 +41,10 @@ export class IndexRangeIterator<M extends typeof Model> extends Iterator<Instanc
         super();
     }
 
+    // This is also in Iterator<InstanceType<M>>, but we'll repeat it here for deps that
+    // don't have ESNext.Iterator in their TypeScript lib set.
+    [Symbol.iterator](): this { return this; }
+
     next(): IteratorResult<InstanceType<M>> {
         if (this.iteratorId < 0) return { done: true, value: undefined };
         const raw = lowlevel.readIterator(this.iteratorId);

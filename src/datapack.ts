@@ -187,8 +187,8 @@ export default class DataPack {
             this.ensureCapacity(data.length);
             this.buffer.set(data, this.writePos);
             this.writePos += data.length;
-        } else if (Array.isArray(data)) {
-            // Type 4, subtype 5: array start
+        } else if (Array.isArray(data) || (typeof data.length === 'number' && typeof data[Symbol.iterator] === 'function')) {
+            // Type 4, subtype 5: array start (also handles array-like iterables)
             this.buffer[this.writePos++] = (4 << 5) | 5;
             for (const item of data) {
                 this.write(item);

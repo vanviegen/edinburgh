@@ -1208,7 +1208,7 @@ This is primarily useful for development and debugging purposes.
 
 **Signature:** `() => void`
 
-### BaseIndex · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L123)
+### BaseIndex · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L128)
 
 Base class for database indexes for efficient lookups on model fields.
 

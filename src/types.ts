@@ -374,7 +374,7 @@ class RecordType<T> extends TypeWrapper<Record<string | number, T>> {
     }
 
     getError(value: Record<string | number, T>) {
-        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+        if (typeof value !== 'object' || value === null || Array.isArray(value) || (typeof value.length === 'number' && typeof value[Symbol.iterator as any] === 'function')) {
             return new DatabaseError(`Expected object, got ${typeof value}`, 'INVALID_TYPE');
         }
         for (const key of Object.keys(value)) {

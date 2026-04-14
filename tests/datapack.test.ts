@@ -99,6 +99,19 @@ describe('complex data types', () => {
         expect(readArr).toEqual(arr);
     });
 
+    test('should serialize array-like iterables as arrays', () => {
+        const pack = new DataPack();
+        const int32 = new Int32Array([10, 20, 30]);
+        const float64 = new Float64Array([1.5, 2.5]);
+
+        pack.write(int32);
+        pack.write(float64.map(x => x * 2)); // Test that we can write transformed data
+
+        const result = new DataPack(pack._buffer.slice(0, pack.writePos));
+        expect(result.read()).toEqual([10, 20, 30]);
+        expect(result.read()).toEqual([3, 5]);
+    });
+
     test('should write and read objects', () => {
         const pack = new DataPack();
         const obj = { name: "test", value: 42, active: true };
