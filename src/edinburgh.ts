@@ -126,7 +126,8 @@ export async function transact<T>(fn: () => T): Promise<T> {
                 olmdbReady = true;
                 initNeeded = false;
                 for (const model of Object.values(modelRegistry)) {
-                    await model._delayedInit();
+                    model.initFields();
+                    await model._loadCreateIndexes();
                 }
             })();
             await pendingInit;
@@ -247,6 +248,7 @@ export async function deleteEverything(): Promise<void> {
     // Re-init indexes since metadata was deleted
     for (const model of Object.values(modelRegistry)) {
         if (!model.fields) continue;
-        await model._delayedInit(true);
+        model.initFields(true);
+        await model._loadCreateIndexes();
     }
 }

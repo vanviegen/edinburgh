@@ -29,19 +29,16 @@ interface VersionInfo {
 /**
  * Iterator for range queries on indexes.
  * Handles common iteration logic for both primary and unique indexes.
- * Implements both Iterator and Iterable interfaces for efficiency.
+ * Extends built-in Iterator to provide map/filter/reduce/toArray/etc.
  */
-export class IndexRangeIterator<M extends typeof Model> implements Iterator<InstanceType<M>>, Iterable<InstanceType<M>> {
+export class IndexRangeIterator<M extends typeof Model> extends Iterator<InstanceType<M>> {
     constructor(
         private txn: Transaction,
         private iteratorId: number,
         private indexId: number,
         private parentIndex: BaseIndex<M, any>
     ) {
-    }
-
-    [Symbol.iterator](): Iterator<InstanceType<M>> {
-        return this;
+        super();
     }
 
     next(): IteratorResult<InstanceType<M>> {

@@ -1838,6 +1838,37 @@ test("replaceInto works with composite primary keys", async () => {
     });
 });
 
+test("find() iterator supports map/filter/toArray helpers", async () => {
+    await E.transact(() => {
+        for (let i = 0; i < 5; i++) new Simple({ value: i });
+    });
+
+    await E.transact(() => {
+        // map + toArray
+        const doubled = Simple.pk.find().map(r => r.value * 2).toArray();
+        expect(doubled.sort((a, b) => a - b)).toEqual([0, 2, 4, 6, 8]);
+
+        // filter + toArray
+        const even = Simple.pk.find().filter(r => r.value % 2 === 0).toArray();
+        expect(even.map(r => r.value).sort((a, b) => a - b)).toEqual([0, 2, 4]);
+
+        // chained map + filter
+        const result = Simple.pk.find().map(r => r.value).filter(v => v >= 3).toArray();
+        expect(result.sort((a, b) => a - b)).toEqual([3, 4]);
+
+        // reduce
+        const sum = Simple.pk.find().reduce((acc, r) => acc + r.value, 0);
+        expect(sum).toBe(10);
+
+        // single-pass: second consumer on same iterator gets nothing
+        const iter = Simple.pk.find();
+        const first = iter.toArray();
+        const second = iter.toArray();
+        expect(first).toHaveLength(5);
+        expect(second).toHaveLength(0);
+    });
+});
+
 test("batchProcess visits all rows across multiple batches", async () => {
     await E.transact(() => {
         for (let i = 0; i < 10; i++) new Simple({ value: i });

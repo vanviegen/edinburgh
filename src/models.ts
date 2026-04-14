@@ -313,70 +313,78 @@ export abstract class Model<SUB> {
      */
     preCommit?(): void;
 
-    static async _delayedInit(cleared?: boolean): Promise<void> {
+    /**
+     * Transform the model's `E.field` properties into the appropriate JavaScript properties. Normally this is done
+     * automatically when using `transact()`, but in case you need to access `Model.fields` directly before the first
+     * transaction, you can call this method manually.
+     */
+    static initFields(reset?: boolean): void {
         const MockModel = getMockModel(this);
 
-        if (cleared) {
+        if (reset) {
             MockModel._primary._indexId = undefined;
             MockModel._primary._versions.clear();
             for (const sec of MockModel._secondaries || []) sec._indexId = undefined;
         }
 
-        if (!MockModel.fields) {
-            // First-time init: gather field configs from a temporary instance of the original class.
-            const OrgModel = (MockModel as any)._original || this;
-            const instance = new (OrgModel as any)(INIT_INSTANCE_SYMBOL);
+        if (MockModel.fields) return;
 
-            // If no primary key exists, create one using 'id' field
-            if (!MockModel._primary) {
-                if (!instance.id) {
-                    instance.id = { type: identifier }; 
-                }
-                // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
-                new PrimaryIndex(MockModel, ['id']);
+        // First-time init: gather field configs from a temporary instance of the original class.
+        const OrgModel = (MockModel as any)._original || this;
+        const instance = new (OrgModel as any)(INIT_INSTANCE_SYMBOL);
+
+        // If no primary key exists, create one using 'id' field
+        if (!MockModel._primary) {
+            if (!instance.id) {
+                instance.id = { type: identifier }; 
             }
+            // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
+            new PrimaryIndex(MockModel, ['id']);
+        }
 
-            MockModel.fields = {};
-            for (const key in instance) {
-                const value = instance[key] as FieldConfig<unknown>;
-                // Check if this property contains field metadata
-                if (value && value.type instanceof TypeWrapper) {
-                    // Set the configuration on the constructor's `fields` property
-                    MockModel.fields[key] = value;
+        MockModel.fields = {};
+        for (const key in instance) {
+            const value = instance[key] as FieldConfig<unknown>;
+            // Check if this property contains field metadata
+            if (value && value.type instanceof TypeWrapper) {
+                // Set the configuration on the constructor's `fields` property
+                MockModel.fields[key] = value;
 
-                    // Set default value on the prototype
-                    const defObj = value.default===undefined ? value.type : value;
-                    const def = defObj.default;
-                    if (typeof def === 'function') {
-                        // The default is a function. We'll define a getter on the property in the model prototype,
-                        // and once it is read, we'll run the function and set the value as a plain old property
-                        // on the instance object.
-                        Object.defineProperty(MockModel.prototype, key, {    
-                            get() {
-                                // This will call set(), which will define the property on the instance.
-                                return (this[key] = def.call(defObj, this));
-                            },
-                            set(val: any) {
-                                Object.defineProperty(this, key, {
-                                    value: val,
-                                    configurable: true,
-                                    writable: true,
-                                    enumerable: true,
-                                })
-                            },
-                            configurable: true,    
-                        });
-                    } else if (def !== undefined) {
-                        (MockModel.prototype as any)[key] = def;
-                    }
+                // Set default value on the prototype
+                const defObj = value.default===undefined ? value.type : value;
+                const def = defObj.default;
+                if (typeof def === 'function') {
+                    // The default is a function. We'll define a getter on the property in the model prototype,
+                    // and once it is read, we'll run the function and set the value as a plain old property
+                    // on the instance object.
+                    Object.defineProperty(MockModel.prototype, key, {    
+                        get() {
+                            // This will call set(), which will define the property on the instance.
+                            return (this[key] = def.call(defObj, this));
+                        },
+                        set(val: any) {
+                            Object.defineProperty(this, key, {
+                                value: val,
+                                configurable: true,
+                                writable: true,
+                                enumerable: true,
+                            })
+                        },
+                        configurable: true,    
+                    });
+                } else if (def !== undefined) {
+                    (MockModel.prototype as any)[key] = def;
                 }
-            }
-
-            if (logLevel >= 1) {
-                console.log(`[edinburgh] Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
             }
         }
 
+        if (logLevel >= 1) {
+            console.log(`[edinburgh] Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
+        }
+    }
+
+    static async _loadCreateIndexes(): Promise<void> {
+        const MockModel = getMockModel(this);
         // Always run index inits (idempotent, skip if already initialized)
         await MockModel._primary._delayedInit();
         for (const sec of MockModel._secondaries || []) await sec._delayedInit();
