@@ -554,7 +554,7 @@ export default class DataPack {
     writeAsObject(obj: Record<string, any>) {
         // Type 4, subtype 6: object start
         this.buffer[this.writePos++] = (4 << 5) | 6;
-        for (const key of Object.keys(obj)) {
+        for (const key in obj) {
             this.write(key);
             this.write(obj[key]);
         }

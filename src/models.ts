@@ -28,8 +28,8 @@ export interface Transaction {
     instances: Set<Model<unknown>>;
     instancesByPk: Map<number, Model<unknown>>;
 }
-import { BaseIndex as BaseIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
-import { addErrorPath, logLevel, assert, dbGet, hashBytes, bytesEqual } from "./utils.js";
+import { BaseIndex as BaseIndex, NonPrimaryIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
+import { addErrorPath, logLevel, assert, dbGet, hashBytes } from "./utils.js";
 
 /**
  * Configuration interface for model fields.
@@ -220,7 +220,7 @@ export abstract class Model<SUB> {
     static _primary: PrimaryIndex<any, any>;
 
     /** @internal All non-primary indexes for this model. */
-    static _secondaries?: BaseIndex<any, readonly (keyof any & string)[]>[];
+    static _secondaries?: NonPrimaryIndex<any, readonly (keyof any & string)[]>[];
 
     /** The database table name (defaults to class name). */
     static tableName: string;
@@ -411,7 +411,7 @@ export abstract class Model<SUB> {
     getPrimaryKey(): Uint8Array {
         let key = this._primaryKey;
         if (key === undefined) {
-            key = this.constructor._primary!._serializeKeyFields(this).toUint8Array();
+            key = this.constructor._primary!._serializeKey(this).toUint8Array();
             this._setPrimaryKey(key);
         }
         return key;
@@ -476,8 +476,8 @@ export abstract class Model<SUB> {
         // the whole object just to see if something changed.
 
         // Add old values of changed fields to 'changed'.
+        const changed: Record<string, any> = {};
         const fields = this.constructor.fields;
-        let changed : Record<any, any> = {};
         for(const fieldName in oldValues) {
             const oldValue = oldValues[fieldName];
             const newValue = this[fieldName as keyof Model<SUB>];
@@ -506,23 +506,7 @@ export abstract class Model<SUB> {
 
         // Update any secondaries with changed fields
         for (const index of this.constructor._secondaries || []) {
-            if (index._computeFn) {
-                // Computed indexes may depend on any field — compare serialized keys
-                const oldKeyBytes = index._serializeKeyFields(oldValues).toUint8Array();
-                const newKeyBytes = index._serializeKeyFields(this as any).toUint8Array();
-                if (!bytesEqual(oldKeyBytes, newKeyBytes)) {
-                    index._delete(txn, pk, oldValues);
-                    index._write(txn, pk, this);
-                }
-            } else {
-                for (const field of index._fieldTypes.keys()) {
-                    if (changed.hasOwnProperty(field)) {
-                        index._delete(txn, pk, oldValues);
-                        index._write(txn, pk, this);
-                        break;
-                    }
-                }
-            }
+            index._update(txn, pk, this, oldValues);
         }
         return changed;
     }
@@ -534,7 +518,7 @@ export abstract class Model<SUB> {
      * 
      * @example
      * ```typescript
-     * const user = User.load("user123");
+     * const user = User.pk.get("user123");
      * user.name = "New Name";
      * user.preventPersist(); // Changes won't be saved
      * ```
@@ -595,7 +579,7 @@ export abstract class Model<SUB> {
      * 
      * @example
      * ```typescript
-     * const user = User.load("user123");
+     * const user = User.pk.get("user123");
      * user.delete(); // Removes from database
      * ```
      */
@@ -659,7 +643,7 @@ export abstract class Model<SUB> {
 
     toString(): string {
         const primary = this.constructor._primary;
-        const pk = primary._keyToArray(this._primaryKey || primary._serializeKeyFields(this).toUint8Array(false));
+        const pk = primary._keyToArray(this._primaryKey || primary._serializeKey(this).toUint8Array(false));
         return `{Model:${this.constructor.tableName} ${this.getState()} ${pk}}`;
     }
 

@@ -355,7 +355,7 @@ class RecordType<T> extends TypeWrapper<Record<string | number, T>> {
 
     serialize(value: Record<string | number, T>, pack: DataPack) {
         pack.writeCollectionBoundary('object');
-        for (const key of Object.keys(value)) {
+        for (const key in value) {
             pack.writeObjectKey(key);
             this.inner.serialize(value[key], pack);
         }

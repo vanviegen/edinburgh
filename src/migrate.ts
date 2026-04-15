@@ -191,26 +191,7 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
                             sec._write(txn, keyBuf, record as any);
                             secondaryCount++;
                         } else if (preMigrate) {
-                            if (sec._computeFn) {
-                                // Computed indexes: compare serialized keys to avoid unnecessary re-indexing
-                                const oldKeyBytes = sec._serializeKeyFields(preMigrate).toUint8Array();
-                                const newKeyBytes = sec._serializeKeyFields(record).toUint8Array();
-                                if (!bytesEqual(oldKeyBytes, newKeyBytes)) {
-                                    sec._delete(txn, keyBuf, preMigrate as any);
-                                    sec._write(txn, keyBuf, record as any);
-                                    secondaryCount++;
-                                }
-                            } else {
-                                // Existing secondary, update if migrate changed any of its fields
-                                for (const [field, type] of sec._fieldTypes.entries()) {
-                                    if (!type.equals(preMigrate[field], record[field])) {
-                                        sec._delete(txn, keyBuf, preMigrate as any);
-                                        sec._write(txn, keyBuf, record as any);
-                                        secondaryCount++;
-                                        break;
-                                    }
-                                }
-                            }
+                            if (sec._update(txn, keyBuf, record, preMigrate)) secondaryCount++;
                         }
                     }
                 }

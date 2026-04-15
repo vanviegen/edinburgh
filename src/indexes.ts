@@ -115,7 +115,6 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     public _MyModel: M;
     public _fieldTypes: Map<keyof InstanceType<M> & string, TypeWrapper<any>> = new Map();
     public _fieldCount!: number;
-    _resetIndexFieldDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
     _computeFn?: (data: any) => any[];
     
     /**
@@ -146,14 +145,6 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         } else {
             this._signature = this._getTypeName() + ' ' +
                 Array.from(this._fieldTypes.entries()).map(([n, t]) => n + ':' + t).join(' ');
-        }
-
-        for(const fieldName of this._fieldTypes.keys()) {
-            this._resetIndexFieldDescriptors[fieldName] = {
-                writable: true,
-                configurable: true,
-                enumerable: true
-            };
         }
     }
 
@@ -196,32 +187,6 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @internal
      */
     abstract _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M>;
-
-    _hasNullIndexValues(data: Record<string, any>) {
-        assert(!this._computeFn);
-        for(const fieldName of this._fieldTypes.keys()) {
-            if (data[fieldName] == null) return true;
-        }
-        return false;
-    }
-
-    // Must return the exact key that will be used to write to the K/V store
-    abstract _serializeKey(primaryKey: Uint8Array, data: Record<string, any>): Uint8Array;
-
-    // Returns the indexId + serialized key fields. Used in some _serializeKey implementations
-    // and for calculating _primaryKey.
-    _serializeKeyFields(data: Record<string, any>): DataPack {
-        const bytes = new DataPack();
-        bytes.write(this._indexId!);
-        if (this._computeFn) {
-            for (const v of this._computeFn(data)) bytes.write(v);
-        } else {
-            for(const [fieldName, fieldType] of this._fieldTypes.entries()) {
-                fieldType.serialize(data[fieldName], bytes);
-            }
-        }
-        return bytes;
-    }
 
     /**
      * Retrieve (or create) a stable index ID from the DB, with retry on transaction races.
@@ -276,9 +241,6 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         }
     }
 
-
-    abstract _delete(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>): void;
-    abstract _write(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>): void;
 
     /**
      * Find model instances using flexible range query options.
@@ -701,7 +663,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
             }
         }
 
-        // Store the canonical primary key on the model, set the hash, and freeze the primary key fields.
+        // Store the primary key on the model, set the hash, and freeze the primary key fields.
         model._setPrimaryKey(key, keyHash);
 
         if (valueBuffer) {
@@ -720,8 +682,16 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
         return model;
     }
 
-    _serializeKey(primaryKey: Uint8Array, _data: Record<string, any>): Uint8Array {
-        return primaryKey;
+    /**
+     * Serialize primary key bytes from field values: indexId + typed field values.
+     */
+    _serializeKey(data: Record<string, any>): DataPack {
+        const bytes = new DataPack();
+        bytes.write(this._indexId!);
+        for (const [fieldName, fieldType] of this._fieldTypes.entries()) {
+            fieldType.serialize(data[fieldName], bytes);
+        }
+        return bytes;
     }
 
     _lazyNow(model: InstanceType<M>) {
@@ -843,13 +813,15 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     }
 }
 
+// OLMDB does not support storing empty values, so we use a single byte value for secondary indexes.
+const SECONDARY_VALUE = new DataPack().write(undefined).toUint8Array();
+
 /**
- * Unique index that stores references to the primary key.
- * 
- * @template M - The model class this index belongs to.
- * @template F - The field names that make up this index.
+ * Abstract base for all non-primary indexes (unique and secondary).
+ * Provides shared key serialization, write/delete/update logic.
  */
-export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends BaseIndex<M, F, ARGS> {
+export abstract class NonPrimaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends BaseIndex<M, F, ARGS> {
+    _resetIndexFieldDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
 
     constructor(MyModel: M, fieldsOrFn: F | ((data: any) => any[])) {
         super(MyModel, typeof fieldsOrFn === 'function' ? [] as any : fieldsOrFn);
@@ -858,16 +830,104 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         scheduleInit();
     }
 
+    async _delayedInit() {
+        await super._delayedInit();
+        for (const fieldName of this._fieldTypes.keys()) {
+            this._resetIndexFieldDescriptors[fieldName] = {
+                writable: true,
+                configurable: true,
+                enumerable: true
+            };
+        }
+    }
+
     /**
-     * Get a model instance by unique index key values.
-     * @param args - The unique index key values.
-     * @returns The model instance if found, undefined otherwise.
-     * 
-     * @example
-     * ```typescript
-     * const userByEmail = User.byEmail.get("john@example.com");
-     * ```
+     * Build DataPack key prefixes (indexId + field/computed values). Returns [] to skip indexing.
+     * SecondaryIndex appends the primary key to each pack before converting to Uint8Array.
      */
+    _buildKeyPacks(data: Record<string, any>): DataPack[] {
+        if (this._computeFn) {
+            return this._computeFn(data).map((value: any) => {
+                const bytes = new DataPack();
+                bytes.write(this._indexId!);
+                bytes.write(value);
+                return bytes;
+            });
+        }
+        for (const fieldName of this._fieldTypes.keys()) {
+            if (data[fieldName] == null) return [];
+        }
+        const bytes = new DataPack();
+        bytes.write(this._indexId!);
+        for (const [fieldName, fieldType] of this._fieldTypes.entries()) {
+            fieldType.serialize(data[fieldName], bytes);
+        }
+        return [bytes];
+    }
+
+    /** Serialize all index keys. Default: key = indexId + fields. */
+    _serializeKeys(primaryKey: Uint8Array, data: Record<string, any>): Uint8Array[] {
+        return this._buildKeyPacks(data).map(p => p.toUint8Array());
+    }
+
+    /** Write a single pre-serialized key — subclasses define value and uniqueness check. */
+    abstract _writeKey(txn: Transaction, key: Uint8Array, primaryKey: Uint8Array): void;
+
+    _write(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>): void {
+        for (const key of this._serializeKeys(primaryKey, model as any)) {
+            if (logLevel >= 2) console.log(`[edinburgh] Write ${this} key=${new DataPack(key)}`);
+            this._writeKey(txn, key, primaryKey);
+        }
+    }
+
+    _delete(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>): void {
+        for (const key of this._serializeKeys(primaryKey, model as any)) {
+            if (logLevel >= 2) console.log(`[edinburgh] Delete ${this} key=${new DataPack(key)}`);
+            dbDel(txn.id, key);
+        }
+    }
+
+    /**
+     * Granular update: diff old vs new keys and only insert/delete what changed.
+     * For non-computed indexes, uses a fast path that checks which fields changed.
+     */
+    _update(txn: Transaction, primaryKey: Uint8Array, newData: InstanceType<M>, oldData: Record<string, any>): number {
+        const oldKeys = this._serializeKeys(primaryKey, oldData);
+        const newKeys = this._serializeKeys(primaryKey, newData as any);
+
+        // Fast path: no changes and max 1 key
+        if (oldKeys.length === newKeys.length && (oldKeys.length === 0 || bytesEqual(oldKeys[0], newKeys[0]))) {
+            return 0;
+        }
+
+        const oldKeyMap = new Map<number, Uint8Array>();
+        for (const key of oldKeys) oldKeyMap.set(hashBytes(key), key);
+
+        let changes = 0;
+        for (const key of newKeys) {
+            const hash = hashBytes(key);
+            if (oldKeyMap.has(hash)) {
+                oldKeyMap.delete(hash);
+            } else {
+                if (logLevel >= 2) console.log(`[edinburgh] Write ${this} key=${new DataPack(key)}`);
+                this._writeKey(txn, key, primaryKey);
+                changes++;
+            }
+        }
+        for (const key of oldKeyMap.values()) {
+            if (logLevel >= 2) console.log(`[edinburgh] Delete ${this} key=${new DataPack(key)}`);
+            dbDel(txn.id, key);
+            changes++;
+        }
+        return changes;
+    }
+}
+
+/**
+ * Unique index that stores references to the primary key.
+ */
+export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends NonPrimaryIndex<M, F, ARGS> {
+
     get(...args: ARGS): InstanceType<M> | undefined {
         const txn = currentTxn();
         let keyBuffer = this._argsToKeyBytes(args, false).toUint8Array();
@@ -884,65 +944,20 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         return result;
     }
 
-    _serializeKey(primaryKey: Uint8Array, data: Record<string, any>): Uint8Array {
-        return this._serializeKeyFields(data).toUint8Array();
-    }
-
-    _delete(txn: Transaction, primaryKey: Uint8Array, data: Record<string, any>) {
-        if (this._computeFn) {
-            for (const value of this._computeFn(data)) {
-                const key = new DataPack().write(this._indexId!).write(value).toUint8Array();
-                if (logLevel >= 2) console.log(`[edinburgh] Delete ${this} fn-key=${key}`);
-                dbDel(txn.id, key);
-            }
-            return;
-        }
-        if (!this._hasNullIndexValues(data)) {
-            const key = this._serializeKey(primaryKey, data);
-            if (logLevel >= 2) {
-                console.log(`[edinburgh] Delete ${this} key=${key}`);
-            }
-            dbDel(txn.id, key);
-        }
-    }
-
-    _write(txn: Transaction, primaryKey: Uint8Array, data: Record<string, any>) {
-        if (this._computeFn) {
-            for (const value of this._computeFn(data)) {
-                const key = new DataPack().write(this._indexId!).write(value).toUint8Array();
-                if (logLevel >= 2) console.log(`[edinburgh] Write ${this} fn-key=${key} value=${new DataPack(primaryKey)}`);
-                if (dbGet(txn.id, key)) throw new DatabaseError(`Unique constraint violation for ${this} key ${key}`, 'UNIQUE_CONSTRAINT');
-                dbPut(txn.id, key, primaryKey);
-            }
-            return;
-        }
-        if (!this._hasNullIndexValues(data)) {
-            const key = this._serializeKey(primaryKey, data);
-            if (logLevel >= 2) {
-                console.log(`[edinburgh] Write ${this} key=${key} value=${new DataPack(primaryKey)}`);
-            }
-            if (dbGet(txn.id, key)) {
-                throw new DatabaseError(`Unique constraint violation for ${this} key ${key}`, 'UNIQUE_CONSTRAINT');
-            }
-            dbPut(txn.id, key, primaryKey);
-        }
+    _writeKey(txn: Transaction, key: Uint8Array, primaryKey: Uint8Array): void {
+        if (dbGet(txn.id, key)) throw new DatabaseError(`Unique constraint violation for ${this}`, 'UNIQUE_CONSTRAINT');
+        dbPut(txn.id, key, primaryKey);
     }
 
     _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M> {
-        // For unique indexes, the value contains the primary key
-
         const pk = this._MyModel._primary!;
         const model = pk._get(txn, new Uint8Array(valueBuffer), false);
 
-        if (!this._computeFn) {
+        if (this._fieldTypes.size > 0) {
             const keyPack = new DataPack(new Uint8Array(keyBuffer));
             keyPack.readNumber(); // discard index id
 
-            // _get will have created lazy-load getters for our indexed fields. Let's turn them back into
-            // regular properties:
             Object.defineProperties(model, this._resetIndexFieldDescriptors);
-
-            // Set the values for our indexed fields
             for(const [name, fieldType] of this._fieldTypes.entries()) {
                 model._setLoadedField(name, fieldType.deserialize(keyPack));
             }
@@ -956,50 +971,27 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
     }
 }
 
-// OLMDB does not support storing empty values, so we use a single byte value for secondary indexes.
-const SECONDARY_VALUE = new DataPack().write(undefined).toUint8Array(); // Single byte value for secondary indexes
-
 /**
  * Secondary index for non-unique lookups.
- * 
- * @template M - The model class this index belongs to.
- * @template F - The field names that make up this index.
  */
-export class SecondaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends BaseIndex<M, F, ARGS> {
-
-    constructor(MyModel: M, fieldsOrFn: F | ((data: any) => any[])) {
-        super(MyModel, typeof fieldsOrFn === 'function' ? [] as any : fieldsOrFn);
-        if (typeof fieldsOrFn === 'function') this._computeFn = fieldsOrFn;
-        (this._MyModel._secondaries ||= []).push(this);
-        scheduleInit();
-    }
+export class SecondaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends NonPrimaryIndex<M, F, ARGS> {
 
     _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, _valueBuffer: ArrayBuffer): InstanceType<M> {
-        // For secondary indexes, the primary key is stored after the index fields in the key
-
         const keyPack = new DataPack(new Uint8Array(keyBuffer));
         keyPack.readNumber(); // discard index id
         
-        // Read the index fields (or skip computed value)
         const indexFields = new Map();
-        if (this._computeFn) {
-            keyPack.read(); // skip computed value
-        } else {
-            for(const [name, type] of this._fieldTypes.entries()) {
-                indexFields.set(name, type.deserialize(keyPack));
-            }
+        for (const [name, type] of this._fieldTypes.entries()) {
+            indexFields.set(name, type.deserialize(keyPack));
         }
+        if (this._computeFn) keyPack.read(); // skip computed value
 
         const primaryKey = keyPack.readUint8Array();
         const model = this._MyModel._primary!._get(txn, primaryKey, false);
 
         if (indexFields.size > 0) {
-            // _get will have created lazy-load getters for our indexed fields. Let's turn them back into
-            // regular properties:
             Object.defineProperties(model, this._resetIndexFieldDescriptors);
-
-            // Set the values for our indexed fields
-            for(const [name, value] of indexFields) {
+            for (const [name, value] of indexFields) {
                 model._setLoadedField(name, value);
             }
         }
@@ -1007,45 +999,12 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
         return model;
     }
 
-    _serializeKey(primaryKey: Uint8Array, model: InstanceType<M>): Uint8Array {
-        // index id + index fields + primary key
-        const bytes = super._serializeKeyFields(model);
-        bytes.write(primaryKey);
-        return bytes.toUint8Array();
+    _serializeKeys(primaryKey: Uint8Array, data: Record<string, any>): Uint8Array[] {
+        return this._buildKeyPacks(data).map(p => { p.write(primaryKey); return p.toUint8Array(); });
     }
 
-    _write(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>) {
-        if (this._computeFn) {
-            for (const value of this._computeFn(model)) {
-                const key = new DataPack().write(this._indexId!).write(value).write(primaryKey).toUint8Array();
-                if (logLevel >= 2) console.log(`[edinburgh] Write ${this} fn-key=${key}`);
-                dbPut(txn.id, key, SECONDARY_VALUE);
-            }
-            return;
-        }
-        if (this._hasNullIndexValues(model)) return;
-        const key = this._serializeKey(primaryKey, model);
-        if (logLevel >= 2) {
-            console.log(`[edinburgh] Write ${this} key=${key}`);
-        }
+    _writeKey(txn: Transaction, key: Uint8Array, _primaryKey: Uint8Array): void {
         dbPut(txn.id, key, SECONDARY_VALUE);
-    }
-
-    _delete(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>): void {
-        if (this._computeFn) {
-            for (const value of this._computeFn(model)) {
-                const key = new DataPack().write(this._indexId!).write(value).write(primaryKey).toUint8Array();
-                if (logLevel >= 2) console.log(`[edinburgh] Delete ${this} fn-key=${key}`);
-                dbDel(txn.id, key);
-            }
-            return;
-        }
-        if (this._hasNullIndexValues(model)) return;
-        const key = this._serializeKey(primaryKey, model);
-        if (logLevel >= 2) {
-            console.log(`[edinburgh] Delete ${this} key=${key}`);
-        }
-        dbDel(txn.id, key);
     }
 
     _getTypeName(): string {

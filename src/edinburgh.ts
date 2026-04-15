@@ -43,7 +43,7 @@ export {
     dump,
 } from "./indexes.js";
 
-export { BaseIndex, UniqueIndex, PrimaryIndex, SecondaryIndex } from './indexes.js';
+export { BaseIndex, NonPrimaryIndex, UniqueIndex, PrimaryIndex, SecondaryIndex } from './indexes.js';
 
 export { type Change } from './models.js';
 export type { Transaction } from './models.js';
