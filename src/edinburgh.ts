@@ -88,7 +88,7 @@ const STALE_INSTANCE_DESCRIPTOR = {
 * times.
 * 
 * @template T - The return type of the transaction function.
-* @param fn - The function to execute within the transaction context. Receives a Transaction instance.
+* @param fn The function to execute within the transaction context. Receives a Transaction instance.
 * @returns A promise that resolves with the function's return value.
 * @throws {DatabaseError} With code "RACING_TRANSACTION" if the transaction fails after retries due to conflicts.
 * @throws {DatabaseError} With code "TXN_LIMIT" if maximum number of transactions is reached.

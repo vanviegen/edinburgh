@@ -52,13 +52,13 @@ export interface FieldConfig<T> {
  * This allows for both runtime introspection and compile-time type safety.
  * 
  * @template T - The field type.
- * @param type - The type wrapper for this field.
- * @param options - Additional field configuration options.
+ * @param type The type wrapper for this field.
+ * @param options Additional field configuration options.
  * @returns The field value (typed as T, but actually returns FieldConfig<T>).
  * 
  * @example
  * ```typescript
- * const User = E.defineModel(class {
+ * const User = E.defineModel("User", class {
  *   name = E.field(E.string, {description: "User's full name"});
  *   age = E.field(E.opt(E.number), {description: "User's age", default: 25});
  * });
@@ -81,8 +81,6 @@ function isObjectEmpty(obj: object) {
 }
 
 export type Change = Record<any, any> | "created" | "deleted";
-
-let autoTableNameId = 0;
 
 type FieldsOf<T> = T extends new () => infer I ? I : never;
 type ModelInstance<FIELDS> = FIELDS & Model<FIELDS>;
@@ -131,13 +129,13 @@ type RegisteredModel<FIELDS, PKA extends readonly any[], UNIQUE, INDEX> = {
  * Converts a plain class into a fully-featured model with database persistence,
  * typed fields, primary key access, and optional secondary and unique indexes.
  *
- * @param cls - A plain class whose properties use E.field().
- * @param opts - Registration options.
- * @param opts.pk - Primary key field name or array of field names.
- * @param opts.unique - Named unique index specifications (field name, field array, or compute function).
- * @param opts.index - Named secondary index specifications (field name, field array, or compute function).
- * @param opts.tableName - Explicit database table name.
- * @param opts.override - Replace a previous model with the same table name.
+ * @param tableName The database table name for this model.
+ * @param cls A plain class whose properties use E.field().
+ * @param opts Registration options.
+ * @param opts.pk Primary key field name or array of field names.
+ * @param opts.unique Named unique index specifications (field name, field array, or compute function).
+ * @param opts.index Named secondary index specifications (field name, field array, or compute function).
+ * @param opts.override Replace a previous model with the same table name.
  * @returns The enhanced model constructor.
  */
 export function defineModel<
@@ -146,11 +144,12 @@ export function defineModel<
     const UNIQUE extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>,
     const INDEX extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>,
 >(
+    tableName: string,
     cls: T,
-    opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, tableName?: string, override?: boolean }
+    opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, override?: boolean }
 ): RegisteredModel<FieldsOf<T>, PKArgs<FieldsOf<T>, PK>, UNIQUE, INDEX>;
 
-export function defineModel(cls: any, opts?: any): any {
+export function defineModel(tableName: string, cls: any, opts?: any): any {
     Object.setPrototypeOf(cls.prototype, Model.prototype);
 
     const MockModel = function(this: any, initial?: Record<string, any>, txn: Transaction = currentTxn()) {
@@ -170,7 +169,7 @@ export function defineModel(cls: any, opts?: any): any {
         }
     }
 
-    MockModel.tableName = opts?.tableName || cls.name || `Model${++autoTableNameId}`;
+    MockModel.tableName = tableName;
 
     if (MockModel.tableName in modelRegistry) {
         if (!opts?.override) {
@@ -286,7 +285,7 @@ export interface Model<SUB> {
  * 
  * @example
  * ```typescript
- * const User = E.defineModel(class {
+ * const User = E.defineModel("User", class {
  *   id = E.field(E.identifier);
  *   name = E.field(E.string);
  *   email = E.field(E.string);
@@ -304,7 +303,7 @@ export abstract class Model<SUB> {
     /** @internal All non-primary indexes for this model. */
     static _secondaries?: NonPrimaryIndex<any, readonly (keyof any & string)[]>[];
 
-    /** The database table name (defaults to class name). */
+    /** The database table name. */
     static tableName: string;
 
     /** When true, defineModel replaces an existing model with the same tableName. */
@@ -332,11 +331,11 @@ export abstract class Model<SUB> {
      * If `migrate()` changes values of fields used in secondary or unique indexes, those indexes
      * will only be updated when `runMigration()` is run (not during lazy loading).
      *
-     * @param record - A plain object with all field values from the old schema version.
+     * @param record A plain object with all field values from the old schema version.
      *
      * @example
      * ```typescript
-     * const User = E.defineModel(class {
+     * const User = E.defineModel("User", class {
      *   id = E.field(E.identifier);
      *   name = E.field(E.string);
      *   role = E.field(E.string);  // new field
@@ -366,10 +365,6 @@ export abstract class Model<SUB> {
     _primaryKeyHash: number | undefined;
     _txn!: Transaction;
 
-    constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
-        throw new DatabaseError("Use defineModel() to create model classes", 'INIT_ERROR');
-    }
-
     /**
      * Optional hook called on each modified instance right before the transaction commits.
      * Runs before data is written to disk, so changes made here are included in the commit.
@@ -382,7 +377,7 @@ export abstract class Model<SUB> {
      *
      * @example
      * ```typescript
-     * const Post = E.defineModel(class {
+     * const Post = E.defineModel("Post", class {
      *   id = E.field(E.identifier);
      *   title = E.field(E.string);
      *   slug = E.field(E.string);
@@ -569,7 +564,7 @@ export abstract class Model<SUB> {
      * the remaining properties from `obj` are set on the loaded instance. Otherwise a
      * new instance is created with `obj` as its initial properties.
      *
-     * @param obj - Partial model data that **must** include every primary key field.
+     * @param obj Partial model data that **must** include every primary key field.
      * @returns The loaded-and-updated or newly created instance.
      */
     static replaceInto<T extends typeof Model<any>>(this: T, obj: Partial<Record<string, any>>): InstanceType<T> {
@@ -612,7 +607,7 @@ export abstract class Model<SUB> {
 
     /**
      * Validate all fields in this model instance.
-     * @param raise - If true, throw on first validation error.
+     * @param raise If true, throw on first validation error.
      * @returns Array of validation errors (empty if valid).
      * 
      * @example

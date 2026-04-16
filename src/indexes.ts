@@ -120,8 +120,8 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
     
     /**
      * Create a new index.
-     * @param MyModel - The model class this index belongs to.
-     * @param _fieldNames - Array of field names that make up this index.
+     * @param MyModel The model class this index belongs to.
+     * @param _fieldNames Array of field names that make up this index.
      */
     constructor(MyModel: M, public _fieldNames: F) {
         this._MyModel = MyModel;
@@ -156,7 +156,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
 
     /**
      * Serialize array of key values to a (index-id prefixed) Bytes instance that can be used as a key.
-     * @param args - Field values to serialize (can be partial for range queries).
+     * @param args Field values to serialize (can be partial for range queries).
      * @returns A Bytes instance containing the index id and serialized key parts.
      * @internal
      */
@@ -182,8 +182,8 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
 
     /**
      * Extract model from iterator entry - implemented differently by each index type.
-     * @param keyBuffer - Key bytes (including index id).
-     * @param valueBuffer - Value bytes from the entry.
+     * @param keyBuffer Key bytes (including index id).
+     * @param valueBuffer Value bytes from the entry.
      * @returns Model instance or undefined.
      * @internal
      */
@@ -250,13 +250,13 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * For single-field indexes, you can pass values directly or in arrays.
      * For multi-field indexes, pass arrays or partial arrays for prefix matching.
      * 
-     * @param opts - Query options object
-     * @param opts.is - Exact match (sets both `from` and `to` to same value)
-     * @param opts.from - Range start (inclusive)
-     * @param opts.after - Range start (exclusive)
-     * @param opts.to - Range end (inclusive)
-     * @param opts.before - Range end (exclusive)
-     * @param opts.reverse - Whether to iterate in reverse order
+     * @param opts Query options object
+     * @param opts.is Exact match (sets both `from` and `to` to same value)
+     * @param opts.from Range start (inclusive)
+     * @param opts.after Range start (exclusive)
+     * @param opts.to Range end (inclusive)
+     * @param opts.before Range end (exclusive)
+     * @param opts.reverse Whether to iterate in reverse order
      * @returns An iterable of model instances matching the query
      * 
      * @example
@@ -375,10 +375,10 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * Uses the same query options as {@link find}. The batch is committed and a new
      * transaction started once either `limitSeconds` or `limitRows` is exceeded.
      *
-     * @param opts - Query options (same as `find()`), plus:
-     * @param opts.limitSeconds - Max seconds per transaction batch (default: 1)
-     * @param opts.limitRows - Max rows per transaction batch (default: 4096)
-     * @param callback - Called for each matching row within a transaction
+     * @param opts Query options (same as `find()`), plus:
+     * @param opts.limitSeconds Max seconds per transaction batch (default: 1)
+     * @param opts.limitRows Max rows per transaction batch (default: 4096)
+     * @param callback Called for each matching row within a transaction
      */
     public async batchProcess(
         opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number } = {} as any,
@@ -601,7 +601,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
 
     /**
      * Get a model instance by primary key values.
-     * @param args - The primary key values.
+     * @param args The primary key values.
      * @returns The model instance if found, undefined otherwise.
      * 
      * @example

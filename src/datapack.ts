@@ -46,7 +46,7 @@ export default class DataPack {
 
     /**
      * Create a new DataPack instance.
-     * @param data - Optional initial data as Uint8Array or buffer size as number.
+     * @param data Optional initial data as Uint8Array or buffer size as number.
      */
     constructor(data: Uint8Array | number = 1900) {
         if (data instanceof Uint8Array) {
@@ -59,10 +59,10 @@ export default class DataPack {
 
     /**
      * Helper function to write a multi-byte integer with length prefix
-     * @param value - The value to write
-     * @param headerType - The type bits (0-7) for the header
-     * @param invertBytes - Whether to invert bytes (for negative numbers)
-     * @param invertByteCount - Whether to invert the byte count (for type 0)
+     * @param value The value to write
+     * @param headerType The type bits (0-7) for the header
+     * @param invertBytes Whether to invert bytes (for negative numbers)
+     * @param invertByteCount Whether to invert the byte count (for type 0)
      */
     private writeMultiByteNumber(value: number, headerType: number, invertBytes: boolean = false, invertByteCount: boolean = false): void {
         let byteCount = 0;
@@ -87,8 +87,8 @@ export default class DataPack {
 
     /**
      * Helper function to read a multi-byte integer with length prefix
-     * @param byteCount - Number of bytes to read
-     * @param invertBytes - Whether to invert bytes (for negative numbers)
+     * @param byteCount Number of bytes to read
+     * @param invertBytes Whether to invert bytes (for negative numbers)
      * @returns The read value
      */
     private readMultiByteNumber(byteCount: number, invertBytes: boolean = false): number {
@@ -383,7 +383,7 @@ export default class DataPack {
 
     /**
      * Ensure the buffer has capacity for additional bytes.
-     * @param bytesNeeded - Number of additional bytes needed.
+     * @param bytesNeeded Number of additional bytes needed.
      */
     private ensureCapacity(bytesNeeded: number): void {
         const needed = this.writePos + bytesNeeded;
@@ -511,7 +511,7 @@ export default class DataPack {
     /**
      * Like writeString but writes without a length prefix and with a null terminator, for ordered storage.
      * Can be read with {@link read} or {@link readString} just like any other string.
-     * @param str - The string to write. May not contain null characters.
+     * @param str The string to write. May not contain null characters.
      */
     writeOrderedString(str: string): DataPack {
         const utf8Bytes = new TextEncoder().encode(str);

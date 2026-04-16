@@ -22,7 +22,7 @@ import * as E from "edinburgh";
 // Initialize the database (optional, defaults to ".edinburgh")
 E.init("./my-database");
 
-const User = E.defineModel(class {
+const User = E.defineModel("User", class {
     id = E.field(E.identifier);
     name = E.field(E.string);
     age = E.field(E.number);
@@ -44,7 +44,6 @@ const User = E.defineModel(class {
     unique: {
         byEmail: "email",
     },
-    tableName: "User",
 });
 
 await E.transact(() => {
@@ -77,12 +76,15 @@ await E.transact(() => {
 
 ### Defining Models
 
-Models are plain, usually anonymous, classes passed to `E.defineModel()`:
+A model is defined using the `E.defineModel()` function by passing it..
+- a consistent table name,
+- an (anonymous) class containing `E.field` database properties and optionally regular properties/methods, and
+- optional key/index configuration.
 
 ```typescript
 import * as E from "edinburgh";
 
-const User = E.defineModel(class {
+const User = E.defineModel("User", class {
   id = E.field(E.identifier);
   name = E.field(E.string);
   email = E.field(E.string);
@@ -116,7 +118,7 @@ Instance fields are declared with `E.field(type, options?)`. Available types:
 #### Defaults
 
 ```typescript
-const Post = E.defineModel(class {
+const Post = E.defineModel("Post", class {
   id = E.field(E.identifier); // auto-generated
   title = E.field(E.string);
   status = E.field(E.or("draft", "published"), {default: "draft"});
@@ -159,7 +161,7 @@ Transactions auto-retry on conflict (up to 6 times by default). Keep transaction
 Edinburgh supports three index types:
 
 ```typescript
-const Product = E.defineModel(class {
+const Product = E.defineModel("Product", class {
   sku = E.field(E.string);
   name = E.field(E.string);
   category = E.field(E.string);
@@ -221,7 +223,7 @@ await E.transact(() => {
 #### Composite Primary Keys
 
 ```typescript
-const Event = E.defineModel(class {
+const Event = E.defineModel("Event", class {
   year = E.field(E.number);
   month = E.field(E.number);
   id = E.field(E.identifier);
@@ -244,7 +246,7 @@ await E.transact(() => {
 You can freely add regular methods, getters, and other non-persistent properties to model classes. These work normally in JavaScript but are **not stored in the database** and **not synchronized** across transactions or processes.
 
 ```typescript
-const User = E.defineModel(class {
+const User = E.defineModel("User", class {
   firstName = E.field(E.string);
   lastName = E.field(E.string);
 
@@ -267,7 +269,7 @@ const User = E.defineModel(class {
 Instead of naming fields, you can pass a function as an index specification. The function receives a model instance and returns an **array** of index key values. Each element creates a separate index entry, enabling multi-value indexes. Return `[]` to skip indexing for that instance (partial index).
 
 ```typescript
-const Article = E.defineModel(class {
+const Article = E.defineModel("Article", class {
   id = E.field(E.identifier);
   firstName = E.field(E.string);
   lastName = E.field(E.string);
@@ -303,12 +305,12 @@ await E.transact(() => {
 Use `E.link(Model)` for foreign keys. Use a thunk (a function that just returns a value) for forward references when needed:
 
 ```typescript
-const Author = E.defineModel(class {
+const Author = E.defineModel("Author", class {
   id = E.field(E.identifier);
   name = E.field(E.string);
 }, { pk: "id" });
 
-const Book = E.defineModel(class {
+const Book = E.defineModel("Book", class {
   id = E.field(E.identifier);
   title = E.field(E.string);
   author = E.field(E.link(Author));
@@ -381,7 +383,7 @@ await Product.batchProcess({ limitRows: 1000 }, (product) => {
 When you change a model's schema, Edinburgh lazily migrates old records on access. You can provide a `static migrate(record)` function to transform old rows:
 
 ```typescript
-const UserV2 = E.defineModel(class {
+const UserV2 = E.defineModel("User", class {
   id = E.field(E.identifier);
   name = E.field(E.string);
   role = E.field(E.string);  // newly added field
@@ -389,7 +391,7 @@ const UserV2 = E.defineModel(class {
   static migrate(record: Record<string, any>) {
     record.role ??= record.name.indexOf("admin") >= 0 ? "admin" : "user"; // set role based on name for old records
   }
-}
+})
 ```
 
 Edinburgh will lazily (re)run the `migrate` function on an instance whenever its implementation (the literal function code) has changed. For robustness, make sure that your `migrate` function...
@@ -424,7 +426,7 @@ console.log(result.secondaries);  // { User: 1500 }
 Compute derived fields before data is written:
 
 ```typescript
-const Article = E.defineModel(class {
+const Article = E.defineModel("Article", class {
   id = E.field(E.identifier);
   title = E.field(E.string);
   slug = E.field(E.string);
@@ -432,7 +434,7 @@ const Article = E.defineModel(class {
   preCommit() {
     this.slug = this.title.toLowerCase().replace(/\s+/g, "-");
   }
-}, { pk: "id" });
+});
 ```
 
 ### Change Tracking
@@ -515,7 +517,7 @@ times.
 
 **Parameters:**
 
-- `fn: () => T` - - The function to execute within the transaction context. Receives a Transaction instance.
+- `fn: () => T` - The function to execute within the transaction context. Receives a Transaction instance.
 
 **Returns:** A promise that resolves with the function's return value.
 
@@ -584,7 +586,7 @@ Set a callback function to be called after a model is saved and committed.
 **Examples:**
 
 ```typescript
-const User = E.defineModel(class {
+const User = E.defineModel("User", class {
   id = E.field(E.identifier);
   name = E.field(E.string);
   email = E.field(E.string);
@@ -596,7 +598,7 @@ const User = E.defineModel(class {
 
 #### Model.tableName · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
-The database table name (defaults to class name).
+The database table name.
 
 **Type:** `string`
 
@@ -629,12 +631,12 @@ will only be updated when `runMigration()` is run (not during lazy loading).
 
 **Parameters:**
 
-- `record: Record<string, any>` - - A plain object with all field values from the old schema version.
+- `record: Record<string, any>` - A plain object with all field values from the old schema version.
 
 **Examples:**
 
 ```typescript
-const User = E.defineModel(class {
+const User = E.defineModel("User", class {
   id = E.field(E.identifier);
   name = E.field(E.string);
   role = E.field(E.string);  // new field
@@ -691,7 +693,7 @@ new instance is created with `obj` as its initial properties.
 **Parameters:**
 
 - `this: T`
-- `obj: Partial<Record<string, any>>` - - Partial model data that **must** include every primary key field.
+- `obj: Partial<Record<string, any>>` - Partial model data that **must** include every primary key field.
 
 **Returns:** The loaded-and-updated or newly created instance.
 
@@ -711,7 +713,7 @@ Common use cases:
 **Examples:**
 
 ```typescript
-const Post = E.defineModel(class {
+const Post = E.defineModel("Post", class {
   id = E.field(E.identifier);
   title = E.field(E.string);
   slug = E.field(E.string);
@@ -781,7 +783,7 @@ Validate all fields in this model instance.
 
 **Parameters:**
 
-- `raise: boolean` (optional) - - If true, throw on first validation error.
+- `raise: boolean` (optional) - If true, throw on first validation error.
 
 **Returns:** Array of validation errors (empty if valid).
 
@@ -840,8 +842,9 @@ typed fields, primary key access, and optional secondary and unique indexes.
 
 **Parameters:**
 
-- `cls: T` - - A plain class whose properties use E.field().
-- `opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, tableName?: string, override?: boolean }` - - Registration options.
+- `tableName: string` - The database table name for this model.
+- `cls: T` - A plain class whose properties use E.field().
+- `opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, override?: boolean }` - Registration options.
 
 **Returns:** The enhanced model constructor.
 
@@ -861,15 +864,15 @@ This allows for both runtime introspection and compile-time type safety.
 
 **Parameters:**
 
-- `type: TypeWrapper<T>` - - The type wrapper for this field.
-- `options: Partial<FieldConfig<T>>` (optional) - - Additional field configuration options.
+- `type: TypeWrapper<T>` - The type wrapper for this field.
+- `options: Partial<FieldConfig<T>>` (optional) - Additional field configuration options.
 
 **Returns:** The field value (typed as T, but actually returns FieldConfig<T>).
 
 **Examples:**
 
 ```typescript
-const User = E.defineModel(class {
+const User = E.defineModel("User", class {
   name = E.field(E.string, {description: "User's full name"});
   age = E.field(E.opt(E.number), {description: "User's age", default: 25});
 });
@@ -940,7 +943,7 @@ Create an optional type wrapper (allows undefined).
 
 **Parameters:**
 
-- `inner: T` - - The inner type to make optional.
+- `inner: T` - The inner type to make optional.
 
 **Returns:** A union type that accepts the inner type or undefined.
 
@@ -963,7 +966,7 @@ Create a union type wrapper from multiple type choices.
 
 **Parameters:**
 
-- `choices: T` - - The type choices for the union.
+- `choices: T` - The type choices for the union.
 
 **Returns:** A union type instance.
 
@@ -986,8 +989,8 @@ Create an array type wrapper with optional length constraints.
 
 **Parameters:**
 
-- `inner: TypeWrapper<T>` - - Type wrapper for array elements.
-- `opts: {min?: number, max?: number}` (optional) - - Optional constraints (min/max length).
+- `inner: TypeWrapper<T>` - Type wrapper for array elements.
+- `opts: {min?: number, max?: number}` (optional) - Optional constraints (min/max length).
 
 **Returns:** An array type instance.
 
@@ -1010,8 +1013,8 @@ Create a Set type wrapper with optional length constraints.
 
 **Parameters:**
 
-- `inner: TypeWrapper<T>` - - Type wrapper for set elements.
-- `opts: {min?: number, max?: number}` (optional) - - Optional constraints (min/max length).
+- `inner: TypeWrapper<T>` - Type wrapper for set elements.
+- `opts: {min?: number, max?: number}` (optional) - Optional constraints (min/max length).
 
 **Returns:** A set type instance.
 
@@ -1034,7 +1037,7 @@ Create a Record type wrapper for key-value objects with string or number keys.
 
 **Parameters:**
 
-- `inner: TypeWrapper<T>` - - Type wrapper for record values.
+- `inner: TypeWrapper<T>` - Type wrapper for record values.
 
 **Returns:** A record type instance.
 
@@ -1056,7 +1059,7 @@ Create a literal type wrapper for a constant value.
 
 **Parameters:**
 
-- `value: T` - - The literal value.
+- `value: T` - The literal value.
 
 **Returns:** A literal type instance.
 
@@ -1079,19 +1082,19 @@ Create a link type wrapper for model relationships.
 
 **Parameters:**
 
-- `TargetModel: T` - - The model class this link points to.
+- `TargetModel: T` - The model class this link points to.
 
 **Returns:** A link type instance.
 
 **Examples:**
 
 ```typescript
-const Author = E.defineModel(class {
+const Author = E.defineModel("Author", class {
   id = E.field(E.identifier);
   posts = E.field(E.array(E.link(() => Book)));
 }, { pk: "id" });
 
-const Book = E.defineModel(class {
+const Book = E.defineModel("Book", class {
   id = E.field(E.identifier);
   author = E.field(E.link(Author));
 }, { pk: "id" });
@@ -1120,8 +1123,8 @@ Indexes enable fast queries on specific field combinations and enforce uniquenes
 
 **Constructor Parameters:**
 
-- `MyModel`: - The model class this index belongs to.
-- `_fieldNames`: - Array of field names that make up this index.
+- `MyModel`: The model class this index belongs to.
+- `_fieldNames`: Array of field names that make up this index.
 
 #### baseIndex.find · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
@@ -1163,8 +1166,8 @@ Indexes enable fast queries on specific field combinations and enforce uniquenes
 
 **Parameters:**
 
-- `opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number }` (optional) - - Query options (same as `find()`), plus:
-- `callback: (row: InstanceType<M>) => void | Promise<void>` - - Called for each matching row within a transaction
+- `opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number }` (optional) - Query options (same as `find()`), plus:
+- `callback: (row: InstanceType<M>) => void | Promise<void>` - Called for each matching row within a transaction
 
 #### baseIndex.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 

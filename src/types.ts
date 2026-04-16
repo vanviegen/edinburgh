@@ -24,34 +24,34 @@ export abstract class TypeWrapper<const T> {
     
     /**
     * Serialize a value from an object property to a Pack.
-    * @param value - The value to serialize.
-    * @param pack - The Pack instance to write to.
+    * @param value The value to serialize.
+    * @param pack The Pack instance to write to.
     */
     abstract serialize(value: T, pack: DataPack): void;
 
     /**
     * Deserialize a value from a Pack into an object property.
-    * @param pack - The Pack instance to read from.
+    * @param pack The Pack instance to read from.
     */
     abstract deserialize(pack: DataPack): T;
 
     /**
     * Validate a value.
-    * @param value - The value to validate.
+    * @param value The value to validate.
     * @returns - A DatabaseError if validation fails.
     */
     abstract getError(value: T): DatabaseError | void;
     
     /**
     * Serialize type metadata to a Pack (for schema serialization).
-    * @param pack - The Pack instance to write to.
+    * @param pack The Pack instance to write to.
     */
     serializeType(pack: DataPack) {}
     
     /**
     * Check if indexing should be skipped for this field value.
-    * @param obj - The object containing the value.
-    * @param prop - The property name or index.
+    * @param obj The object containing the value.
+    * @param prop The property name or index.
     * @returns true if indexing should be skipped.
     */
     containsNull(value: T): boolean {
@@ -79,7 +79,7 @@ export abstract class TypeWrapper<const T> {
 export interface TypeWrapper<T> {
     /**
     * Generate a default value for this type.
-    * @param model - The model instance.
+    * @param model The model instance.
     * @returns The default value.
     */
     default?(model: any): T;
@@ -180,8 +180,8 @@ class ArrayType<T> extends TypeWrapper<T[]> {
     
     /**
     * Create a new ArrayType.
-    * @param inner - Type wrapper for array elements.
-    * @param opts - Array constraints (min/max length).
+    * @param inner Type wrapper for array elements.
+    * @param opts Array constraints (min/max length).
     */
     constructor(public inner: TypeWrapper<T>, public opts: {min?: number, max?: number} = {}) {
         super();
@@ -261,7 +261,7 @@ export class SetType<T> extends TypeWrapper<Set<T>> {
 
     /**
     * Create a new SetType.
-    * @param inner - Type wrapper for set elements.
+    * @param inner Type wrapper for set elements.
     */
     constructor(public inner: TypeWrapper<T>, public opts: {min?: number, max?: number} = {}) {
         super();
@@ -430,7 +430,7 @@ class OrType<const T> extends TypeWrapper<T> {
     
     /**
     * Create a new OrType.
-    * @param choices - Array of type wrappers representing the union choices.
+    * @param choices Array of type wrappers representing the union choices.
     */
     constructor(public choices: TypeWrapper<T>[]) {
         super();
@@ -521,7 +521,7 @@ class LiteralType<const T> extends TypeWrapper<T> {
     
     /**
     * Create a new LiteralType.
-    * @param value - The literal value this type represents.
+    * @param value The literal value this type represents.
     */
     constructor(public value: T) {
         super();
@@ -610,7 +610,7 @@ export class LinkType<T extends new (...args: any[]) => Model<any>> extends Type
 
     /**
     * Create a new LinkType.
-    * @param TargetModel - The model class this link points to, or a thunk for forward references.
+    * @param TargetModel The model class this link points to, or a thunk for forward references.
     */
     constructor(TargetModel: T | (() => T)) {
         super();
@@ -680,7 +680,7 @@ export const undef = new LiteralType(undefined) as TypeWrapper<undefined>;
 /**
 * Create a literal type wrapper for a constant value.
 * @template T - The literal type.
-* @param value - The literal value.
+* @param value The literal value.
 * @returns A literal type instance.
 * 
 * @example
@@ -696,7 +696,7 @@ export function literal<const T>(value: T): TypeWrapper<T> {
 /**
 * Create a union type wrapper from multiple type choices.
 * @template T - Array of type wrapper or basic types.
-* @param choices - The type choices for the union.
+* @param choices The type choices for the union.
 * @returns A union type instance.
 * 
 * @example
@@ -712,7 +712,7 @@ export function or<const T extends (TypeWrapper<unknown>|BasicType)[]>(...choice
 /**
 * Create an optional type wrapper (allows undefined).
 * @template T - Type wrapper or basic type to make optional.
-* @param inner - The inner type to make optional.
+* @param inner The inner type to make optional.
 * @returns A union type that accepts the inner type or undefined.
 * 
 * @example
@@ -728,8 +728,8 @@ export function opt<const T extends TypeWrapper<unknown>|BasicType>(inner: T): T
 /**
 * Create an array type wrapper with optional length constraints.
 * @template T - The element type.
-* @param inner - Type wrapper for array elements.
-* @param opts - Optional constraints (min/max length).
+* @param inner Type wrapper for array elements.
+* @param opts Optional constraints (min/max length).
 * @returns An array type instance.
 * 
 * @example
@@ -745,8 +745,8 @@ export function array<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?:
 /**
 * Create a Set type wrapper with optional length constraints.
 * @template T - The element type.
-* @param inner - Type wrapper for set elements.
-* @param opts - Optional constraints (min/max length).
+* @param inner Type wrapper for set elements.
+* @param opts Optional constraints (min/max length).
 * @returns A set type instance.
 *
 * @example
@@ -762,7 +762,7 @@ export function set<const T>(inner: TypeWrapper<T>, opts: {min?: number, max?: n
 /**
 * Create a Record type wrapper for key-value objects with string or number keys.
 * @template T - The value type.
-* @param inner - Type wrapper for record values.
+* @param inner Type wrapper for record values.
 * @returns A record type instance.
 *
 * @example
@@ -777,17 +777,17 @@ export function record<const T>(inner: TypeWrapper<T>): TypeWrapper<Record<strin
 /**
 * Create a link type wrapper for model relationships.
 * @template T - The target model class.
-* @param TargetModel - The model class this link points to.
+* @param TargetModel The model class this link points to.
 * @returns A link type instance.
 * 
 * @example
 * ```typescript
-* const Author = E.defineModel(class {
+* const Author = E.defineModel("Author", class {
 *   id = E.field(E.identifier);
 *   posts = E.field(E.array(E.link(() => Book)));
 * }, { pk: "id" });
 * 
-* const Book = E.defineModel(class {
+* const Book = E.defineModel("Book", class {
 *   id = E.field(E.identifier);
 *   author = E.field(E.link(Author));
 * }, { pk: "id" });
@@ -815,8 +815,8 @@ function wrapIfLiteral(type: any) {
 
 /**
 * Serialize a type wrapper to a Pack for schema persistence.
-* @param arg - The type wrapper to serialize.
-* @param pack - The Pack instance to write to.
+* @param arg The type wrapper to serialize.
+* @param pack The Pack instance to write to.
 */
 export function serializeType(arg: TypeWrapper<any>, pack: DataPack) {
     pack.write(arg.kind);
@@ -839,8 +839,8 @@ const TYPE_WRAPPERS: Record<string, TypeWrapper<any> | {deserializeType: (pack: 
 
 /**
 * Deserialize a type wrapper from a Pack.
-* @param pack - The Pack instance to read from.
-* @param featureFlags - Feature flags for version compatibility.
+* @param pack The Pack instance to read from.
+* @param featureFlags Feature flags for version compatibility.
 * @returns The deserialized type wrapper.
 */
 export function deserializeType(pack: DataPack, featureFlags: number): TypeWrapper<any> {

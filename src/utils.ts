@@ -2,8 +2,8 @@ import * as lowlevel from "olmdb/lowlevel";
 
 /**
  * Assert function for runtime checks with TypeScript assertion support.
- * @param cond - Condition to check.
- * @param message - Optional error message.
+ * @param cond Condition to check.
+ * @param message Optional error message.
  * @throws {Error} If condition is false.
  */
 export function assert(cond: any, message?: string): asserts cond {
@@ -58,8 +58,8 @@ export const ERROR_AT = /^(.*) at ([a-zA-Z0-9_.]+)$/;
 
 /**
  * Add a path segment to an exception for better error reporting.
- * @param error - The (Database)Error to modify.
- * @param path - The path segment to add (string or number).
+ * @param error The (Database)Error to modify.
+ * @param path The path segment to add (string or number).
  * @returns The modified DatabaseError.
  */
 export function addErrorPath<T>(error: T, path: string | number): T {
