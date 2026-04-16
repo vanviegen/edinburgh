@@ -1071,11 +1071,11 @@ const countType = E.literal(42);
 
 Create a link type wrapper for model relationships.
 
-**Signature:** `{ <const T extends ModelCtorLike>(TargetModel: T): TypeWrapper<InstanceType<T>>; <const T extends ModelCtorLike>(TargetModel: () => T): TypeWrapper<InstanceType<T>>; }`
+**Signature:** `{ <const T extends new (...args: any[]) => Model<any>>(TargetModel: T): TypeWrapper<InstanceType<T>>; <const T extends new (...args: any[]) => Model<any>>(TargetModel: () => T): TypeWrapper<...>; }`
 
 **Type Parameters:**
 
-- `T extends ModelCtorLike` - The target model class.
+- `T extends new (...args: any[]) => Model<any>` - The target model class.
 
 **Parameters:**
 

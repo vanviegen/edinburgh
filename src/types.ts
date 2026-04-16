@@ -604,12 +604,9 @@ class IdentifierType extends TypeWrapper<string> {
 * @internal Type wrapper for model relationships (foreign keys).
 * @template T - The target model class type.
 */
-type ModelCtorLike = (abstract new (...args: any[]) => any) & { tableName?: string; name?: string; _primary?: any };
-
-export class LinkType<T extends ModelCtorLike> extends TypeWrapper<InstanceType<T>> {
+export class LinkType<T extends new (...args: any[]) => Model<any>> extends TypeWrapper<InstanceType<T>> {
     kind = 'link';
-    tableName: string;
-    _TargetModel: T | (() => T);
+    private TargetModel: T | (() => T);
 
     /**
     * Create a new LinkType.
@@ -617,17 +614,12 @@ export class LinkType<T extends ModelCtorLike> extends TypeWrapper<InstanceType<
     */
     constructor(TargetModel: T | (() => T)) {
         super();
-        this._TargetModel = TargetModel;
-        this.tableName = (TargetModel as any).tableName || '';
+        this.TargetModel = TargetModel;
     }
 
-    _getTargetModel(): T {
-        if (typeof this._TargetModel === 'function' && !(this._TargetModel as any).tableName) {
-            this._TargetModel = (this._TargetModel as () => T)();
-        }
-        const model = this._TargetModel as T;
-        this.tableName ||= (model as any).tableName || (model as any).name;
-        return model;
+    getLinkedModel(): typeof Model<unknown> {
+        if (!('getLazy' in this.TargetModel)) this.TargetModel = (this.TargetModel as unknown as () => T)();
+        return this.TargetModel as any;
     }
     
     serialize(model: InstanceType<T>, pack: DataPack) {
@@ -635,32 +627,28 @@ export class LinkType<T extends ModelCtorLike> extends TypeWrapper<InstanceType<
     }
     
     deserialize(pack: DataPack) {
-        return this._getTargetModel()._primary!._get(currentTxn(), pack.readUint8Array(), false);
+        return this.getLinkedModel()._primary._get(currentTxn(), pack.readUint8Array(), false);
     }
     
     getError(value: InstanceType<T>) {
-        const TargetModel = this._getTargetModel() as any;
+        const TargetModel = this.getLinkedModel();
         if (!((value as any) instanceof TargetModel)) {
-            return new DatabaseError(`Expected instance of ${this.tableName}, got ${typeof value}`, 'VALUE_ERROR');
+            return new DatabaseError(`Expected instance of ${TargetModel.tableName}, got ${typeof value}`, 'VALUE_ERROR');
         }
     }
     
     serializeType(pack: DataPack): void {
-        pack.write(this._getTargetModel().tableName);
+        pack.write(this.getLinkedModel().tableName);
     }
     
     static deserializeType(pack: DataPack, featureFlags: number): LinkType<any> {
         const tableName = pack.readString();
         const targetModel = modelRegistry[tableName];
         if (!targetModel) throw new DatabaseError(`Could not deserialize undefined model ${tableName}`, 'DESERIALIZATION_ERROR');
-        return new LinkType(targetModel);
+        return new LinkType(targetModel as any);
     }
 
-    toString() { return `link<${this._getTargetModel().tableName}>`; }
-
-    getLinkedModel() {
-        return this._getTargetModel() as any as typeof Model<unknown>;
-    }
+    toString() { return `link<${this.getLinkedModel().tableName}>`; }
 }
 
 /** Type wrapper instance for the string type. */
@@ -805,10 +793,10 @@ export function record<const T>(inner: TypeWrapper<T>): TypeWrapper<Record<strin
 * }, { pk: "id" });
 * ```
 */
-export function link<const T extends ModelCtorLike>(TargetModel: T): TypeWrapper<InstanceType<T>>;
-export function link<const T extends ModelCtorLike>(TargetModel: () => T): TypeWrapper<InstanceType<T>>;
+export function link<const T extends new (...args: any[]) => Model<any>>(TargetModel: T): TypeWrapper<InstanceType<T>>;
+export function link<const T extends new (...args: any[]) => Model<any>>(TargetModel: () => T): TypeWrapper<InstanceType<T>>;
 export function link(TargetModel: any): TypeWrapper<any> {
-    return new LinkType(TargetModel as any);
+    return new LinkType(TargetModel);
 }
 
 
