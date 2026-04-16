@@ -28,7 +28,7 @@ export interface Transaction {
     instances: Set<Model<unknown>>;
     instancesByPk: Map<number, Model<unknown>>;
 }
-import { BaseIndex as BaseIndex, NonPrimaryIndex, PrimaryIndex, IndexRangeIterator } from "./indexes.js";
+import { BaseIndex, NonPrimaryIndex, PrimaryIndex, IndexRangeIterator, UniqueIndex, SecondaryIndex, FindOptions } from "./indexes.js";
 import { addErrorPath, logLevel, assert, dbGet, hashBytes } from "./utils.js";
 
 /**
@@ -58,10 +58,10 @@ export interface FieldConfig<T> {
  * 
  * @example
  * ```typescript
- * class User extends E.Model<User> {
+ * const User = E.defineModel(class {
  *   name = E.field(E.string, {description: "User's full name"});
  *   age = E.field(E.opt(E.number), {description: "User's age", default: 25});
- * }
+ * });
  * ```
  */
 export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> = {}): T {
@@ -82,76 +82,160 @@ function isObjectEmpty(obj: object) {
 
 export type Change = Record<any, any> | "created" | "deleted";
 
+let autoTableNameId = 0;
+
+type FieldsOf<T> = T extends new () => infer I ? I : never;
+type ModelInstance<FIELDS> = FIELDS & Model<FIELDS>;
+
+type PKArgs<FIELDS, PK> =
+    PK extends readonly (keyof FIELDS & string)[]
+        ? { [I in keyof PK]: PK[I] extends keyof FIELDS ? FIELDS[PK[I]] : never }
+        : PK extends keyof FIELDS & string
+            ? [FIELDS[PK]]
+            : [string];
+
+type UniqueFor<SPEC> =
+    SPEC extends readonly string[] ? UniqueIndex<any, SPEC>
+    : SPEC extends string ? UniqueIndex<any, [SPEC]>
+    : SPEC extends (instance: any) => infer R
+        ? R extends (infer V)[] ? UniqueIndex<any, [], [V]>
+        : UniqueIndex<any, [], [R]>
+    : never;
+
+type SecondaryFor<SPEC> =
+    SPEC extends readonly string[] ? SecondaryIndex<any, SPEC>
+    : SPEC extends string ? SecondaryIndex<any, [SPEC]>
+    : SPEC extends (instance: any) => infer R
+        ? R extends (infer V)[] ? SecondaryIndex<any, [], [V]>
+        : SecondaryIndex<any, [], [R]>
+    : never;
+
+type RegisteredModel<FIELDS, PKA extends readonly any[], UNIQUE, INDEX> = {
+    new (initial?: Partial<FIELDS>): ModelInstance<FIELDS>;
+    tableName: string;
+    fields: Record<string | symbol | number, FieldConfig<unknown>>;
+    get(...args: PKA): ModelInstance<FIELDS> | undefined;
+    getLazy(...args: PKA): ModelInstance<FIELDS>;
+    find(opts: FindOptions<PKA, 'first'>): ModelInstance<FIELDS> | undefined;
+    find(opts: FindOptions<PKA, 'single'>): ModelInstance<FIELDS>;
+    find(opts?: FindOptions<PKA>): IndexRangeIterator<any>;
+    batchProcess(opts?: FindOptions<PKA> & { limitSeconds?: number; limitRows?: number }, callback?: (row: ModelInstance<FIELDS>) => any): Promise<void>;
+    replaceInto(obj: Partial<FIELDS>): ModelInstance<FIELDS>;
+} &
+    { [K in keyof UNIQUE]: UniqueFor<UNIQUE[K]> } &
+    { [K in keyof INDEX]: SecondaryFor<INDEX[K]> };
+
 /**
  * Register a model class with the Edinburgh ORM system.
- * 
- * @template T - The model class type.
- * @param MyModel - The model class to register.
- * @returns The enhanced model class with ORM capabilities.
- * 
- * @example
- * ```typescript
- * ⁣@E.registerModel
- * class User extends E.Model<User> {
- *   static pk = E.index(User, ["id"], "primary");
- *   id = E.field(E.identifier);
- *   name = E.field(E.string);
- * }
- * ```
+ *
+ * Converts a plain class into a fully-featured model with database persistence,
+ * typed fields, primary key access, and optional secondary and unique indexes.
+ *
+ * @param cls - A plain class whose properties use E.field().
+ * @param opts - Registration options.
+ * @param opts.pk - Primary key field name or array of field names.
+ * @param opts.unique - Named unique index specifications (field name, field array, or compute function).
+ * @param opts.index - Named secondary index specifications (field name, field array, or compute function).
+ * @param opts.tableName - Explicit database table name.
+ * @param opts.override - Replace a previous model with the same table name.
+ * @returns The enhanced model constructor.
  */
-export function registerModel<T extends typeof Model<unknown>>(MyModel: T): T {
-    const MockModel = getMockModel(MyModel);
+export function defineModel<
+    T extends new () => any,
+    const PK extends (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[],
+    const UNIQUE extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>,
+    const INDEX extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>,
+>(
+    cls: T,
+    opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, tableName?: string, override?: boolean }
+): RegisteredModel<FieldsOf<T>, PKArgs<FieldsOf<T>, PK>, UNIQUE, INDEX>;
 
-    // Copy own static methods/properties
-    for(const name of Object.getOwnPropertyNames(MyModel)) {
-        if (name !== 'length' && name !== 'prototype' && name !== 'name' && name !== 'mock' && name !== 'override') {
-            (MockModel as any)[name] = (MyModel as any)[name];
+export function defineModel(cls: any, opts?: any): any {
+    Object.setPrototypeOf(cls.prototype, Model.prototype);
+
+    const MockModel = function(this: any, initial?: Record<string, any>, txn: Transaction = currentTxn()) {
+        this._txn = txn;
+        txn.instances.add(this);
+        if (initial) Object.assign(this, initial);
+    } as any;
+
+    cls.prototype.constructor = MockModel;
+    Object.setPrototypeOf(MockModel, Model);
+    MockModel.prototype = cls.prototype;
+    MockModel._original = cls;
+
+    for (const name of Object.getOwnPropertyNames(cls)) {
+        if (name !== 'length' && name !== 'prototype' && name !== 'name') {
+            MockModel[name] = cls[name];
         }
     }
-    MockModel.tableName ||= MyModel.name;
 
-    // Register the constructor by name
+    MockModel.tableName = opts?.tableName || cls.name || `Model${++autoTableNameId}`;
+
     if (MockModel.tableName in modelRegistry) {
-        if (!(MyModel as any).override) {
+        if (!opts?.override) {
             throw new DatabaseError(`Model with table name '${MockModel.tableName}' already registered`, 'INIT_ERROR');
         }
         delete modelRegistry[MockModel.tableName];
     }
-    modelRegistry[MockModel.tableName] = MockModel;
 
-    return MockModel;   
-}
+    const instance = new cls();
+    if (!opts?.pk && !instance.id) {
+        instance.id = { type: identifier };
+    }
 
-export function getMockModel<T extends typeof Model<unknown>>(OrgModel: T): T {
-    const AnyOrgModel = OrgModel as any;
-    if (AnyOrgModel._isMock) return OrgModel;
-    if (AnyOrgModel._mock) return AnyOrgModel._mock;
+    MockModel.fields = {};
+    for (const key in instance) {
+        const value = instance[key] as FieldConfig<unknown>;
+        if (value && value.type instanceof TypeWrapper) {
+            MockModel.fields[key] = value;
 
-    const MockModel = function(this: any, initial?: Record<string,any> | undefined, txn: Transaction = currentTxn()) {
-        // This constructor should only be called when the user does 'new Model'. We'll bypass this when
-        // loading objects. Add to 'instances', so the object will be saved.
-        this._txn = txn;
-        txn.instances.add(this);
-        if (initial) {
-            Object.assign(this, initial);
+            const defObj = value.default === undefined ? value.type : value;
+            const def = defObj.default;
+            if (typeof def === 'function') {
+                Object.defineProperty(MockModel.prototype, key, {
+                    get() {
+                        return (this[key] = def.call(defObj, this));
+                    },
+                    set(val: any) {
+                        Object.defineProperty(this, key, {
+                            value: val,
+                            configurable: true,
+                            writable: true,
+                            enumerable: true,
+                        });
+                    },
+                    configurable: true,
+                });
+            } else if (def !== undefined) {
+                MockModel.prototype[key] = def;
+            }
         }
-    } as any as T;
+    }
 
-    // We want .constructor to point at our fake constructor function.
-    OrgModel.prototype.constructor = MockModel as any;
+    if (opts?.pk) {
+        new PrimaryIndex(MockModel, Array.isArray(opts.pk) ? opts.pk : [opts.pk]);
+    } else {
+        new PrimaryIndex(MockModel, ['id']);
+    }
 
-    // Copy the prototype chain for the constructor as well as for instantiated objects
-    Object.setPrototypeOf(MockModel, Object.getPrototypeOf(OrgModel));
-    MockModel.prototype = OrgModel.prototype;
-    (MockModel as any)._isMock = true;
-    (MockModel as any)._original = OrgModel;
-    AnyOrgModel._mock = MockModel;
+    const normalizeSpec = (spec: any) => typeof spec === 'string' ? [spec] : spec;
+
+    if (opts?.unique) {
+        for (const [name, spec] of Object.entries<any>(opts.unique)) {
+            MockModel[name] = new UniqueIndex(MockModel, normalizeSpec(spec));
+        }
+    }
+    if (opts?.index) {
+        for (const [name, spec] of Object.entries<any>(opts.index)) {
+            MockModel[name] = new SecondaryIndex(MockModel, normalizeSpec(spec));
+        }
+    }
+
+    modelRegistry[MockModel.tableName] = MockModel;
     scheduleInit();
     return MockModel;
 }
-
-// Model base class and related symbols/state
-const INIT_INSTANCE_SYMBOL = Symbol();
 
 /**
  * Model interface that ensures proper typing for the constructor property.
@@ -165,8 +249,8 @@ export interface Model<SUB> {
  * Base class for all database models in the Edinburgh ORM.
  * 
  * Models represent database entities with typed fields, automatic serialization,
- * change tracking, and relationship management. All model classes should extend
- * this base class and be decorated with `@E.registerModel`.
+ * change tracking, and relationship management. Model classes are created using
+ * `E.defineModel()`.
  *
  * ### Schema Evolution
  *
@@ -202,16 +286,14 @@ export interface Model<SUB> {
  * 
  * @example
  * ```typescript
- * ⁣@E.registerModel
- * class User extends E.Model<User> {
- *   static pk = E.primary(User, "id");
- *   
+ * const User = E.defineModel(class {
  *   id = E.field(E.identifier);
  *   name = E.field(E.string);
  *   email = E.field(E.string);
- *   
- *   static byEmail = E.unique(User, "email");
- * }
+ * }, {
+ *   pk: "id",
+ *   unique: { byEmail: "email" },
+ * });
  * ```
  */
 
@@ -225,11 +307,18 @@ export abstract class Model<SUB> {
     /** The database table name (defaults to class name). */
     static tableName: string;
 
-    /** When true, registerModel replaces an existing model with the same tableName. */
+    /** When true, defineModel replaces an existing model with the same tableName. */
     static override?: boolean;
 
     /** Field configuration metadata. */
     static fields: Record<string | symbol | number, FieldConfig<unknown>>;
+
+    // Alias statics that delegate to _primary, used by migrate.ts
+    static get _indexId() { return this._primary?._indexId; }
+    static get _currentVersion() { return this._primary._currentVersion; }
+    static get _pkFieldTypes() { return this._primary._fieldTypes; }
+    static _loadVersionInfo(txnId: number, version: number) { return this._primary._loadVersionInfo(txnId, version); }
+    static _writePrimary(txn: Transaction, pk: Uint8Array, data: Record<string, any>) { this._primary._write(txn, pk, data as any); }
 
     /**
      * Optional migration function called when deserializing rows written with an older schema version.
@@ -247,9 +336,7 @@ export abstract class Model<SUB> {
      *
      * @example
      * ```typescript
-     * ⁣@E.registerModel
-     * class User extends E.Model<User> {
-     *   static pk = E.primary(User, "id");
+     * const User = E.defineModel(class {
      *   id = E.field(E.identifier);
      *   name = E.field(E.string);
      *   role = E.field(E.string);  // new field
@@ -257,7 +344,7 @@ export abstract class Model<SUB> {
      *   static migrate(record: Record<string, any>) {
      *     record.role ??= "user";  // default for rows that predate the 'role' field
      *   }
-     * }
+     * }, { pk: "id" });
      * ```
      */
     static migrate?(record: Record<string, any>): void;
@@ -280,10 +367,7 @@ export abstract class Model<SUB> {
     _txn!: Transaction;
 
     constructor(initial: Partial<Omit<SUB, "constructor">> = {}) {
-        // This constructor will only be called once, from `initModels`. All other instances will
-        // be created by the 'fake' constructor. The typing for `initial` *is* important though.
-        if (initial as any === INIT_INSTANCE_SYMBOL) return;
-        throw new DatabaseError("The model needs a @E.registerModel decorator", 'INIT_ERROR');
+        throw new DatabaseError("Use defineModel() to create model classes", 'INIT_ERROR');
     }
 
     /**
@@ -298,9 +382,7 @@ export abstract class Model<SUB> {
      *
      * @example
      * ```typescript
-     * ⁣@E.registerModel
-     * class Post extends E.Model<Post> {
-     *   static pk = E.primary(Post, "id");
+     * const Post = E.defineModel(class {
      *   id = E.field(E.identifier);
      *   title = E.field(E.string);
      *   slug = E.field(E.string);
@@ -308,87 +390,21 @@ export abstract class Model<SUB> {
      *   preCommit() {
      *     this.slug = this.title.toLowerCase().replace(/\s+/g, "-");
      *   }
-     * }
+     * }, { pk: "id" });
      * ```
      */
     preCommit?(): void;
 
-    /**
-     * Transform the model's `E.field` properties into the appropriate JavaScript properties. Normally this is done
-     * automatically when using `transact()`, but in case you need to access `Model.fields` directly before the first
-     * transaction, you can call this method manually.
-     */
-    static initFields(reset?: boolean): void {
-        const MockModel = getMockModel(this);
-
-        if (reset) {
-            MockModel._primary._indexId = undefined;
-            MockModel._primary._versions.clear();
-            for (const sec of MockModel._secondaries || []) sec._indexId = undefined;
-        }
-
-        if (MockModel.fields) return;
-
-        // First-time init: gather field configs from a temporary instance of the original class.
-        const OrgModel = (MockModel as any)._original || this;
-        const instance = new (OrgModel as any)(INIT_INSTANCE_SYMBOL);
-
-        // If no primary key exists, create one using 'id' field
-        if (!MockModel._primary) {
-            if (!instance.id) {
-                instance.id = { type: identifier }; 
-            }
-            // @ts-ignore-next-line - `id` is not part of the type, but the user probably shouldn't touch it anyhow
-            new PrimaryIndex(MockModel, ['id']);
-        }
-
-        MockModel.fields = {};
-        for (const key in instance) {
-            const value = instance[key] as FieldConfig<unknown>;
-            // Check if this property contains field metadata
-            if (value && value.type instanceof TypeWrapper) {
-                // Set the configuration on the constructor's `fields` property
-                MockModel.fields[key] = value;
-
-                // Set default value on the prototype
-                const defObj = value.default===undefined ? value.type : value;
-                const def = defObj.default;
-                if (typeof def === 'function') {
-                    // The default is a function. We'll define a getter on the property in the model prototype,
-                    // and once it is read, we'll run the function and set the value as a plain old property
-                    // on the instance object.
-                    Object.defineProperty(MockModel.prototype, key, {    
-                        get() {
-                            // This will call set(), which will define the property on the instance.
-                            return (this[key] = def.call(defObj, this));
-                        },
-                        set(val: any) {
-                            Object.defineProperty(this, key, {
-                                value: val,
-                                configurable: true,
-                                writable: true,
-                                enumerable: true,
-                            })
-                        },
-                        configurable: true,    
-                    });
-                } else if (def !== undefined) {
-                    (MockModel.prototype as any)[key] = def;
-                }
-            }
-        }
-
-        if (logLevel >= 1) {
-            console.log(`[edinburgh] Registered model ${MockModel.tableName} with fields: ${Object.keys(MockModel.fields).join(' ')}`);
-        }
+    static _resetIndexes(): void {
+        this._primary._indexId = undefined;
+        this._primary._versions.clear();
+        for (const sec of this._secondaries || []) sec._indexId = undefined;
     }
 
     static async _loadCreateIndexes(): Promise<void> {
-        const MockModel = getMockModel(this);
-        // Always run index inits (idempotent, skip if already initialized)
-        await MockModel._primary._delayedInit();
-        for (const sec of MockModel._secondaries || []) await sec._delayedInit();
-        await MockModel._primary._initVersioning();
+        await this._primary._delayedInit();
+        for (const sec of this._secondaries || []) await sec._delayedInit();
+        await this._primary._initVersioning();
     }
 
     _setLoadedField(fieldName: string, value: any) {
@@ -518,7 +534,7 @@ export abstract class Model<SUB> {
      * 
      * @example
      * ```typescript
-     * const user = User.pk.get("user123");
+     * const user = User.get("user123");
      * user.name = "New Name";
      * user.preventPersist(); // Changes won't be saved
      * ```
@@ -530,14 +546,20 @@ export abstract class Model<SUB> {
         return this;
     }
 
-    /**
-     * Find all instances of this model in the database, ordered by primary key.
-     * @param opts - Optional parameters.
-     * @param opts.reverse - If true, iterate in reverse order.
-     * @returns An iterator.
-     */
-    static findAll<T extends typeof Model<unknown>>(this: T, opts?: {reverse?: boolean}): IndexRangeIterator<T> {
+    static get(...args: any[]): any {
+        return this._primary!.get(...args);
+    }
+
+    static getLazy(...args: any[]): any {
+        return this._primary!.getLazy(...args);
+    }
+
+    static find(opts?: any): any {
         return this._primary!.find(opts);
+    }
+
+    static batchProcess(opts: any, callback?: any): any {
+        return this._primary!.batchProcess(opts, callback);
     }
 
     /**
@@ -550,7 +572,7 @@ export abstract class Model<SUB> {
      * @param obj - Partial model data that **must** include every primary key field.
      * @returns The loaded-and-updated or newly created instance.
      */
-    static replaceInto<T extends typeof Model<any>>(this: T, obj: Partial<Omit<InstanceType<T>, "constructor">>): InstanceType<T> {
+    static replaceInto<T extends typeof Model<any>>(this: T, obj: Partial<Record<string, any>>): InstanceType<T> {
         const pk = this._primary!;
         const keyArgs = [];
         for (const fieldName of pk._fieldTypes.keys()) {
@@ -579,7 +601,7 @@ export abstract class Model<SUB> {
      * 
      * @example
      * ```typescript
-     * const user = User.pk.get("user123");
+     * const user = User.get("user123");
      * user.delete(); // Removes from database
      * ```
      */

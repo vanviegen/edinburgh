@@ -2,7 +2,6 @@ import * as lowlevel from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
 import { modelRegistry, currentTxn, Transaction } from "./models.js";
 import { dbDel, toBuffer, bytesEqual } from "./utils.js";
-import { PrimaryIndex } from "./indexes.js";
 import { deserializeType, TypeWrapper } from "./types.js";
 import { transact } from "./edinburgh.js";
 
@@ -118,13 +117,12 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
 
     // Build maps of known index IDs
     const knownIndexIds = new Set<number>();
-    const primaryByIndexId = new Map<number, { model: typeof modelRegistry[string], primary: PrimaryIndex<any, any> }>();
+    const modelByPkIndexId = new Map<number, typeof modelRegistry[string]>();
 
     for (const model of Object.values(modelRegistry)) {
         if (options.tables && !options.tables.includes(model.tableName)) continue;
-        const primary = model._primary;
-        knownIndexIds.add(primary._indexId!);
-        primaryByIndexId.set(primary._indexId!, { model, primary });
+        knownIndexIds.add(model._indexId!);
+        modelByPkIndexId.set(model._indexId!, model);
         for (const sec of model._secondaries || []) {
             knownIndexIds.add(sec._indexId!);
         }
@@ -155,7 +153,7 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
 
     // Phase 1: Populate secondary indexes and/or rewrite row data
     if (populateSecondaries || rewriteData) {
-        for (const [indexId, { model, primary }] of primaryByIndexId) {
+        for (const [indexId, model] of modelByPkIndexId) {
             let secondaryCount = 0;
             let rewrittenCount = 0;
             const migrateFn = (model as any).migrate as ((record: Record<string, any>) => void) | undefined;
@@ -164,15 +162,15 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
             await forEachRow(indexId, (txn, keyBuf, valueBuf) => {
                 const valuePack = new DataPack(valueBuf);
                 const version = valuePack.readNumber();
-                if (version === primary._currentVersion) return; // Already current
+                if (version === model._currentVersion) return; // Already current
 
-                const versionInfo = primary._loadVersionInfo(txn.id, version);
+                const versionInfo = model._loadVersionInfo(txn.id, version);
 
                 // Deserialize pre-migrate values from key + old-format value
                 const record: Record<string, any> = {};
                 const keyPack = new DataPack(keyBuf);
                 keyPack.readNumber(); // skip indexId
-                for (const [name, type] of primary._fieldTypes.entries()) {
+                for (const [name, type] of model._pkFieldTypes.entries()) {
                     record[name] = type.deserialize(keyPack);
                 }
                 for (const [name, type] of versionInfo.nonKeyFields.entries()) {
@@ -198,7 +196,7 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
 
                 // Rewrite primary row data to current version
                 if (rewriteData) {
-                    primary._write(txn, keyBuf, record);
+                    model._writePrimary(txn, keyBuf, record);
                     rewrittenCount++;
                 }
             });

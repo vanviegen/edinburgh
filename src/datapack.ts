@@ -188,7 +188,7 @@ export default class DataPack {
             this.buffer.set(data, this.writePos);
             this.writePos += data.length;
         } else if (Array.isArray(data) || (typeof data.length === 'number' && typeof data[Symbol.iterator] === 'function')) {
-            // Type 4, subtype 5: array start (also handles array-like iterables)
+            // Type 4, subtype 5: array start
             this.buffer[this.writePos++] = (4 << 5) | 5;
             for (const item of data) {
                 this.write(item);
@@ -554,7 +554,7 @@ export default class DataPack {
     writeAsObject(obj: Record<string, any>) {
         // Type 4, subtype 6: object start
         this.buffer[this.writePos++] = (4 << 5) | 6;
-        for (const key in obj) {
+        for (const key of Object.keys(obj)) {
             this.write(key);
             this.write(obj[key]);
         }

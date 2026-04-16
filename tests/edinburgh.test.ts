@@ -22,83 +22,72 @@ function expectErrorCode(code: string, fn: () => any) {
     return expect(Promise.resolve(result)).rejects.toMatchObject({ code });
 }
 
-@E.registerModel
-class Person extends E.Model<Person> {
-    static pk = E.primary(Person, ["name"]);
-
+const Person = E.defineModel(class {
     name = E.field(E.string, {description: "Full name"});
     age = E.field(E.opt(E.number), {description: "Current age", default: 42});
     cars = E.field(E.array(E.opt(E.string)), {description: "Owned car types"});
     test = E.field(E.or(E.string, E.number), {description: "Test field with union type", default: "example"});
-    ownedData = E.field(E.array(E.link(Data)), {description: "Owned data", default: () => []});
+    ownedData = E.field(E.array(E.link(() => Data)), {description: "Owned data", default: () => []});
+}, {
+    pk: "name",
+    unique: { byCombi: ["name", "test"], byCar: "cars" },
+    tableName: "Person",
+});
 
-    static byCombi = E.unique(Person, ["name","test"]);
-    static byCar = E.unique(Person, ["cars"]);
-}
-
-@E.registerModel
-class Simple extends E.Model<Simple> {
+const Simple = E.defineModel(class {
     id = E.field(E.identifier, {description: "Unique identifier"});
     value = E.field(E.number, {description: "Some number"});
     name = E.field(E.string, {description: "A name", default: "unknown"});
-    
-    static pk = E.primary(Simple, ["id"]);
-    static byValue = E.unique(Simple, ["value"]);
-}
+}, {
+    pk: "id",
+    unique: { byValue: "value" },
+    tableName: "Simple",
+});
 
-
-@E.registerModel
-class Data extends E.Model<Data> {
+const Data = E.defineModel(class {
     id = E.field(E.identifier, {description: "Unique identifier"});
     nothing = E.field(E.literal("test"), {description:  "A useless literal field with a fixed value", default: "test"});
     mode = E.field(E.or("auto", "manual", E.array(E.number)), {description: "Operation mode", default: "auto"});
     createdAt = E.field(E.number, {description: "Creation timestamp"});
     owner = E.field(E.opt(E.link(Person)), {description: "Optional data owner"});
     subjects = E.field(E.array(E.link(Person), {min: 1, max: 10}), {description:  "The people this data is about"});
+}, { tableName: "Data" }); // pk defaults to "id"
 
-    // static byCreationTime = E.index(Data, "createdAt");
-    // static bySubject = E.index("subjects", {multi: true});
-}
-
-// Additional models for comprehensive testing
-@E.registerModel
-class User extends E.Model<User> {
-    static pk = E.primary(User, ["id"]);
-    
+const User = E.defineModel(class {
     id = E.field(E.identifier, {description: "User ID"});
     email = E.field(E.string, {description: "User email"});
     name = E.field(E.string, {description: "Display name"});
     isActive = E.field(E.boolean, {description: "Account status", default: true});
-    posts = E.field(E.array(E.link(Post)), {description: "User's posts", default: () => []});
-    
-    static byEmail = E.unique(User, "email");
-}
+    posts = E.field(E.array(E.link(() => Post)), {description: "User's posts", default: () => []});
+}, {
+    pk: "id",
+    unique: { byEmail: "email" },
+    tableName: "User",
+});
 
-@E.registerModel
-class CompositeKeyModel extends E.Model<CompositeKeyModel> {
-    static pk = E.primary(CompositeKeyModel, ["category", "subcategory", "name"]);
-    
+const CompositeKeyModel = E.defineModel(class {
     category = E.field(E.orderedString, {description: "Main category"});
     subcategory = E.field(E.orderedString, {description: "Sub category"});
     name = E.field(E.orderedString, {description: "Item name"});
     value = E.field(E.number, {description: "Item value"});
-    
-    static byValue = E.unique(CompositeKeyModel, ["value"]);
-}
+}, {
+    pk: ["category", "subcategory", "name"] as const,
+    unique: { byValue: "value" },
+    tableName: "CompositeKeyModel",
+});
 
-@E.registerModel
-class Post extends E.Model<Post> {
-    static pk = E.primary(Post, ["id"]);
-    
-    id = E.field(E.identifier, {description: "Post ID"});
+const Post = E.defineModel(class {
+    // id = E.field(E.identifier, {description: "Post ID"});
     title = E.field(E.string, {description: "Post title"});
     content = E.field(E.string, {description: "Post content"});
     author = E.field(E.link(User), {description: "Post author"});
     tags = E.field(E.array(E.string), {description: "Post tags", default: () => []});
     publishedAt = E.field(E.opt(E.number), {description: "Publication timestamp"});
-    
-    static byAuthor = E.unique(Post, ["author", "title"]);
-}
+}, {
+    // pk: "id",
+    unique: { byAuthor: ["author", "title"] },
+    tableName: "Post",
+});
 
 
 function noNeedToRunThis() {
@@ -179,7 +168,7 @@ test("Checks for validity", async () => {
     });
 
     await E.transact(() => {
-        const p = Person.pk.get("Frank");
+        const p = Person.get("Frank");
         expect(p).toBeDefined();
         expect(p!.name).toBe("Frank");
         expect(p!.age).toBe(42);
@@ -189,8 +178,7 @@ test("Checks for validity", async () => {
 
 test("Sets defaults", async () => {
 
-    @E.registerModel
-    class Defaults extends E.Model<Defaults> {
+    const Defaults = E.defineModel(class {
         // @ts-expect-error
         first = E.field(E.string, {default: 3});
         // @ts-expect-error
@@ -198,7 +186,7 @@ test("Sets defaults", async () => {
         role = E.field(E.string, {default: () => "CEO"});
         tags = E.field(E.array(E.number), {default: () => [12, 5]})
         userName = E.field(E.string, {default: obj => `${obj.first}${obj.last[0]||''}`.toLowerCase()})
-    }
+    }, { override: true });
 
     await E.transact(() => {
         let d = new Defaults();
@@ -219,10 +207,9 @@ test("Sets defaults", async () => {
 })
 
 test("Boolean type validation", async () => {
-    @E.registerModel
-    class Settings extends E.Model<Settings> {
+    const Settings = E.defineModel(class {
         enabled = E.field(E.boolean, {description: "Feature toggle"});
-    }
+    }, { override: true });
 
     await E.transact(() => {
         let s = new Settings({enabled: true});
@@ -238,39 +225,37 @@ test("Boolean type validation", async () => {
 })
 
 test("Model persistence", async () => {
-    @E.registerModel
-    class TestModel extends E.Model<TestModel> {
+    const TestModel = E.defineModel(class {
         id = E.field(E.number);
         name = E.field(E.string);
         flag = E.field(E.boolean, {default: false});
-        static pk = E.primary(TestModel, ["id"]);
-    }
+    }, { pk: ["id"] as const, override: true });
 
     await E.transact(async () => {
         new TestModel({id: 1, name: "test"});
     });
 
     await E.transact(() => {
-        const loaded = TestModel.pk.get(1);
+        const loaded = TestModel.get(1);
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("test");
         expect(loaded!.flag).toBe(false);
     });
 
     await E.transact(() => {
-        const loaded = TestModel.findAll().fetch();
+        const loaded = TestModel.find({fetch: 'first'});
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("test");
         expect(loaded!.flag).toBe(false);
     });    
 
     // Test loading non-existent model
-    const notFound = await E.transact(() => TestModel.pk.get(999));
+    const notFound = await E.transact(() => TestModel.get(999));
     expect(notFound).toBeUndefined();
 
     // Test loading with wrong number of primary keys
     // @ts-expect-error
-    expect(() => TestModel.pk.get(1, 2)).toThrow();
+    expect(() => TestModel.get(1, 2)).toThrow();
 })
 
 test("Link type validation and lazy loading", async () => {
@@ -286,7 +271,7 @@ test("Link type validation and lazy loading", async () => {
 
     // Test loading
     await E.transact(async () => {
-        const loadedData = await Data.findAll().fetch();
+        const loadedData = Data.find({fetch: 'first'});
         expect(loadedData).toBeDefined();
         expect(loadedData!.id).toBe(id);
         expect(loadedData!.mode).toBe("auto");
@@ -304,7 +289,7 @@ test("Link type validation and lazy loading", async () => {
 
         
         const data = new Data();
-        // @ts-expect-error - Wrong type
+        // @ts-expect-error - Data is not Person
         loadedData!.subjects = [data];
         expect(loadedData!.isValid()).toBe(false);
         data!.preventPersist();
@@ -333,7 +318,7 @@ test("Update a lazy-loaded row", async () => {
     });
 
     await E.transact(async () => {
-        const simple = Simple.findAll().fetch();
+        const simple = Simple.find({fetch: 'first'});
         expect(simple).toBeDefined();
         expect(simple!.value).toBe(4321);
     });
@@ -372,16 +357,13 @@ test("Parallel transactions", async () => {
     // Verify all were persisted
     await E.transact(() => {
         for (const id of results) {
-            expect(User.pk.get(id)).toBeDefined();
+            expect(User.get(id)).toBeDefined();
         }
     });
 });
 
 test("Type system comprehensive validation", async () => {
-    @E.registerModel
-    class TypeTest extends E.Model<TypeTest> {
-        static pk = E.primary(TypeTest, ["id"]);
-        
+    const TypeTest = E.defineModel(class {
         id = E.field(E.identifier);
         literalString = E.field(E.literal("fixed"), {description: "Fixed string literal"});
         literalNumber = E.field(E.literal(42), {description: "Fixed number literal"});
@@ -391,7 +373,7 @@ test("Type system comprehensive validation", async () => {
         optionalString = E.field(E.opt(E.string), {description: "Optional string"});
         boundedArray = E.field(E.array(E.string, {min: 1, max: 3}), {description: "Bounded array"});
         nestedArray = E.field(E.array(E.array(E.number)), {description: "Nested array"});
-    }
+    }, { pk: "id", override: true });
 
     await E.transact(() => {
         const t = new TypeTest();
@@ -493,10 +475,9 @@ test("Type system comprehensive validation", async () => {
 
 test("Advanced model lifecycle and registration", async () => {
     // Test automatic ID field creation
-    @E.registerModel
-    class AutoIdModel extends E.Model<AutoIdModel> {
+    const AutoIdModel = E.defineModel(class {
         name = E.field(E.string, {description: "Name field"});
-    }
+    }, { override: true });
     
     await E.transact(() => {
         const model = new AutoIdModel({name: "test"});
@@ -507,27 +488,21 @@ test("Advanced model lifecycle and registration", async () => {
 
     // Test duplicate table name error
     expectErrorCode("INIT_ERROR", () => {
-        @E.registerModel
-        class DuplicateUser extends E.Model<DuplicateUser> {
-            static tableName = "User"; // Same as existing User model
+        E.defineModel(class {
             id = E.field(E.identifier);
-        }
+        }, { tableName: "User" });
     });
 
     // Test model with complex dependencies
-    @E.registerModel
-    class ModelA extends E.Model<ModelA> {
-        static pk = E.primary(ModelA, ["id"]);
+    const ModelA = E.defineModel(class {
         id = E.field(E.identifier);
-        bRef = E.field(E.opt(E.link(ModelB)), {description: "Reference to B"});
-    }
+        bRef = E.field(E.opt(E.link(() => ModelB)), {description: "Reference to B"});
+    }, { pk: "id", override: true });
 
-    @E.registerModel
-    class ModelB extends E.Model<ModelB> {
-        static pk = E.primary(ModelB, ["id"]);
+    const ModelB = E.defineModel(class {
         id = E.field(E.identifier);
-        aRef = E.field(E.opt(E.link(ModelA)), {description: "Reference to A"});
-    }
+        aRef = E.field(E.opt(E.link(() => ModelA)), {description: "Reference to A"});
+    }, { pk: "id", override: true });
 
     await E.transact(() => {
         const a = new ModelA();
@@ -555,7 +530,7 @@ test("Index system comprehensive", async () => {
 
     // Test composite key loading
     await E.transact(() => {
-        const loaded = CompositeKeyModel.pk.get("electronics", "phones", "iPhone");
+        const loaded = CompositeKeyModel.get("electronics", "phones", "iPhone");
         expect(loaded).toBeDefined();
         expect(loaded!.value).toBe(999);
     });
@@ -580,7 +555,7 @@ test("Index system comprehensive", async () => {
     // Test loading with wrong number of primary key arguments
     expect(() => {
         // @ts-expect-error
-        CompositeKeyModel.pk.get("electronics", "phones"); // Missing third argument
+        CompositeKeyModel.get("electronics", "phones"); // Missing third argument
     }).toThrow();
 });
 
@@ -595,7 +570,7 @@ test("Model state management and persistence", async () => {
 
     // Test that the user was created successfully
     await E.transact(() => {
-        let loaded = User.pk.get(userId);
+        let loaded = User.get(userId);
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("State Test");
         loaded = User.byEmail.get("state@test.com");
@@ -605,13 +580,13 @@ test("Model state management and persistence", async () => {
 
     // Test model deletion
     await E.transact(() => {
-        const loaded = User.pk.get(userId);
+        const loaded = User.get(userId);
         loaded!.delete();
     });
 
     // Verify deletion
     await E.transact(() => {
-        let loaded = User.pk.get(userId);
+        let loaded = User.get(userId);
         expect(loaded).toBeUndefined();
         loaded = User.byEmail.get("state@test.com");
         expect(loaded).toBeUndefined();
@@ -625,7 +600,7 @@ test("Model state management and persistence", async () => {
 
     // Test that the user was created successfully
     await E.transact(() => {
-        let loaded = User.pk.get(userId);
+        let loaded = User.get(userId);
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("State Test");
         loaded = User.byEmail.get("state@test.com");
@@ -635,24 +610,23 @@ test("Model state management and persistence", async () => {
 });
 
 test("Link relationships and bidirectional references", async () => {
-    let userId: string, postId: string;
+    let userId: string;
 
     // Create linked models
     await E.transact(() => {
         const user = new User({email: "author@test.com", name: "Author"});
-        const post = new Post({
+        new Post({
             title: "Test Post",
             content: "Test content",
             author: user,
             publishedAt: Date.now()
         });
         userId = user.id;
-        postId = post.id;
     });
 
-    // Test lazy loading
+    // Test lazy loading through link
     await E.transact(() => {
-        const post = Post.pk.get(postId);
+        const post = Post.find({fetch: 'first'});
         expect(post).toBeDefined();
         expect(post!.author.name).toBe("Author"); // Should lazy load
         expect(post!.author.email).toBe("author@test.com");
@@ -660,36 +634,34 @@ test("Link relationships and bidirectional references", async () => {
 
     // Test link validation with wrong model type
     await E.transact(() => {
-        const post = Post.pk.get(postId);
+        const post = Post.find({fetch: 'first'})!;
         // @ts-expect-error
-        post!.author = new Post({title: "Wrong", content: "Type", author: post!.author});
-        expect(post!.isValid()).toBe(false);
-        post!.preventPersist();
+        post.author = new Post({title: "Wrong", content: "Type", author: post.author});
+        expect(post.isValid()).toBe(false);
+        post.preventPersist();
     });
 
-    // Test broken link detection
+    // Test broken link detection: delete the author, then try to follow the link
     await E.transact(() => {
-        const user = User.pk.get(userId);
+        const user = User.get(userId);
         user!.delete();
     });
 
     await E.transact(() => {
-        const post = Post.pk.get(postId);
+        const post = Post.find({fetch: 'first'});
+        expect(post).toBeDefined();
         expectErrorCode("LAZY_FAIL", () => post!.author.name); // Broken link should throw
         post!.preventPersist();
     });
 });
 
 test("Field validation comprehensive", async () => {
-    @E.registerModel
-    class ValidationTest extends E.Model<ValidationTest> {
-        static pk = E.primary(ValidationTest, ["id"]);
-        
+    const ValidationTest = E.defineModel(class {
         id = E.field(E.identifier);
         required = E.field(E.string, {description: "Required field"});
         nested = E.field(E.array(E.array(E.string)), {description: "Nested structure"});
         complex = E.field(E.or(E.string, E.array(E.number)), {description: "Complex union"});
-    }
+    }, { pk: "id", override: true });
 
     await E.transact(() => {
         const model = new ValidationTest();
@@ -720,16 +692,13 @@ test("Field validation comprehensive", async () => {
 });
 
 test("Default value handling advanced", async () => {
-    @E.registerModel
-    class DefaultTest extends E.Model<DefaultTest> {
-        static pk = E.primary(DefaultTest, ["id"]);
-        
+    const DefaultTest = E.defineModel(class {
         id = E.field(E.identifier);
         staticDefault = E.field(E.string, {default: "static", description: "Static default"});
         functionDefault = E.field(E.string, {default: () => "generated", description: "Function default"});
         contextDefault = E.field(E.string, {default: (obj) => `context-${obj.id}`, description: "Context default"});
         arrayDefault = E.field(E.array(E.string), {default: () => ["initial"], description: "Array default"});
-    }
+    }, { pk: "id", override: true });
 
     await E.transact(() => {
         const model1 = new DefaultTest();
@@ -805,13 +774,10 @@ test("Modification tracking and proxy behavior", async () => {
 
 test("Error handling and recovery", async () => {
     // Test validation error with proper error codes
-    @E.registerModel
-    class ErrorTest extends E.Model<ErrorTest> {
-        static pk = E.primary(ErrorTest, ["id"]);
-        
+    const ErrorTest = E.defineModel(class {
         id = E.field(E.identifier);
         numberField = E.field(E.number, {description: "Number field"});
-    }
+    }, { pk: "id", override: true });
 
     await E.transact(() => {
         const model = new ErrorTest();
@@ -918,7 +884,7 @@ test("Range queries on primary indices", async () => {
     await E.transact(() => {
         // Inclusive
         let values: number[] = [];
-        let items = CompositeKeyModel.pk.find({from: ["electronics", "phones", "iPhone"], to: ["electronics", "tablets", "iPad"]});
+        let items = CompositeKeyModel.find({from: ["electronics", "phones", "iPhone"], to: ["electronics", "tablets", "iPad"]});
         for(const item of items) {
             values.push(item.value);
         }
@@ -926,7 +892,7 @@ test("Range queries on primary indices", async () => {
 
         // Exclusive
         values = [];
-        items = CompositeKeyModel.pk.find({from: ["electronics", "phones", "iPhone"], before: ["electronics", "tablets", "iPad"]});
+        items = CompositeKeyModel.find({from: ["electronics", "phones", "iPhone"], before: ["electronics", "tablets", "iPad"]});
         for(const item of items) {
             values.push(item.value);
         }
@@ -936,7 +902,7 @@ test("Range queries on primary indices", async () => {
     // Test with no bounds (all electronics)
     await E.transact(() => {
         let allElectronics: number[] = [];
-        const items = CompositeKeyModel.pk.find();
+        const items = CompositeKeyModel.find();
         for(const item of items) {
             allElectronics.push(item.value);
         }
@@ -946,7 +912,7 @@ test("Range queries on primary indices", async () => {
     // Test single bound (from start to iPad)
     await E.transact(() => {
         let fromStart: number[] = [];
-        const items = CompositeKeyModel.pk.find({to: ["electronics", "tablets", "iPad"]});
+        const items = CompositeKeyModel.find({to: ["electronics", "tablets", "iPad"]});
         for(const item of items) {
             fromStart.push(item.value);
         }
@@ -956,7 +922,7 @@ test("Range queries on primary indices", async () => {
     // Test single bound (from iPad to end)
     await E.transact(() => {
         let toEnd: number[] = [];
-        const items = CompositeKeyModel.pk.find({from: ["electronics", "tablets", "iPad"]});
+        const items = CompositeKeyModel.find({from: ["electronics", "tablets", "iPad"]});
         for(const item of items) {
             toEnd.push(item.value);
         }
@@ -1051,23 +1017,25 @@ test("Range queries on unique indices", async () => {
 
 test("Secondary index implementation", async () => {
     // Create a test model with secondary indexes
-    @E.registerModel
-    class Product extends E.Model<Product> {
-        static pk = E.primary(Product, ["id"]);
-        
+    const Product = E.defineModel(class {
         id = E.field(E.identifier, {description: "Product ID"});
         name = E.field(E.string, {description: "Product name"});
         price = E.field(E.number, {description: "Product price"});
         category = E.field(E.string, {description: "Product category"});
         inStock = E.field(E.boolean, {description: "In stock status", default: true});
-        
-        // Secondary indexes
-        static byPrice = E.index(Product, "price");
-        static byCategory = E.index(Product, "category");
-        static byCategoryPrice = E.index(Product, ["category", "price"]);
-        static byStock = E.index(Product, "inStock");
-        static byName = E.unique(Product, "name");
-    }
+    }, {
+        pk: "id",
+        index: {
+            byPrice: "price",
+            byCategory: "category",
+            byCategoryPrice: ["category", "price"],
+            byStock: "inStock",
+        },
+        unique: {
+            byName: "name",
+        },
+        override: true,
+    });
 
     // Test that secondary indexes don't have get() method (compile-time check)
     // This should not compile: Product.byPrice.get(1000);
@@ -1227,18 +1195,17 @@ test("Secondary index implementation", async () => {
 });
 
 test("throws STALE_INSTANCE on access after transaction", async () => {
-    const id = await E.transact(async () => {
-        let person = new User({id: 'deadbeef', name: "Frank", email: 'a@b.c'});
-
-        return (new Post({
+    await E.transact(async () => {
+        const person = new User({id: 'deadbeef', name: "Frank", email: 'a@b.c'});
+        new Post({
             title: "Test Post",
             content: "This is a test post.",
             author: person,
-        })).id;
+        });
     });
 
     const post = await E.transact(async () => {
-        return Post.pk.get(id)!;
+        return Post.find({fetch: 'first'})!;
     });
 
     expect(post.title).toBe("Test Post");
@@ -1270,7 +1237,7 @@ test("onSave callback basic functionality", async () => {
     
     // Test UPDATE operation
     await E.transact(() => {
-        const user = User.pk.get(userId);
+        const user = User.get(userId);
         user!.name = "Updated Name";
     });
     
@@ -1282,7 +1249,7 @@ test("onSave callback basic functionality", async () => {
     
     // Test DELETE operation
     await E.transact(() => {
-        const user = User.pk.get(userId);
+        const user = User.get(userId);
         user!.delete();
     });
     
@@ -1332,19 +1299,18 @@ test("onSave callback with unique constraint failures", async () => {
 });
 
 test("onSave callback with multiple models and operations", async () => {
-    let userId: string, postId: string;
+    let userId: string;
     let firstCommitId: number;
     
     // Test multiple creates in one transaction
     await E.transact(() => {
         const user = new User({email: "multi@test.com", name: "Multi Test"});
-        const post = new Post({
+        new Post({
             title: "Test Post",
             content: "Test content", 
             author: user
         });
         userId = user.id;
-        postId = post.id;
     });
     
     expect(lastOnSaveCommitId).toBeGreaterThan(0);
@@ -1359,8 +1325,8 @@ test("onSave callback with multiple models and operations", async () => {
     
     // Test multiple updates in one transaction
     await E.transact(() => {
-        const user = User.pk.get(userId);
-        const post = Post.pk.get(postId);
+        const user = User.get(userId);
+        const post = Post.byAuthor.find({is: [user!, "Test Post"]}).fetch();
         user!.name = "Updated Multi Test";
         post!.title = "Updated Test Post";
     });
@@ -1391,8 +1357,8 @@ test("onSave callback with multiple models and operations", async () => {
     
     // Test mixed operations in one transaction
     await E.transact(() => {
-        const user = User.pk.get(userId);
-        const post = Post.pk.get(postId);
+        const user = User.get(userId);
+        const post = Post.byAuthor.find({is: [user!, "Updated Test Post"]}).fetch();
         post!.delete();
         user!.name = "Final Update";
         new User({email: "mixed@test.com", name: "Mixed Test"});
@@ -1410,7 +1376,7 @@ test("onSave callback with multiple models and operations", async () => {
 });
 
 test("Trying to modify instances outside their transaction throws an error", async () => {
-    let user: User;
+    let user: InstanceType<typeof User>;
     
     // Attempt to modify instance outside of a transaction
     await E.transact(() => {
@@ -1429,10 +1395,7 @@ test("Trying to modify instances outside their transaction throws an error", asy
 });
 
 test("preCommit() is called before writes", async () => {
-    @E.registerModel
-    class PreCommitModel extends E.Model<PreCommitModel> {
-        static pk = E.primary(PreCommitModel, "id");
-        static tableName = "PreCommitModel";
+    const PreCommitModel = E.defineModel(class {
         id = E.field(E.identifier);
         name = E.field(E.string);
         nameLower = E.field(E.string, {default: ""});
@@ -1440,27 +1403,24 @@ test("preCommit() is called before writes", async () => {
         preCommit() {
             this.nameLower = this.name.toLowerCase();
         }
-    }
+    }, { pk: "id", tableName: "PreCommitModel", override: true });
 
     await E.transact(() => {
         new PreCommitModel({name: "Hello World"});
     });
 
     await E.transact(() => {
-        const m = PreCommitModel.pk.find().fetch()!;
+        const m = PreCommitModel.find().fetch()!;
         expect(m.nameLower).toBe("hello world");
     });
 });
 
 test("lazy migration adds a new non-key field", async () => {
     // Step 1: Register V1 model and write data
-    @E.registerModel
-    class LazyMigV1 extends E.Model<LazyMigV1> {
-        static pk = E.primary(LazyMigV1, "id");
-        static tableName = "LazyMigrateTest";
+    const LazyMigV1 = E.defineModel(class {
         id = E.field(E.string);
         name = E.field(E.string);
-    }
+    }, { pk: "id", tableName: "LazyMigrateTest" });
 
     await E.transact(() => {
         new LazyMigV1({id: "row1", name: "Alice"});
@@ -1468,57 +1428,46 @@ test("lazy migration adds a new non-key field", async () => {
     });
 
     // Step 2: Register V2, overriding V1, adding a field (with default) and dropping another field
-    @E.registerModel
-    class LazyMigV2 extends E.Model<LazyMigV2> {
-        static override = true;
-        static pk = E.primary(LazyMigV2, "id");
-        static tableName = "LazyMigrateTest";
+    const LazyMigV2 = E.defineModel(class {
         id = E.field(E.string);
         role = E.field(E.string, {default: "user"});
-    }
+    }, { pk: "id", tableName: "LazyMigrateTest", override: true });
 
     // Step 3: Read old rows through V2 - migrate() is called lazily on read
     await E.transact(() => {
-        const r1 = LazyMigV2.pk.get("row1")!;
+        const r1 = LazyMigV2.get("row1")!;
         expect((r1 as any).name).toBeUndefined();
         expect(r1.role).toBe("user");
 
-        const r2 = LazyMigV2.pk.get("row2")!;
+        const r2 = LazyMigV2.get("row2")!;
         expect((r2 as any).name).toBeUndefined();
         expect(r2.role).toBe("user");
         r2.role = "admin";
     });
 
     // Step 4: Register V3 with a new field without a default (but with some old rows that still have the value)
-    @E.registerModel
-    class LazyMigV3 extends E.Model<LazyMigV3> {
-        static override = true;
-        static pk = E.primary(LazyMigV3, "id");
-        static tableName = "LazyMigrateTest";
+    const LazyMigV3 = E.defineModel(class {
         id = E.field(E.string);
         name = E.field(E.string);
         role = E.field(E.string, {default: "user"});
-    }
+    }, { pk: "id", tableName: "LazyMigrateTest", override: true });
 
     await E.transact(() => {
-        const r1 = LazyMigV3.pk.get("row1")!;
+        const r1 = LazyMigV3.get("row1")!;
         expect(r1.name).toBe('Alice')
         expect(r1.role).toBe("user");
 
         expectErrorCode("MIGRATION_ERROR", () => {
-            LazyMigV3.pk.get("row2");
+            LazyMigV3.get("row2");
         });
     });
 });
 
 test("runMigration converts rows from old primary key format", async () => {
     // Step 1: Register V1 with string primary key and write rows
-    @E.registerModel
-    class PkConvertV1 extends E.Model<PkConvertV1> {
-        static pk = E.primary(PkConvertV1, "id");
-        static tableName = "PkConvertTest";
+    const PkConvertV1 = E.defineModel(class {
         id = E.field(E.string);
-    }
+    }, { pk: "id", tableName: "PkConvertTest" });
 
     await E.transact(() => {
         new PkConvertV1({id: "1"});
@@ -1527,17 +1476,13 @@ test("runMigration converts rows from old primary key format", async () => {
     });
 
     // Step 2: Register V2 (override V1) with a numeric primary key
-    @E.registerModel
-    class PkConvertV2 extends E.Model<PkConvertV2> {
-        static override = true;
-        static pk = E.primary(PkConvertV2, "id");
-        static tableName = "PkConvertTest";
+    const PkConvertV2 = E.defineModel(class {
         id = E.field(E.number);
 
         static migrate(record: Record<string, any>) {
             if (typeof record.id === "string") record.id = 10 * parseInt(record.id, 10);
         }
-    }
+    }, { pk: "id", tableName: "PkConvertTest", override: true });
 
     // Step 3: Run migration - Phase 2 should convert 3 rows to the new key format
     const result = await E.runMigration({tables: ["PkConvertTest"]});
@@ -1545,22 +1490,19 @@ test("runMigration converts rows from old primary key format", async () => {
 
     // Step 4: Verify rows are accessible via the new numeric key
     await E.transact(() => {
-        expect(PkConvertV2.pk.get(10)?.id).toBe(10);
-        expect(PkConvertV2.pk.get(20)?.id).toBe(20);
-        expect(PkConvertV2.pk.get(30)?.id).toBe(30);
+        expect(PkConvertV2.get(10)?.id).toBe(10);
+        expect(PkConvertV2.get(20)?.id).toBe(20);
+        expect(PkConvertV2.get(30)?.id).toBe(30);
     });
 });
 
 test("runMigration populates new secondary indexes", async () => {
     // Step 1: Register V1 model without secondary index and write data
-    @E.registerModel
-    class SecPopV1 extends E.Model<SecPopV1> {
-        static pk = E.primary(SecPopV1, "id");
-        static tableName = "SecondaryPopTest";
+    const SecPopV1 = E.defineModel(class {
         id = E.field(E.string);
         category = E.field(E.string);
         score = E.field(E.number, {default: 0});
-    }
+    }, { pk: "id", tableName: "SecondaryPopTest" });
 
     await E.transact(() => {
         new SecPopV1({id: "a", category: "x", score: 10});
@@ -1569,16 +1511,14 @@ test("runMigration populates new secondary indexes", async () => {
     });
 
     // Step 2: Register V2 (override V1) with a new secondary index
-    @E.registerModel
-    class SecPopV2 extends E.Model<SecPopV2> {
-        static override = true;
-        static pk = E.primary(SecPopV2, "id");
-        static tableName = "SecondaryPopTest";
+    const SecPopV2 = E.defineModel(class {
         id = E.field(E.string);
         category = E.field(E.string);
         score = E.field(E.number, {default: 0});
-        static byCategory = E.index(SecPopV2, "category");
-    }
+    }, {
+        pk: "id", tableName: "SecondaryPopTest", override: true,
+        index: { byCategory: "category" },
+    });
 
     // Step 3: Run migration - should populate the new secondary index for all 3 rows
     const result = await E.runMigration({tables: ["SecondaryPopTest"]});
@@ -1598,14 +1538,13 @@ test("runMigration populates new secondary indexes", async () => {
 
 test("runMigration fixes secondaries affected by migrate()", async () => {
     // Step 1: Register V1 with a secondary index and write data
-    @E.registerModel
-    class SecMigV1 extends E.Model<SecMigV1> {
-        static pk = E.primary(SecMigV1, "id");
-        static tableName = "SecMigrateTest";
+    const SecMigV1 = E.defineModel(class {
         id = E.field(E.string);
         tag = E.field(E.string);
-        static byTag = E.index(SecMigV1, "tag");
-    }
+    }, {
+        pk: "id", tableName: "SecMigrateTest",
+        index: { byTag: "tag" },
+    });
 
     await E.transact(() => {
         new SecMigV1({id: "a", tag: "old"});
@@ -1619,19 +1558,17 @@ test("runMigration fixes secondaries affected by migrate()", async () => {
     });
 
     // Step 2: Register V2 (override V1) with a migrate() that changes indexed tag values
-    @E.registerModel
-    class SecMigV2 extends E.Model<SecMigV2> {
-        static override = true;
-        static pk = E.primary(SecMigV2, "id");
-        static tableName = "SecMigrateTest";
+    const SecMigV2 = E.defineModel(class {
         id = E.field(E.string);
         tag = E.field(E.string);
-        static byTag = E.index(SecMigV2, "tag");
 
         static migrate(record: Record<string, any>) {
             if (record.tag === "old") record.tag = "new";
         }
-    }
+    }, {
+        pk: "id", tableName: "SecMigrateTest", override: true,
+        index: { byTag: "tag" },
+    });
 
     // Step 3: Run migration - should update the secondary index for the changed row
     const result = await E.runMigration({tables: ["SecMigrateTest"]});
@@ -1649,14 +1586,13 @@ test("runMigration fixes secondaries affected by migrate()", async () => {
 
 test("runMigration removes orphaned secondary index entries", async () => {
     // Step 1: Register V1 with a secondary index and write data
-    @E.registerModel
-    class OrphanV1 extends E.Model<OrphanV1> {
-        static pk = E.primary(OrphanV1, "id");
-        static tableName = "OrphanedSecTest";
+    const OrphanV1 = E.defineModel(class {
         id = E.field(E.string);
         tag = E.field(E.string);
-        static byTag = E.index(OrphanV1, "tag");
-    }
+    }, {
+        pk: "id", tableName: "OrphanedSecTest",
+        index: { byTag: "tag" },
+    });
 
     await E.transact(() => {
         new OrphanV1({id: "a", tag: "x"});
@@ -1664,14 +1600,10 @@ test("runMigration removes orphaned secondary index entries", async () => {
     });
 
     // Step 2: Register V2 (override V1) without the secondary index
-    @E.registerModel
-    class OrphanV2 extends E.Model<OrphanV2> {
-        static override = true;
-        static pk = E.primary(OrphanV2, "id");
-        static tableName = "OrphanedSecTest";
+    const OrphanV2 = E.defineModel(class {
         id = E.field(E.string);
         tag = E.field(E.string);
-    }
+    }, { pk: "id", tableName: "OrphanedSecTest", override: true });
 
     // Step 3: Verify that indexes still exist on disk, by going through V1
     await E.transact(() => {
@@ -1691,31 +1623,25 @@ test("runMigration removes orphaned secondary index entries", async () => {
 
     // Step 6: Verify rows are still accessible via primary key
     await E.transact(() => {
-        expect(OrphanV2.pk.get("a")?.tag).toBe("x");
-        expect(OrphanV2.pk.get("b")?.tag).toBe("y");
+        expect(OrphanV2.get("a")?.tag).toBe("x");
+        expect(OrphanV2.get("b")?.tag).toBe("y");
     });
 });
 
 test("preCommit() can create new instances", async () => {
-    @E.registerModel
-    class Parent extends E.Model<Parent> {
-        static pk = E.primary(Parent, "id");
-        static tableName = "PreCommitParent";
+    const Child = E.defineModel(class {
+        parentId = E.field(E.string);
+        data = E.field(E.string);
+    }, { pk: "parentId", tableName: "PreCommitChild" });
+
+    const Parent = E.defineModel(class {
         id = E.field(E.identifier);
         name = E.field(E.string);
         preCommit() {
             // Create a child when parent is committed
             Child.replaceInto({parentId: this.id, data: this.name + "_child"});
         }
-    }
-
-    @E.registerModel
-    class Child extends E.Model<Child> {
-        static pk = E.primary(Child, "parentId");
-        static tableName = "PreCommitChild";
-        parentId = E.field(E.string);
-        data = E.field(E.string);
-    }
+    }, { pk: "id", tableName: "PreCommitParent" });
 
     await E.transact(() => {
         new Parent({name: "test_parent"});
@@ -1723,32 +1649,29 @@ test("preCommit() can create new instances", async () => {
 
     // Verify child was created 
     await E.transact(() => {
-        const children = [...Child.pk.find()];
+        const children = [...Child.find()];
         expect(children.length).toBe(1);
         expect(children[0].data).toBe("test_parent_child");
     });
 
     await E.transact(() => {
-        const parent = [...Parent.findAll()][0];
+        const parent = [...Parent.find()][0];
         parent.name = 'updated_parent';
     });
 
     // Verify child was updated
     await E.transact(() => {
-        const children = [...Child.pk.find()];
+        const children = [...Child.find()];
         expect(children.length).toBe(1);
         expect(children[0].data).toBe("updated_parent_child");
     });
 });
 
 test("runMigration reports no work needed for clean data", async () => {
-    @E.registerModel
-    class CleanModel extends E.Model<CleanModel> {
-        static pk = E.primary(CleanModel, "id");
-        static tableName = "CleanModel";
+    const CleanModel = E.defineModel(class {
         id = E.field(E.string);
         tag = E.field(E.string, {default: "x"});
-    }
+    }, { pk: "id", tableName: "CleanModel" });
 
     await E.transact(() => {
         new CleanModel({id: "a", tag: "hello"});
@@ -1760,24 +1683,21 @@ test("runMigration reports no work needed for clean data", async () => {
 });
 
 test("Version info rows are created in the database", async () => {
-    @E.registerModel
-    class VersionInfoModel extends E.Model<VersionInfoModel> {
-        static pk = E.primary(VersionInfoModel, "id");
-        static tableName = "VersionInfoModel";
+    const VersionInfoModel = E.defineModel(class {
         id = E.field(E.string);
         data = E.field(E.string, {default: "x"});
-    }
+    }, { pk: "id", tableName: "VersionInfoModel" });
 
     await E.transact(() => {
         new VersionInfoModel({id: "test", data: "hello"});
     });
 
     await E.transact(() => {
-        const m = VersionInfoModel.pk.get("test")!;
+        const m = VersionInfoModel.get("test")!;
         expect(m.data).toBe("hello");
     });
 
-    expect(VersionInfoModel.pk._currentVersion).toBeGreaterThan(0);
+    expect((VersionInfoModel as any)._currentVersion).toBeGreaterThan(0);
 });
 
 test("replaceInto creates a new instance when not found", async () => {
@@ -1790,7 +1710,7 @@ test("replaceInto creates a new instance when not found", async () => {
 
     // Verify it was persisted
     await E.transact(() => {
-        const loaded = Person.pk.get("ri-new-person");
+        const loaded = Person.get("ri-new-person");
         expect(loaded).toBeDefined();
         expect(loaded!.age).toBe(30);
     });
@@ -1809,7 +1729,7 @@ test("replaceInto updates an existing instance", async () => {
 
     // Verify the update was persisted
     await E.transact(() => {
-        const loaded = Person.pk.get("ri-exist-person")!;
+        const loaded = Person.get("ri-exist-person")!;
         expect(loaded.age).toBe(20);
     });
 });
@@ -1845,27 +1765,71 @@ test("find() iterator supports map/filter/toArray helpers", async () => {
 
     await E.transact(() => {
         // map + toArray
-        const doubled = Simple.pk.find().map(r => r.value * 2).toArray();
+        const doubled = Simple.find().map(r => r.value * 2).toArray();
         expect(doubled.sort((a, b) => a - b)).toEqual([0, 2, 4, 6, 8]);
 
         // filter + toArray
-        const even = Simple.pk.find().filter(r => r.value % 2 === 0).toArray();
+        const even = Simple.find().filter(r => r.value % 2 === 0).toArray();
         expect(even.map(r => r.value).sort((a, b) => a - b)).toEqual([0, 2, 4]);
 
         // chained map + filter
-        const result = Simple.pk.find().map(r => r.value).filter(v => v >= 3).toArray();
+        const result = Simple.find().map(r => r.value).filter(v => v >= 3).toArray();
         expect(result.sort((a, b) => a - b)).toEqual([3, 4]);
 
         // reduce
-        const sum = Simple.pk.find().reduce((acc, r) => acc + r.value, 0);
+        const sum = Simple.find().reduce((acc, r) => acc + r.value, 0);
         expect(sum).toBe(10);
 
         // single-pass: second consumer on same iterator gets nothing
-        const iter = Simple.pk.find();
+        const iter = Simple.find();
         const first = iter.toArray();
         const second = iter.toArray();
         expect(first).toHaveLength(5);
         expect(second).toHaveLength(0);
+    });
+});
+
+test("find() with fetch: 'first' returns first or undefined", async () => {
+    await E.transact(() => {
+        for (let i = 0; i < 3; i++) new Simple({ value: i });
+    });
+
+    await E.transact(() => {
+        // Returns first match
+        const first = Simple.find({fetch: 'first'});
+        expect(first).toBeDefined();
+        expect(typeof first!.value).toBe('number');
+
+        // Returns undefined when no match
+        const none = Simple.byValue.find({is: 999, fetch: 'first'});
+        expect(none).toBeUndefined();
+    });
+});
+
+test("find() with fetch: 'single' returns exactly one or throws", async () => {
+    await E.transact(() => {
+        new Simple({ value: 42 });
+    });
+
+    // Exactly one result: returns it
+    await E.transact(() => {
+        const one = Simple.byValue.find({is: 42, fetch: 'single'});
+        expect(one.value).toBe(42);
+    });
+
+    // No results: throws
+    await E.transact(() => {
+        expectErrorCode("NOT_FOUND", () => Simple.byValue.find({is: 999, fetch: 'single'}));
+    });
+
+    // Multiple results: throws
+    await E.transact(() => {
+        new Simple({ value: 100 });
+        new Simple({ value: 101 });
+    });
+
+    await E.transact(() => {
+        expectErrorCode("NOT_UNIQUE", () => Simple.find({fetch: 'single'}));
     });
 });
 
@@ -1875,7 +1839,7 @@ test("batchProcess visits all rows across multiple batches", async () => {
     });
 
     const seen: number[] = [];
-    await Simple.pk.batchProcess({ limitRows: 3 }, (row) => {
+    await Simple.batchProcess({ limitRows: 3 }, (row) => {
         seen.push(row.value);
     });
 
@@ -1888,13 +1852,13 @@ test("batchProcess can modify rows within batched transactions", async () => {
         for (let i = 1; i <= 6; i++) new Simple({ value: i });
     });
 
-    await Simple.pk.batchProcess({ limitRows: 2 }, (row) => {
+    await Simple.batchProcess({ limitRows: 2 }, (row) => {
         row.value *= 10;
     });
 
     const values: number[] = [];
     await E.transact(() => {
-        for (const row of Simple.pk.find()) values.push(row.value);
+        for (const row of Simple.find()) values.push(row.value);
     });
     expect(values.sort((a, b) => a - b)).toEqual([10, 20, 30, 40, 50, 60]);
 });
@@ -1912,14 +1876,11 @@ test("batchProcess respects range options via secondary index", async () => {
 });
 
 test("Record type stores and retrieves key-value objects", async () => {
-    @E.registerModel
-    class Config extends E.Model<Config> {
-        static pk = E.primary(Config, ["name"]);
-
+    const Config = E.defineModel(class {
         name = E.field(E.string);
         scores = E.field(E.record(E.number));
         metadata = E.field(E.record(E.or(E.string, E.number)));
-    }
+    }, { pk: "name", override: true });
 
     await E.transact(() => {
         const c = new Config({ name: "test", scores: { alice: 10, bob: 20 }, metadata: { version: 1, env: "prod" } });
@@ -1929,7 +1890,7 @@ test("Record type stores and retrieves key-value objects", async () => {
 
     // Verify persistence across transactions
     await E.transact(() => {
-        const c = Config.pk.get("test")!;
+        const c = Config.get("test")!;
         expect(c.scores).toEqual({ alice: 10, bob: 20 });
         expect(c.metadata).toEqual({ version: 1, env: "prod" });
 
@@ -1938,19 +1899,16 @@ test("Record type stores and retrieves key-value objects", async () => {
     });
 
     await E.transact(() => {
-        const c = Config.pk.get("test")!;
+        const c = Config.get("test")!;
         expect(c.scores).toEqual({ charlie: 30 });
     });
 });
 
 test("Record type with numeric keys", async () => {
-    @E.registerModel
-    class NumKeyModel extends E.Model<NumKeyModel> {
-        static pk = E.primary(NumKeyModel, ["id"]);
-
+    const NumKeyModel = E.defineModel(class {
         id = E.field(E.identifier);
         data = E.field(E.record(E.string));
-    }
+    }, { pk: "id", override: true });
 
     await E.transact(() => {
         const m = new NumKeyModel({ data: { 1: "one", 2: "two", hello: "world" } });
@@ -1961,13 +1919,10 @@ test("Record type with numeric keys", async () => {
 });
 
 test("Record type defaults to empty object", async () => {
-    @E.registerModel
-    class RecDefault extends E.Model<RecDefault> {
-        static pk = E.primary(RecDefault, ["id"]);
-
+    const RecDefault = E.defineModel(class {
         id = E.field(E.identifier);
         tags = E.field(E.record(E.number));
-    }
+    }, { pk: "id", override: true });
 
     await E.transact(() => {
         const r = new RecDefault();
@@ -1976,13 +1931,10 @@ test("Record type defaults to empty object", async () => {
 });
 
 test("Record type validates values", async () => {
-    @E.registerModel
-    class RecValidation extends E.Model<RecValidation> {
-        static pk = E.primary(RecValidation, ["id"]);
-
+    const RecValidation = E.defineModel(class {
         id = E.field(E.identifier);
         counts = E.field(E.record(E.number));
-    }
+    }, { pk: "id", override: true });
 
     await E.transact(() => {
         const r = new RecValidation({ counts: { a: 1, b: 2 } });
@@ -2006,17 +1958,14 @@ test("Record type validates values", async () => {
 // =====================
 
 test("computed unique index: basic CRUD and get", async () => {
-    @E.registerModel
-    class Employee extends E.Model<Employee> {
-        static override = true;
-        static pk = E.primary(Employee, "id");
-
+    const Employee = E.defineModel(class {
         id = E.field(E.identifier);
         firstName = E.field(E.string);
         lastName = E.field(E.string);
-
-        static byFullName = E.unique(Employee, (e: Employee) => [`${e.firstName} ${e.lastName}`]);
-    }
+    }, {
+        pk: "id", override: true,
+        unique: { byFullName: (e: any) => [`${e.firstName} ${e.lastName}`] },
+    });
 
     await E.transact(() => {
         new Employee({ firstName: "John", lastName: "Doe" });
@@ -2038,17 +1987,14 @@ test("computed unique index: basic CRUD and get", async () => {
 });
 
 test("computed unique index: unique constraint violation", async () => {
-    @E.registerModel
-    class UniqueComputed extends E.Model<UniqueComputed> {
-        static override = true;
-        static pk = E.primary(UniqueComputed, "id");
-
+    const UniqueComputed = E.defineModel(class {
         id = E.field(E.identifier);
         a = E.field(E.string);
         b = E.field(E.string);
-
-        static byAB = E.unique(UniqueComputed, (u: UniqueComputed) => [`${u.a}:${u.b}`]);
-    }
+    }, {
+        pk: "id", override: true,
+        unique: { byAB: (u: any) => [`${u.a}:${u.b}`] },
+    });
 
     await E.transact(() => {
         new UniqueComputed({ a: "x", b: "y" });
@@ -2062,17 +2008,14 @@ test("computed unique index: unique constraint violation", async () => {
 });
 
 test("computed secondary index: basic find", async () => {
-    @E.registerModel
-    class Product extends E.Model<Product> {
-        static override = true;
-        static pk = E.primary(Product, "id");
-
+    const Product = E.defineModel(class {
         id = E.field(E.identifier);
         price = E.field(E.number);
         category = E.field(E.string);
-
-        static byPriceBucket = E.index(Product, (p: Product) => [Math.floor(p.price / 100)]);
-    }
+    }, {
+        pk: "id", override: true,
+        index: { byPriceBucket: (p: any) => [Math.floor(p.price / 100)] },
+    });
 
     await E.transact(() => {
         new Product({ price: 50, category: "A" });
@@ -2102,19 +2045,17 @@ test("computed secondary index: basic find", async () => {
 });
 
 test("computed index: undefined return skips indexing (partial index)", async () => {
-    @E.registerModel
-    class MaybeIndexed extends E.Model<MaybeIndexed> {
-        static override = true;
-        static pk = E.primary(MaybeIndexed, "id");
-
+    const MaybeIndexed = E.defineModel(class {
         id = E.field(E.identifier);
         status = E.field(E.string);
         priority = E.field(E.opt(E.number));
-
-        static byActivePriority = E.index(MaybeIndexed, (m: MaybeIndexed) =>
-            m.status === "active" ? [m.priority] : []
-        );
-    }
+    }, {
+        pk: "id", override: true,
+        index: {
+            byActivePriority: (m: any) =>
+                m.status === "active" ? [m.priority] : [],
+        },
+    });
 
     await E.transact(() => {
         new MaybeIndexed({ status: "active", priority: 1 });
@@ -2134,17 +2075,14 @@ test("computed index: undefined return skips indexing (partial index)", async ()
 });
 
 test("computed index: updates re-index on any field change", async () => {
-    @E.registerModel
-    class Updatable extends E.Model<Updatable> {
-        static override = true;
-        static pk = E.primary(Updatable, "id");
-
+    const Updatable = E.defineModel(class {
         id = E.field(E.identifier);
         x = E.field(E.number);
         y = E.field(E.number);
-
-        static bySum = E.index(Updatable, (u: Updatable) => [u.x + u.y]);
-    }
+    }, {
+        pk: "id", override: true,
+        index: { bySum: (u: any) => [u.x + u.y] },
+    });
 
     let savedId: string;
     await E.transact(() => {
@@ -2171,16 +2109,13 @@ test("computed index: updates re-index on any field change", async () => {
 });
 
 test("computed index: delete removes index entries", async () => {
-    @E.registerModel
-    class Deletable extends E.Model<Deletable> {
-        static override = true;
-        static pk = E.primary(Deletable, "id");
-
+    const Deletable = E.defineModel(class {
         id = E.field(E.identifier);
         tag = E.field(E.string);
-
-        static byTag = E.index(Deletable, (d: Deletable) => [d.tag]);
-    }
+    }, {
+        pk: "id", override: true,
+        index: { byTag: (d: any) => [d.tag] },
+    });
 
     await E.transact(() => {
         new Deletable({ tag: "foo" });
@@ -2203,17 +2138,14 @@ test("computed index: delete removes index entries", async () => {
 });
 
 test("computed unique index: find with range and reverse", async () => {
-    @E.registerModel
-    class Scored extends E.Model<Scored> {
-        static override = true;
-        static pk = E.primary(Scored, "id");
-
+    const Scored = E.defineModel(class {
         id = E.field(E.identifier);
         name = E.field(E.string);
         score = E.field(E.number);
-
-        static byScore = E.unique(Scored, (s: Scored) => [s.score]);
-    }
+    }, {
+        pk: "id", override: true,
+        unique: { byScore: (s: any) => [s.score] },
+    });
 
     await E.transact(() => {
         new Scored({ name: "A", score: 10 });
@@ -2244,16 +2176,13 @@ test("computed unique index: find with range and reverse", async () => {
 });
 
 test("computed index: multi-value indexing", async () => {
-    @E.registerModel
-    class Article extends E.Model<Article> {
-        static override = true;
-        static pk = E.primary(Article, "id");
-
+    const Article = E.defineModel(class {
         id = E.field(E.identifier);
         title = E.field(E.string);
-
-        static byWord = E.index(Article, (a: Article) => a.title.toLowerCase().split(" "));
-    }
+    }, {
+        pk: "id", override: true,
+        index: { byWord: (a: any) => a.title.toLowerCase().split(" ") },
+    });
 
     await E.transact(() => {
         new Article({ title: "Hello World" });

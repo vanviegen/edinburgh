@@ -9,8 +9,9 @@ export function scheduleInit() { initNeeded = true; }
 // Re-export public API from models
 export {
     Model,
-    registerModel,
+    defineModel,
     field,
+    currentTxn,
 } from "./models.js";
 
 import type { Transaction, Change, Model } from "./models.js";
@@ -37,13 +38,10 @@ export {
 
 // Re-export public API from indexes
 export {
-    index,
-    primary,
-    unique,
     dump,
 } from "./indexes.js";
 
-export { BaseIndex, NonPrimaryIndex, UniqueIndex, PrimaryIndex, SecondaryIndex } from './indexes.js';
+export { BaseIndex, NonPrimaryIndex, UniqueIndex, SecondaryIndex } from './indexes.js';
 
 export { type Change } from './models.js';
 export type { Transaction } from './models.js';
@@ -99,7 +97,7 @@ const STALE_INSTANCE_DESCRIPTOR = {
 * @example
 * ```typescript
 * const paid = await E.transact(() => {
-*   const user = User.pk.get("john_doe");
+*   const user = User.get("john_doe");
 *   if (user.credits > 0) {
 *     user.credits--;
 *     return true;
@@ -110,7 +108,7 @@ const STALE_INSTANCE_DESCRIPTOR = {
 * ```typescript
 * // Transaction with automatic retry on conflicts
 * await E.transact(() => {
-*   const counter = Counter.pk.get("global") || new Counter({id: "global", value: 0});
+*   const counter = Counter.get("global") || new Counter({id: "global", value: 0});
 *   counter.value++;
 * });
 * ```
@@ -126,7 +124,6 @@ export async function transact<T>(fn: () => T): Promise<T> {
                 olmdbReady = true;
                 initNeeded = false;
                 for (const model of Object.values(modelRegistry)) {
-                    model.initFields();
                     await model._loadCreateIndexes();
                 }
             })();
@@ -248,7 +245,7 @@ export async function deleteEverything(): Promise<void> {
     // Re-init indexes since metadata was deleted
     for (const model of Object.values(modelRegistry)) {
         if (!model.fields) continue;
-        model.initFields(true);
+        model._resetIndexes();
         await model._loadCreateIndexes();
     }
 }

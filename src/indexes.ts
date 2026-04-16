@@ -1,7 +1,7 @@
 import * as lowlevel from "olmdb/lowlevel";
 import { DatabaseError } from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
-import { FieldConfig, getMockModel, Model, Transaction, currentTxn } from "./models.js";
+import { FieldConfig, Model, Transaction, currentTxn } from "./models.js";
 import { scheduleInit, transact } from "./edinburgh.js";
 import { assert, logLevel, dbGet, dbPut, dbDel, hashBytes, hashFunction, bytesEqual, toBuffer } from "./utils.js";
 import { deserializeType, serializeType, TypeWrapper } from "./types.js";
@@ -18,7 +18,7 @@ const VERSION_INFO_PREFIX = -3;
 const MAX_INDEX_ID_BUFFER = new DataPack().write(MAX_INDEX_ID_PREFIX).toUint8Array();
 
 /** Cached information about a specific version of a primary index's value format. */
-interface VersionInfo {
+export interface VersionInfo {
     migrateHash: number;
     /** Non-key field names → TypeWrappers for deserialization of this version's data. */
     nonKeyFields: Map<string, TypeWrapper<any>>;
@@ -75,7 +75,7 @@ export class IndexRangeIterator<M extends typeof Model> extends Iterator<Instanc
 
 type ArrayOrOnlyItem<ARG_TYPES extends readonly any[]> = ARG_TYPES extends readonly [infer A] ? (A | Partial<ARG_TYPES>) : Partial<ARG_TYPES>;
 
-type FindOptions<ARG_TYPES extends readonly any[]> = (
+export type FindOptions<ARG_TYPES extends readonly any[], FETCH extends 'first' | 'single' | undefined = undefined> = (
     (
         {is: ArrayOrOnlyItem<ARG_TYPES>;} // Shortcut for setting `from` and `to` to the same value
     |
@@ -100,6 +100,7 @@ type FindOptions<ARG_TYPES extends readonly any[]> = (
     {
         reverse?: boolean;
     }
+    & (FETCH extends undefined ? { fetch?: undefined } : { fetch: FETCH })
 );
 
 
@@ -123,7 +124,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * @param _fieldNames - Array of field names that make up this index.
      */
     constructor(MyModel: M, public _fieldNames: F) {
-        this._MyModel = getMockModel(MyModel);
+        this._MyModel = MyModel;
     }
 
     async _delayedInit() {
@@ -290,7 +291,7 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
      * }
      * 
      * // Multi-field index prefix matching
-     * for (const item of CompositeModel.pk.find({from: ["electronics", "phones"]})) {
+     * for (const item of CompositeModel.find({from: ["electronics", "phones"]})) {
      *   console.log(item.name); // All electronics/phones items
      * }
      * 
@@ -326,12 +327,19 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         return [startKey, endKey];
     }
 
-    public find(opts: FindOptions<ARGS> = {}): IndexRangeIterator<M> {
+    public find(opts?: FindOptions<ARGS, 'first'>): InstanceType<M> | undefined;
+    public find(opts: FindOptions<ARGS, 'single'>): InstanceType<M>;
+    public find(opts?: FindOptions<ARGS>): IndexRangeIterator<M>;
+    public find(opts: any = {}): IndexRangeIterator<M> | InstanceType<M> | undefined {
         const txn = currentTxn();
         const indexId = this._indexId!;
 
         const bounds = this._computeKeyBounds(opts);
-        if (!bounds) return new IndexRangeIterator(txn, -1, indexId, this);
+        if (!bounds) {
+            if (opts.fetch === 'single') throw new DatabaseError('Expected exactly one result, got none', 'NOT_FOUND');
+            if (opts.fetch === 'first') return undefined;
+            return new IndexRangeIterator(txn, -1, indexId, this);
+        }
         const [startKey, endKey] = bounds;
 
         // For reverse scans, swap start/end keys since OLMDB expects it
@@ -350,7 +358,15 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
             opts.reverse || false,
         );
         
-        return new IndexRangeIterator(txn, iteratorId, indexId, this);
+        const iter = new IndexRangeIterator(txn, iteratorId, indexId, this);
+        if (opts.fetch === 'first') return iter.fetch();
+        if (opts.fetch === 'single') {
+            const first = iter.fetch();
+            if (!first) throw new DatabaseError('Expected exactly one result, got none', 'NOT_FOUND');
+            if (iter.fetch() !== undefined) throw new DatabaseError('Expected exactly one result, got multiple', 'NOT_UNIQUE');
+            return first;
+        }
+        return iter;
     }
 
     /**
@@ -590,7 +606,7 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
      * 
      * @example
      * ```typescript
-     * const user = User.pk.get("john_doe");
+     * const user = User.get("john_doe");
      * ```
      */
     get(...args: IndexArgTypes<M, F>): InstanceType<M> | undefined {
@@ -1010,101 +1026,6 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
     _getTypeName(): string {
         return this._computeFn ? 'fn-secondary' : 'secondary';
     }
-}
-
-// Type alias for backward compatibility
-export type Index<M extends typeof Model, F extends readonly (keyof InstanceType<M> & string)[]> = 
-    PrimaryIndex<M, F> | UniqueIndex<M, F> | SecondaryIndex<M, F>;
-
-/**
- * Create a primary index on model fields.
- * @template M - The model class.
- * @template F - The field name (for single field index).
- * @template FS - The field names array (for composite index).
- * @param MyModel - The model class to create the index for.
- * @param field - Single field name for simple indexes.
- * @param fields - Array of field names for composite indexes.
- * @returns A new PrimaryIndex instance.
- * 
- * @example
- * ```typescript
- * class User extends E.Model<User> {
- *   static pk = E.primary(User, ["id"]);
- *   static pkSingle = E.primary(User, "id");
- * }
- * ```
- */
-export function primary<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): PrimaryIndex<M, [F]>;
-export function primary<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): PrimaryIndex<M, FS>;
-
-export function primary(MyModel: typeof Model, fields: any): PrimaryIndex<any, any> {
-    return new PrimaryIndex(MyModel, Array.isArray(fields) ? fields : [fields]);
-}
-
-/**
- * Create a unique index on model fields, or a computed unique index using a function.
- *
- * For field-based indexes, pass a field name or array of field names.
- * For computed indexes, pass a function that takes a model instance and returns an array of
- * index keys. Return `[]` to skip indexing for that instance. Each array element creates a
- * separate index entry, enabling multi-value indexes (e.g., indexing by each word in a name).
- *
- * @template M - The model class.
- * @template V - The computed index value type (for function-based indexes).
- * @template F - The field name (for single field index).
- * @template FS - The field names array (for composite index).
- * @param MyModel - The model class to create the index for.
- * @param field - Field name, array of field names, or a compute function.
- * @returns A new UniqueIndex instance.
- * 
- * @example
- * ```typescript
- * class User extends E.Model<User> {
- *   static byEmail = E.unique(User, "email");
- *   static byNameAge = E.unique(User, ["name", "age"]);
- *   static byFullName = E.unique(User, (u: User) => [`${u.firstName} ${u.lastName}`]);
- * }
- * ```
- */
-export function unique<M extends typeof Model, V>(MyModel: M, fn: (instance: InstanceType<M>) => V[]): UniqueIndex<M, [], [V]>;
-export function unique<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): UniqueIndex<M, [F]>;
-export function unique<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): UniqueIndex<M, FS>;
-
-export function unique(MyModel: typeof Model, fields: any): UniqueIndex<any, any, any> {
-    return new UniqueIndex(MyModel, typeof fields === 'string' ? [fields] : fields);
-}
-
-/**
- * Create a secondary index on model fields, or a computed secondary index using a function.
- *
- * For field-based indexes, pass a field name or array of field names.
- * For computed indexes, pass a function that takes a model instance and returns an array of
- * index keys. Return `[]` to skip indexing for that instance. Each array element creates a
- * separate index entry, enabling multi-value indexes (e.g., indexing by each word in a name).
- *
- * @template M - The model class.
- * @template V - The computed index value type (for function-based indexes).
- * @template F - The field name (for single field index).
- * @template FS - The field names array (for composite index).
- * @param MyModel - The model class to create the index for.
- * @param field - Field name, array of field names, or a compute function.
- * @returns A new SecondaryIndex instance.
- * 
- * @example
- * ```typescript
- * class User extends E.Model<User> {
- *   static byAge = E.index(User, "age");
- *   static byTagsDate = E.index(User, ["tags", "createdAt"]);
- *   static byWord = E.index(User, (u: User) => u.name.split(" "));
- * }
- * ```
- */
-export function index<M extends typeof Model, V>(MyModel: M, fn: (instance: InstanceType<M>) => V[]): SecondaryIndex<M, [], [V]>;
-export function index<M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): SecondaryIndex<M, [F]>;
-export function index<M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): SecondaryIndex<M, FS>;
-
-export function index(MyModel: typeof Model, fields: any): SecondaryIndex<any, any, any> {
-    return new SecondaryIndex(MyModel, typeof fields === 'string' ? [fields] : fields);
 }
 
 /**

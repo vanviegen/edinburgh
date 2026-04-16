@@ -49,8 +49,6 @@
     "test:node": "bun x vitest --bail 1 --watch=false --silent=passed-only",
     "prepack": "npm run build && npm run test && npm run build:docs",
     "build:docs": "rm -rf skill ; mkdir skill ; cat skill-header.md README.md > skill/SKILL.md && readme-tsdoc --split --file skill/SKILL.md && readme-tsdoc --repo-url https://github.com/vanviegen/edinburgh",
-
-    
     "postinstall": "[ -f .local-post-install.sh ] && sh .local-post-install.sh || true"
   },
   "trustedDependencies": [

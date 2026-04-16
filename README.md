@@ -22,39 +22,41 @@ import * as E from "edinburgh";
 // Initialize the database (optional, defaults to ".edinburgh")
 E.init("./my-database");
 
-// Define a model
-@E.registerModel
-class User extends E.Model<User> {
-    // Define a primary key (optional, defaults to using the "id" field)
-    static pk = E.primary(User, "id");
-    // Define a unique index on the email field
-    static byEmail = E.unique(User, "email");
-
-    // Define fields with simple types -- they will be type-checked at compile time and validated at runtime.
+const User = E.defineModel(class {
     id = E.field(E.identifier);
     name = E.field(E.string);
     age = E.field(E.number);
-    email = E.field(E.opt(E.string)); // TypeScript: undefined | string
+    email = E.field(E.opt(E.string));
+    // Optional link to another instance of this model (needs a function as `User` is not defined yet at this point)
+    supervisor = E.field(E.opt(E.link(() => User)));
+    // A field with a more elaborate type. In TypeScript: `User | User[] | "unknown" | "whatever"`, defaulting to "unknown".
+    something = E.field(
+        E.or(
+            E.link(() => User),
+            E.array(E.link(() => User)),
+            E.literal("unknown"),
+            E.literal("whatever")
+        ),
+        { default: "unknown" }
+    );
+}, {
+    pk: "id",
+    unique: {
+        byEmail: "email",
+    },
+    tableName: "User",
+});
 
-    // Link to another instance of this model
-    supervisor = E.field(E.opt(E.link(User)));
-
-    // A field with a more elaborate type. In TypeScript: `User | User[] | "unknown" | "whatever"`
-    something = E.field(E.or(E.link(User), E.array(E.link(User)), E.literal("unknown"), E.literal("whatever")), { default: "unknown" });
-}
-
-// Use in transactions
 await E.transact(() => {
-    const boss = new User({
-        name: "Big Boss",
-        age: 50,
-    });
-    const john = new User({ // Unique 'id' is automatically generated if not provided
-        name: "John Doe", 
+    // Unique 'id' values are auto-generated if not provided
+    const boss = new User({ name: "Big Boss", age: 50 });
+    new User({
+        name: "John Doe",
         age: 41,
         email: "john@example.com",
         supervisor: boss, // Link to another model instance
     });
+    // Newly instantiated models are automatically saved to the database on transaction commit
 });
 
 await E.transact(() => {
@@ -66,41 +68,31 @@ await E.transact(() => {
     john.age++;
 
     // The supervisor object is lazy loaded on first access
-    console.log(`${john.supervisor!.name} is ${john.name}'s supervisor`);  
+    console.log(`${john.supervisor!.name} is ${john.name}'s supervisor`);
 });    
 ```
 
 ## Tutorial
 
-### TypeScript Configuration
-
-When using TypeScript to transpile to JavaScript, make sure to enable the following options in your `tsconfig.json`:
-
-```json
-{
-    "compilerOptions": {
-        "target": "es2022",
-        "experimentalDecorators": true
-    }
-}
-```
 
 ### Defining Models
 
-Models are classes that extend `E.Model<Self>` and use the `@E.registerModel` decorator:
+Models are plain, usually anonymous, classes passed to `E.defineModel()`:
 
 ```typescript
 import * as E from "edinburgh";
 
-@E.registerModel
-class User extends E.Model<User> {
-  static pk = E.primary(User, "id");
-
+const User = E.defineModel(class {
   id = E.field(E.identifier);
   name = E.field(E.string);
   email = E.field(E.string);
   age = E.field(E.number);
-}
+}, {
+  pk: "id",
+  unique: {
+    byEmail: "email",
+  },
+});
 ```
 
 Instance fields are declared with `E.field(type, options?)`. Available types:
@@ -124,16 +116,13 @@ Instance fields are declared with `E.field(type, options?)`. Available types:
 #### Defaults
 
 ```typescript
-@E.registerModel
-class Post extends E.Model<Post> {
-  static pk = E.primary(Post, "id");
-
-  id = E.field(E.identifier);  // auto-generated
+const Post = E.defineModel(class {
+  id = E.field(E.identifier); // auto-generated
   title = E.field(E.string);
   status = E.field(E.or("draft", "published"), {default: "draft"});
-  tags = E.field(E.array(E.string), {default: () => []});  // use function for mutable defaults
-  createdAt = E.field(E.dateTime);  // dateTime defaults to new Date()
-}
+  tags = E.field(E.array(E.string), {default: () => []}); // use function for mutable defaults
+  createdAt = E.field(E.dateTime); // dateTime defaults to new Date()
+}, { pk: "id" });
 ```
 
 ### Transactions
@@ -146,8 +135,8 @@ E.init("./my-database");
 
 // Create
 await E.transact(() => {
-  const user = new User({name: "Alice", email: "alice@example.com", age: 30});
-  // user.id is auto-generated
+  // User.id is auto-generated
+  new User({name: "Alice", email: "alice@example.com", age: 30});
 });
 
 // Read + Update
@@ -170,27 +159,26 @@ Transactions auto-retry on conflict (up to 6 times by default). Keep transaction
 Edinburgh supports three index types:
 
 ```typescript
-@E.registerModel
-class Product extends E.Model<Product> {
-  static pk = E.primary(Product, "sku");           // primary: one per model, stores data
-  static byName = E.unique(Product, "name");       // unique: enforces uniqueness + fast lookup
-  static byCategory = E.index(Product, "category");// secondary: non-unique, for queries
-
+const Product = E.defineModel(class {
   sku = E.field(E.string);
   name = E.field(E.string);
   category = E.field(E.string);
   price = E.field(E.number);
-}
+}, {
+  pk: "sku",
+  unique: { byName: "name" },
+  index: { byCategory: "category" },
+});
 ```
 
-If no `E.primary()` is declared, Edinburgh auto-creates one on an `id` field (adding `E.identifier` if missing).
+If no `pk` is provided, Edinburgh auto-creates one on an `id` field, adding it as an `E.identifier` field if needed.
 
 #### Lookups
 
 ```typescript
 await E.transact(() => {
   // Primary key lookup
-  const p = Product.pk.get("SKU-001");
+  const p1 = Product.get("SKU-001");
 
   // Unique index lookup
   const p2 = Product.byName.get("Widget");
@@ -211,18 +199,18 @@ await E.transact(() => {
   }
 
   // Range (inclusive)
-  for (const p of Product.pk.find({from: "A", to: "M"})) {
+  for (const p of Product.find({from: "A", to: "M"})) {
     console.log(p.sku);
   }
 
   // Exclusive bounds
-  for (const p of Product.pk.find({after: "A", before: "M"})) { ... }
+  for (const p of Product.find({after: "A", before: "M"})) { ... }
 
   // Open-ended
-  for (const p of Product.pk.find({from: "M"})) { ... }
+  for (const p of Product.find({from: "M"})) { ... }
 
   // Reverse
-  for (const p of Product.pk.find({reverse: true})) { ... }
+  for (const p of Product.find({reverse: true})) { ... }
 
   // Count and fetch helpers
   const count = Product.byCategory.find({is: "electronics"}).count();
@@ -230,25 +218,24 @@ await E.transact(() => {
 });
 ```
 
-#### Composite Indexes
+#### Composite Primary Keys
 
 ```typescript
-@E.registerModel
-class Event extends E.Model<Event> {
-  static pk = E.primary(Event, ["year", "month", "id"]);
-
+const Event = E.defineModel(class {
   year = E.field(E.number);
   month = E.field(E.number);
   id = E.field(E.identifier);
   title = E.field(E.string);
-}
+}, {
+  pk: ["year", "month", "id"] as const,
+});
 
 await E.transact(() => {
   // Prefix matching — find all events in 2025
-  for (const e of Event.pk.find({is: [2025]})) { ... }
+  for (const e of Event.find({is: [2025]})) { ... }
 
   // Find events in March 2025
-  for (const e of Event.pk.find({is: [2025, 3]})) { ... }
+  for (const e of Event.find({is: [2025, 3]})) { ... }
 });
 ```
 
@@ -257,10 +244,7 @@ await E.transact(() => {
 You can freely add regular methods, getters, and other non-persistent properties to model classes. These work normally in JavaScript but are **not stored in the database** and **not synchronized** across transactions or processes.
 
 ```typescript
-@E.registerModel
-class User extends E.Model<User> {
-  static pk = E.primary(User, "id");
-  id = E.field(E.identifier);
+const User = E.defineModel(class {
   firstName = E.field(E.string);
   lastName = E.field(E.string);
 
@@ -275,27 +259,30 @@ class User extends E.Model<User> {
   greet(): string {
     return `Hello, ${this.fullName}!`;
   }
-}
+});
 ```
 
 #### Computed Indexes
 
-Instead of naming fields, you can pass a **function** to `E.unique()` or `E.index()`. The function receives a model instance and returns an **array** of index key values. Each element creates a separate index entry, enabling multi-value indexes. Return `[]` to skip indexing for that instance (partial index).
+Instead of naming fields, you can pass a function as an index specification. The function receives a model instance and returns an **array** of index key values. Each element creates a separate index entry, enabling multi-value indexes. Return `[]` to skip indexing for that instance (partial index).
 
 ```typescript
-@E.registerModel
-class Article extends E.Model<Article> {
-  static pk = E.primary(Article, "id");
-  static byFullName = E.unique(Article, (a: Article) => [`${a.firstName} ${a.lastName}`]);
-  static byWord = E.index(Article, (a: Article) => a.title.toLowerCase().split(" "));
-  static byDomain = E.index(Article, (a: Article) => a.email ? [a.email.split("@")[1]] : []);
-
+const Article = E.defineModel(class {
   id = E.field(E.identifier);
   firstName = E.field(E.string);
   lastName = E.field(E.string);
   title = E.field(E.string);
   email = E.field(E.opt(E.string));
-}
+}, {
+  pk: "id",
+  unique: {
+    byFullName: (a: any) => [`${a.firstName} ${a.lastName}`], // computed covering unique index
+  },
+  index: {
+    byDomain: (a: any) => a.email ? [a.email.split("@")[1]] : [], // computed partial index
+    byWord: (a: any) => a.title.toLowerCase().split(" "), // computed multi-index
+  },
+});
 
 await E.transact(() => {
   new Article({ firstName: "Jane", lastName: "Doe", title: "Hello World", email: "jane@acme.com" });
@@ -311,34 +298,29 @@ await E.transact(() => {
 });
 ```
 
-Computed indexes also support `find()` range queries and `batchProcess()`, just like field-based indexes.
+### Relationships
 
-### Relationships (Links)
-
-Use `E.link(Model)` for foreign keys:
+Use `E.link(Model)` for foreign keys. Use a thunk (a function that just returns a value) for forward references when needed:
 
 ```typescript
-@E.registerModel
-class Author extends E.Model<Author> {
-  static pk = E.primary(Author, "id");
+const Author = E.defineModel(class {
   id = E.field(E.identifier);
   name = E.field(E.string);
-}
+}, { pk: "id" });
 
-@E.registerModel
-class Book extends E.Model<Book> {
-  static pk = E.primary(Book, "id");
+const Book = E.defineModel(class {
   id = E.field(E.identifier);
   title = E.field(E.string);
   author = E.field(E.link(Author));
-}
+}, { pk: "id" });
 
 await E.transact(() => {
   const author = new Author({name: "Tolkien"});
   const book = new Book({title: "The Hobbit", author});
 
   // Later: linked models are lazy-loaded on property access
-  const b = Book.pk.get(book.id)!;
+  const b = Book.get(book.id)!;
+  console.log(b.author.id);    // no need to load yet..
   console.log(b.author.name);  // loads Author automatically (~1µs)
 });
 ```
@@ -347,7 +329,7 @@ await E.transact(() => {
 
 ```typescript
 await E.transact(() => {
-  const user = User.pk.get(someId);
+  const user = User.get(someId);
   if (user) user.delete();
 });
 ```
@@ -365,10 +347,16 @@ await E.transact(() => {
   user.preventPersist(); // exclude from commit
 });
 
-// findAll iterates all instances
+// find() iterates all instances (or use range options)
 await E.transact(() => {
-  for (const user of User.findAll()) { ... }
-  for (const user of User.findAll({reverse: true})) { ... }
+  for (const user of User.find()) { ... }
+  for (const user of User.find({reverse: true})) { ... }
+
+  // {fetch: 'first'} returns a single instance or undefined
+  const first = User.find({fetch: 'first'});
+
+  // {fetch: 'single'} returns a single instance, or throws if there are none or more than one
+  const only = User.find({fetch: 'single'});
 });
 
 // replaceInto: upsert by primary key
@@ -382,7 +370,7 @@ await E.transact(() => {
 For large datasets, `batchProcess` auto-commits in batches:
 
 ```typescript
-await Product.byCategory.batchProcess({is: "old"}, (product) => {
+await Product.batchProcess({ limitRows: 1000 }, (product) => {
   product.category = "archived";
 });
 // Commits every ~1 second or 4096 rows (configurable via limitSeconds, limitRows)
@@ -390,12 +378,10 @@ await Product.byCategory.batchProcess({is: "old"}, (product) => {
 
 ### Lazy Schema Migrations
 
-When you change a model's schema, Edinburgh will lazily try to migrate old records on access. This allows you to deploy code changes without downtime or a separate migration step. Optionally, you may provide a `static migrate(record: Record<string, any>)` function on the model to transform old records during lazy migration. If there is a migration error (like a new field without a default value, or an incompatible type change), a run-time error is thrown when loading the affected model instance.
+When you change a model's schema, Edinburgh lazily migrates old records on access. You can provide a `static migrate(record)` function to transform old rows:
 
 ```typescript
-@E.registerModel
-class User extends E.Model<User> {
-  static pk = E.primary(User, "id");
+const UserV2 = E.defineModel(class {
   id = E.field(E.identifier);
   name = E.field(E.string);
   role = E.field(E.string);  // newly added field
@@ -438,9 +424,7 @@ console.log(result.secondaries);  // { User: 1500 }
 Compute derived fields before data is written:
 
 ```typescript
-@E.registerModel
-class Article extends E.Model<Article> {
-  static pk = E.primary(Article, "id");
+const Article = E.defineModel(class {
   id = E.field(E.identifier);
   title = E.field(E.string);
   slug = E.field(E.string);
@@ -448,7 +432,7 @@ class Article extends E.Model<Article> {
   preCommit() {
     this.slug = this.title.toLowerCase().replace(/\s+/g, "-");
   }
-}
+}, { pk: "id" });
 ```
 
 ### Change Tracking
@@ -493,7 +477,7 @@ The following is auto-generated from `src/edinburgh.ts`:
 
 **Signature:** `() => void`
 
-### init · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L67)
+### init · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L65)
 
 Initialize the database with the specified directory path.
 This function may be called multiple times with the same parameters. If it is not called before the first transact(),
@@ -511,7 +495,7 @@ the database will be automatically initialized with the default directory.
 init("./my-database");
 ```
 
-### transact · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L118)
+### transact · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L116)
 
 Executes a function within a database transaction context.
 
@@ -545,7 +529,7 @@ times.
 
 ```typescript
 const paid = await E.transact(() => {
-  const user = User.pk.get("john_doe");
+  const user = User.get("john_doe");
   if (user.credits > 0) {
     user.credits--;
     return true;
@@ -556,12 +540,12 @@ const paid = await E.transact(() => {
 ```typescript
 // Transaction with automatic retry on conflicts
 await E.transact(() => {
-  const counter = Counter.pk.get("global") || new Counter({id: "global", value: 0});
+  const counter = Counter.get("global") || new Counter({id: "global", value: 0});
   counter.value++;
 });
 ```
 
-### setMaxRetryCount · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L209)
+### setMaxRetryCount · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L206)
 
 Set the maximum number of retries for a transaction in case of conflicts.
 The default value is 6. Setting it to 0 will disable retries and cause transactions to fail immediately on conflict.
@@ -572,7 +556,7 @@ The default value is 6. Setting it to 0 will disable retries and cause transacti
 
 - `count: number` - The maximum number of retries for a transaction.
 
-### setOnSaveCallback · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L223)
+### setOnSaveCallback · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L220)
 
 Set a callback function to be called after a model is saved and committed.
 
@@ -585,11 +569,11 @@ Set a callback function to be called after a model is saved and committed.
 - A sequential number. Higher numbers have been committed after lower numbers.
 - A map of model instances to their changes. The change can be "created", "deleted", or an object containing the old values.
 
-### deleteEverything · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L228)
+### deleteEverything · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L225)
 
 **Signature:** `() => Promise<void>`
 
-### Model · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L221)
+### Model · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 [object Object],[object Object],[object Object],[object Object],[object Object]
 
@@ -600,37 +584,35 @@ Set a callback function to be called after a model is saved and committed.
 **Examples:**
 
 ```typescript
-⁣@E.registerModel
-class User extends E.Model<User> {
-  static pk = E.primary(User, "id");
-  
+const User = E.defineModel(class {
   id = E.field(E.identifier);
   name = E.field(E.string);
   email = E.field(E.string);
-  
-  static byEmail = E.unique(User, "email");
-}
+}, {
+  pk: "id",
+  unique: { byEmail: "email" },
+});
 ```
 
-#### Model.tableName · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L225)
+#### Model.tableName · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 The database table name (defaults to class name).
 
 **Type:** `string`
 
-#### Model.override · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L231)
+#### Model.override · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
-When true, registerModel replaces an existing model with the same tableName.
+When true, defineModel replaces an existing model with the same tableName.
 
 **Type:** `boolean`
 
-#### Model.fields · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L233)
+#### Model.fields · [static property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Field configuration metadata.
 
 **Type:** `Record<string | number | symbol, FieldConfig<unknown>>`
 
-#### Model.migrate · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### Model.migrate · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Optional migration function called when deserializing rows written with an older schema version.
 Receives a plain record with all fields (primary key fields + value fields) and should mutate it
@@ -652,9 +634,7 @@ will only be updated when `runMigration()` is run (not during lazy loading).
 **Examples:**
 
 ```typescript
-⁣@E.registerModel
-class User extends E.Model<User> {
-  static pk = E.primary(User, "id");
+const User = E.defineModel(class {
   id = E.field(E.identifier);
   name = E.field(E.string);
   role = E.field(E.string);  // new field
@@ -662,35 +642,43 @@ class User extends E.Model<User> {
   static migrate(record: Record<string, any>) {
     record.role ??= "user";  // default for rows that predate the 'role' field
   }
-}
+}, { pk: "id" });
 ```
 
-#### Model.initFields · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### Model.get · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
-Transform the model's `E.field` properties into the appropriate JavaScript properties. Normally this is done
-automatically when using `transact()`, but in case you need to access `Model.fields` directly before the first
-transaction, you can call this method manually.
-
-**Signature:** `(reset?: boolean) => void`
+**Signature:** `(...args: any[]) => any`
 
 **Parameters:**
 
-- `reset?: boolean`
+- `args: any[]`
 
-#### Model.findAll · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### Model.getLazy · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
-Find all instances of this model in the database, ordered by primary key.
-
-**Signature:** `<T extends typeof Model<unknown>>(this: T, opts?: { reverse?: boolean; }) => IndexRangeIterator<T>`
+**Signature:** `(...args: any[]) => any`
 
 **Parameters:**
 
-- `this: T`
-- `opts?: {reverse?: boolean}` - - Optional parameters.
+- `args: any[]`
 
-**Returns:** An iterator.
+#### Model.find · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
-#### Model.replaceInto · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+**Signature:** `(opts?: any) => any`
+
+**Parameters:**
+
+- `opts?: any`
+
+#### Model.batchProcess · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
+
+**Signature:** `(opts: any, callback?: any) => any`
+
+**Parameters:**
+
+- `opts: any`
+- `callback?: any`
+
+#### Model.replaceInto · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Load an existing instance by primary key and update it, or create a new one.
 
@@ -698,16 +686,16 @@ The provided object must contain all primary key fields. If a matching row exist
 the remaining properties from `obj` are set on the loaded instance. Otherwise a
 new instance is created with `obj` as its initial properties.
 
-**Signature:** `<T extends typeof Model<any>>(this: T, obj: Partial<Omit<InstanceType<T>, "constructor">>) => InstanceType<T>`
+**Signature:** `<T extends typeof Model<any>>(this: T, obj: Partial<Record<string, any>>) => InstanceType<T>`
 
 **Parameters:**
 
 - `this: T`
-- `obj: Partial<Omit<InstanceType<T>, "constructor">>` - - Partial model data that **must** include every primary key field.
+- `obj: Partial<Record<string, any>>` - - Partial model data that **must** include every primary key field.
 
 **Returns:** The loaded-and-updated or newly created instance.
 
-#### model.preCommit · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.preCommit · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Optional hook called on each modified instance right before the transaction commits.
 Runs before data is written to disk, so changes made here are included in the commit.
@@ -723,9 +711,7 @@ Common use cases:
 **Examples:**
 
 ```typescript
-⁣@E.registerModel
-class Post extends E.Model<Post> {
-  static pk = E.primary(Post, "id");
+const Post = E.defineModel(class {
   id = E.field(E.identifier);
   title = E.field(E.string);
   slug = E.field(E.string);
@@ -733,22 +719,22 @@ class Post extends E.Model<Post> {
   preCommit() {
     this.slug = this.title.toLowerCase().replace(/\s+/g, "-");
   }
-}
+}, { pk: "id" });
 ```
 
-#### model.getPrimaryKey · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.getPrimaryKey · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 **Signature:** `() => Uint8Array<ArrayBufferLike>`
 
 **Returns:** The primary key for this instance.
 
-#### model.getPrimaryKeyHash · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.getPrimaryKeyHash · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 **Signature:** `() => number`
 
 **Returns:** A 53-bit positive integer non-cryptographic hash of the primary key, or undefined if not yet saved.
 
-#### model.isLazyField · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.isLazyField · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 **Signature:** `(field: keyof this) => boolean`
 
@@ -756,7 +742,7 @@ class Post extends E.Model<Post> {
 
 - `field: keyof this`
 
-#### model.preventPersist · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.preventPersist · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Prevent this instance from being persisted to the database.
 
@@ -767,12 +753,12 @@ Prevent this instance from being persisted to the database.
 **Examples:**
 
 ```typescript
-const user = User.load("user123");
+const user = User.get("user123");
 user.name = "New Name";
 user.preventPersist(); // Changes won't be saved
 ```
 
-#### model.delete · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.delete · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Delete this model instance from the database.
 
@@ -783,11 +769,11 @@ Removes the instance and all its index entries from the database and prevents fu
 **Examples:**
 
 ```typescript
-const user = User.load("user123");
+const user = User.get("user123");
 user.delete(); // Removes from database
 ```
 
-#### model.validate · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.validate · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Validate all fields in this model instance.
 
@@ -809,7 +795,7 @@ if (errors.length > 0) {
 }
 ```
 
-#### model.isValid · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.isValid · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Check if this model instance is valid.
 
@@ -824,46 +810,42 @@ const user = new User({name: "John"});
 if (!user.isValid()) shoutAtTheUser();
 ```
 
-#### model.getState · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.getState · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 **Signature:** `() => "created" | "deleted" | "loaded" | "lazy"`
 
-#### model.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 **Signature:** `() => string`
 
-#### model.[Symbol.for('nodejs.util.inspect.custom')] · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### model.[Symbol.for('nodejs.util.inspect.custom')] · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 **Signature:** `() => string`
 
-### registerModel · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L113)
+### defineModel · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L164)
 
 Register a model class with the Edinburgh ORM system.
 
-**Signature:** `<T extends typeof Model<unknown>>(MyModel: T) => T`
+Converts a plain class into a fully-featured model with database persistence,
+typed fields, primary key access, and optional secondary and unique indexes.
+
+**Signature:** `<T extends new () => any, const PK extends (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[], const UNIQUE extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>, const INDEX extends Record<string, (keyof FieldsOf<T> & string) | ...`
 
 **Type Parameters:**
 
-- `T extends typeof Model<unknown>` - The model class type.
+- `T extends new () => any`
+- `PK extends (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[]`
+- `UNIQUE extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>`
+- `INDEX extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>`
 
 **Parameters:**
 
-- `MyModel: T` - - The model class to register.
+- `cls: T` - - A plain class whose properties use E.field().
+- `opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, tableName?: string, override?: boolean }` - - Registration options.
 
-**Returns:** The enhanced model class with ORM capabilities.
+**Returns:** The enhanced model constructor.
 
-**Examples:**
-
-```typescript
-⁣@E.registerModel
-class User extends E.Model<User> {
-  static pk = E.index(User, ["id"], "primary");
-  id = E.field(E.identifier);
-  name = E.field(E.string);
-}
-```
-
-### field · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L89)
+### field · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L87)
 
 Create a field definition for a model property.
 
@@ -887,19 +869,26 @@ This allows for both runtime introspection and compile-time type safety.
 **Examples:**
 
 ```typescript
-class User extends E.Model<User> {
+const User = E.defineModel(class {
   name = E.field(E.string, {description: "User's full name"});
   age = E.field(E.opt(E.number), {description: "User's age", default: 25});
-}
+});
 ```
 
-### string · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### currentTxn · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L21)
+
+Returns the current transaction from AsyncLocalStorage.
+Throws if called outside a transact() callback.
+
+**Signature:** `() => Transaction`
+
+### string · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Type wrapper instance for the string type.
 
 **Value:** `TypeWrapper<string>`
 
-### orderedString · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### orderedString · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Type wrapper instance for the ordered string type, which is just like a string
 except that it sorts lexicographically in the database (instead of by incrementing
@@ -909,37 +898,37 @@ may not contain null characters.
 
 **Value:** `TypeWrapper<string>`
 
-### number · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### number · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Type wrapper instance for the number type.
 
 **Value:** `TypeWrapper<number>`
 
-### dateTime · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### dateTime · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Type wrapper instance for the date/time type. Stored without timezone info, rounded to whole seconds.
 
 **Value:** `TypeWrapper<Date>`
 
-### boolean · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### boolean · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Type wrapper instance for the boolean type.
 
 **Value:** `TypeWrapper<boolean>`
 
-### identifier · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### identifier · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Type wrapper instance for the identifier type.
 
 **Value:** `TypeWrapper<string>`
 
-### undef · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### undef · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Type wrapper instance for the 'undefined' type.
 
 **Value:** `TypeWrapper<undefined>`
 
-### opt · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### opt · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Create an optional type wrapper (allows undefined).
 
@@ -962,7 +951,7 @@ const optionalString = E.opt(E.string);
 const optionalNumber = E.opt(E.number);
 ```
 
-### or · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### or · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Create a union type wrapper from multiple type choices.
 
@@ -985,7 +974,7 @@ const stringOrNumber = E.or(E.string, E.number);
 const status = E.or("active", "inactive", "pending");
 ```
 
-### array · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### array · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Create an array type wrapper with optional length constraints.
 
@@ -1009,7 +998,7 @@ const stringArray = E.array(E.string);
 const boundedArray = E.array(E.number, {min: 1, max: 10});
 ```
 
-### set · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### set · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Create a Set type wrapper with optional length constraints.
 
@@ -1033,7 +1022,7 @@ const stringSet = E.set(E.string);
 const boundedSet = E.set(E.number, {min: 1, max: 10});
 ```
 
-### record · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### record · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Create a Record type wrapper for key-value objects with string or number keys.
 
@@ -1055,7 +1044,7 @@ Create a Record type wrapper for key-value objects with string or number keys.
 const scores = E.record(E.number);  // Record<string | number, number>
 ```
 
-### literal · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### literal · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Create a literal type wrapper for a constant value.
 
@@ -1078,15 +1067,15 @@ const statusType = E.literal("active");
 const countType = E.literal(42);
 ```
 
-### link · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### link · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Create a link type wrapper for model relationships.
 
-**Signature:** `<const T extends typeof Model<any>>(TargetModel: T) => TypeWrapper<InstanceType<T>>`
+**Signature:** `{ <const T extends ModelCtorLike>(TargetModel: T): TypeWrapper<InstanceType<T>>; <const T extends ModelCtorLike>(TargetModel: () => T): TypeWrapper<InstanceType<T>>; }`
 
 **Type Parameters:**
 
-- `T extends typeof Model<any>` - The target model class.
+- `T extends ModelCtorLike` - The target model class.
 
 **Parameters:**
 
@@ -1097,109 +1086,18 @@ Create a link type wrapper for model relationships.
 **Examples:**
 
 ```typescript
-class User extends E.Model<User> {
-  posts = E.field(E.array(E.link(Post, 'author')));
-}
+const Author = E.defineModel(class {
+  id = E.field(E.identifier);
+  posts = E.field(E.array(E.link(() => Book)));
+}, { pk: "id" });
 
-class Post extends E.Model<Post> {
-  author = E.field(E.link(User));
-}
+const Book = E.defineModel(class {
+  id = E.field(E.identifier);
+  author = E.field(E.link(Author));
+}, { pk: "id" });
 ```
 
-### index · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
-
-Create a secondary index on model fields, or a computed secondary index using a function.
-
-For field-based indexes, pass a field name or array of field names.
-For computed indexes, pass a function that takes a model instance and returns an array of
-index keys. Return `[]` to skip indexing for that instance. Each array element creates a
-separate index entry, enabling multi-value indexes (e.g., indexing by each word in a name).
-
-**Signature:** `{ <M extends typeof Model, V>(MyModel: M, fn: (instance: InstanceType<M>) => V[]): SecondaryIndex<M, [], [V]>; <M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): SecondaryIndex<...>; <M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(...`
-
-**Type Parameters:**
-
-- `M extends typeof Model` - The model class.
-- `V` - The computed index value type (for function-based indexes).
-
-**Parameters:**
-
-- `MyModel: M` - - The model class to create the index for.
-- `fn: (instance: InstanceType<M>) => V[]`
-
-**Returns:** A new SecondaryIndex instance.
-
-**Examples:**
-
-```typescript
-class User extends E.Model<User> {
-  static byAge = E.index(User, "age");
-  static byTagsDate = E.index(User, ["tags", "createdAt"]);
-  static byWord = E.index(User, (u: User) => u.name.split(" "));
-}
-```
-
-### primary · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
-
-Create a primary index on model fields.
-
-**Signature:** `{ <M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): PrimaryIndex<M, [F]>; <M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyModel: M, fields: FS): PrimaryIndex<...>; }`
-
-**Type Parameters:**
-
-- `M extends typeof Model` - The model class.
-- `F extends (keyof InstanceType<M> & string)` - The field name (for single field index).
-
-**Parameters:**
-
-- `MyModel: M` - - The model class to create the index for.
-- `field: F` - - Single field name for simple indexes.
-
-**Returns:** A new PrimaryIndex instance.
-
-**Examples:**
-
-```typescript
-class User extends E.Model<User> {
-  static pk = E.primary(User, ["id"]);
-  static pkSingle = E.primary(User, "id");
-}
-```
-
-### unique · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
-
-Create a unique index on model fields, or a computed unique index using a function.
-
-For field-based indexes, pass a field name or array of field names.
-For computed indexes, pass a function that takes a model instance and returns an array of
-index keys. Return `[]` to skip indexing for that instance. Each array element creates a
-separate index entry, enabling multi-value indexes (e.g., indexing by each word in a name).
-
-**Signature:** `{ <M extends typeof Model, V>(MyModel: M, fn: (instance: InstanceType<M>) => V[]): UniqueIndex<M, [], [V]>; <M extends typeof Model, const F extends (keyof InstanceType<M> & string)>(MyModel: M, field: F): UniqueIndex<...>; <M extends typeof Model, const FS extends readonly (keyof InstanceType<M> & string)[]>(MyMode...`
-
-**Type Parameters:**
-
-- `M extends typeof Model` - The model class.
-- `V` - The computed index value type (for function-based indexes).
-
-**Parameters:**
-
-- `MyModel: M` - - The model class to create the index for.
-- `fn: (instance: InstanceType<M>) => V[]`
-
-**Returns:** A new UniqueIndex instance.
-
-**Examples:**
-
-```typescript
-class User extends E.Model<User> {
-  static byEmail = E.unique(User, "email");
-  static byNameAge = E.unique(User, ["name", "age"]);
-  static byFullName = E.unique(User, (u: User) => [`${u.firstName} ${u.lastName}`]);
-}
-```
-
-### dump · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### dump · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Dump database contents for debugging.
 
@@ -1208,7 +1106,7 @@ This is primarily useful for development and debugging purposes.
 
 **Signature:** `() => void`
 
-### BaseIndex · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L128)
+### BaseIndex · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L130)
 
 Base class for database indexes for efficient lookups on model fields.
 
@@ -1225,113 +1123,97 @@ Indexes enable fast queries on specific field combinations and enforce uniquenes
 - `MyModel`: - The model class this index belongs to.
 - `_fieldNames`: - Array of field names that make up this index.
 
-#### baseIndex.find · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### baseIndex.find · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
-**Signature:** `(opts?: FindOptions<ARGS>) => IndexRangeIterator<M>`
+**Signature:** `{ (opts?: FindOptions<ARGS, "first">): InstanceType<M>; (opts: FindOptions<ARGS, "single">): InstanceType<M>; (opts?: FindOptions<...>): IndexRangeIterator<...>; }`
 
 **Parameters:**
 
-- `opts: FindOptions<ARGS>` (optional)
+- `opts?: FindOptions<ARGS, 'first'>`
 
-#### baseIndex.batchProcess · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### baseIndex.find · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
+
+**Signature:** `{ (opts?: FindOptions<ARGS, "first">): InstanceType<M>; (opts: FindOptions<ARGS, "single">): InstanceType<M>; (opts?: FindOptions<...>): IndexRangeIterator<...>; }`
+
+**Parameters:**
+
+- `opts: FindOptions<ARGS, 'single'>`
+
+#### baseIndex.find · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
+
+**Signature:** `{ (opts?: FindOptions<ARGS, "first">): InstanceType<M>; (opts: FindOptions<ARGS, "single">): InstanceType<M>; (opts?: FindOptions<...>): IndexRangeIterator<...>; }`
+
+**Parameters:**
+
+- `opts?: FindOptions<ARGS>`
+
+#### baseIndex.find · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
+
+**Signature:** `{ (opts?: FindOptions<ARGS, "first">): InstanceType<M>; (opts: FindOptions<ARGS, "single">): InstanceType<M>; (opts?: FindOptions<...>): IndexRangeIterator<...>; }`
+
+**Parameters:**
+
+- `opts: any` (optional)
+
+#### baseIndex.batchProcess · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 [object Object],[object Object],[object Object]
 
-**Signature:** `(opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number; }, callback: (row: InstanceType<M>) => void | Promise<void>) => Promise<...>`
+**Signature:** `(opts: FindOptions<ARGS, undefined> & { limitSeconds?: number; limitRows?: number; }, callback: (row: InstanceType<M>) => void | Promise<void>) => Promise<...>`
 
 **Parameters:**
 
 - `opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number }` (optional) - - Query options (same as `find()`), plus:
 - `callback: (row: InstanceType<M>) => void | Promise<void>` - - Called for each matching row within a transaction
 
-#### baseIndex.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+#### baseIndex.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 **Signature:** `() => string`
 
-### UniqueIndex · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### NonPrimaryIndex · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
+
+Abstract base for all non-primary indexes (unique and secondary).
+Provides shared key serialization, write/delete/update logic.
+
+**Type Parameters:**
+
+- `M extends typeof Model`
+- `F extends readonly (keyof InstanceType<M> & string)[]`
+- `ARGS extends readonly any[] = IndexArgTypes<M, F>`
+
+### UniqueIndex · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Unique index that stores references to the primary key.
 
 **Type Parameters:**
 
-- `M extends typeof Model` - The model class this index belongs to.
-- `F extends readonly (keyof InstanceType<M> & string)[]` - The field names that make up this index.
+- `M extends typeof Model`
+- `F extends readonly (keyof InstanceType<M> & string)[]`
 - `ARGS extends readonly any[] = IndexArgTypes<M, F>`
 
-#### uniqueIndex.get · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
-
-Get a model instance by unique index key values.
+#### uniqueIndex.get · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 **Signature:** `(...args: ARGS) => InstanceType<M>`
 
 **Parameters:**
 
-- `args: ARGS` - - The unique index key values.
+- `args: ARGS`
 
-**Returns:** The model instance if found, undefined otherwise.
-
-**Examples:**
-
-```typescript
-const userByEmail = User.byEmail.get("john@example.com");
-```
-
-### PrimaryIndex · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
-
-Primary index that stores the actual model data.
-
-**Type Parameters:**
-
-- `M extends typeof Model` - The model class this index belongs to.
-- `F extends readonly (keyof InstanceType<M> & string)[]` - The field names that make up this index.
-
-#### primaryIndex.get · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
-
-Get a model instance by primary key values.
-
-**Signature:** `(...args: IndexArgTypes<M, F>) => InstanceType<M>`
-
-**Parameters:**
-
-- `args: IndexArgTypes<M, F>` - - The primary key values.
-
-**Returns:** The model instance if found, undefined otherwise.
-
-**Examples:**
-
-```typescript
-const user = User.pk.get("john_doe");
-```
-
-#### primaryIndex.getLazy · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
-
-Does the same as as `get()`, but will delay loading the instance from disk until the first
-property access. In case it turns out the instance doesn't exist, an error will be thrown
-at that time.
-
-**Signature:** `(...args: IndexArgTypes<M, F>) => InstanceType<M>`
-
-**Parameters:**
-
-- `args: IndexArgTypes<M, F>` - Primary key field values. (Or a single Uint8Array containing the key.)
-
-**Returns:** The (lazily loaded) model instance.
-
-### SecondaryIndex · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L255)
+### SecondaryIndex · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
 Secondary index for non-unique lookups.
 
 **Type Parameters:**
 
-- `M extends typeof Model` - The model class this index belongs to.
-- `F extends readonly (keyof InstanceType<M> & string)[]` - The field names that make up this index.
+- `M extends typeof Model`
+- `F extends readonly (keyof InstanceType<M> & string)[]`
 - `ARGS extends readonly any[] = IndexArgTypes<M, F>`
 
-### Change · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L95)
+### Change · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L94)
 
 **Type:** `Record<any, any> | "created" | "deleted"`
 
-### Transaction · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L38)
+### Transaction · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L39)
 
 #### transaction.id · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L41)
 
@@ -1341,11 +1223,11 @@ Secondary index for non-unique lookups.
 
 **Type:** `Set<Model<unknown>>`
 
-#### transaction.instancesByPk · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L46)
+#### transaction.instancesByPk · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L44)
 
 **Type:** `Map<number, Model<unknown>>`
 
-### DatabaseError · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L158)
+### DatabaseError · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L156)
 
 The DatabaseError class is used to represent errors that occur during database operations.
 It extends the built-in Error class and has a machine readable error code string property.
@@ -1355,7 +1237,7 @@ Invalid function arguments will throw TypeError.
 
 **Value:** `DatabaseErrorConstructor`
 
-### runMigration · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L124)
+### runMigration · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L122)
 
 Run database migration: populate secondary indexes for old-version rows,
 convert old primary indices, rewrite row data, and clean up orphaned indices.
@@ -1366,71 +1248,71 @@ convert old primary indices, rewrite row data, and clean up orphaned indices.
 
 - `options: MigrationOptions` (optional)
 
-### MigrationOptions · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L16)
+### MigrationOptions · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L13)
 
-#### migrationOptions.tables · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L18)
+#### migrationOptions.tables · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L17)
 
 Limit migration to specific table names.
 
 **Type:** `string[]`
 
-#### migrationOptions.populateSecondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L23)
+#### migrationOptions.populateSecondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L21)
 
 Populate secondary indexes for rows at old schema versions (default: true).
 
 **Type:** `boolean`
 
-#### migrationOptions.migratePrimaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L32)
+#### migrationOptions.migratePrimaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L29)
 
 Convert old primary indices when primary key fields changed (default: true).
 
 **Type:** `boolean`
 
-#### migrationOptions.rewriteData · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L40)
+#### migrationOptions.rewriteData · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L37)
 
 Rewrite all row data to the latest schema version (default: false).
 
 **Type:** `boolean`
 
-#### migrationOptions.removeOrphans · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L46)
+#### migrationOptions.removeOrphans · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L44)
 
 Delete orphaned secondary/unique index entries (default: true).
 
 **Type:** `boolean`
 
-#### migrationOptions.onProgress · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L48)
+#### migrationOptions.onProgress · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L44)
 
 Progress callback.
 
 **Type:** `(info: ProgressInfo) => void`
 
-### MigrationResult · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L51)
+### MigrationResult · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L49)
 
-#### migrationResult.secondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L54)
+#### migrationResult.secondaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L50)
 
 Per-table counts of secondary index entries populated.
 
 **Type:** `Record<string, number>`
 
-#### migrationResult.primaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L59)
+#### migrationResult.primaries · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L56)
 
 Per-table counts of old primary rows migrated.
 
 **Type:** `Record<string, number>`
 
-#### migrationResult.conversionFailures · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L59)
+#### migrationResult.conversionFailures · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L57)
 
 Per-table conversion failure counts by reason.
 
 **Type:** `Record<string, Record<string, number>>`
 
-#### migrationResult.rewritten · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L64)
+#### migrationResult.rewritten · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L60)
 
 Per-table counts of rows rewritten to latest version.
 
 **Type:** `Record<string, number>`
 
-#### migrationResult.orphans · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L68)
+#### migrationResult.orphans · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L65)
 
 Number of orphaned index entries deleted.
 

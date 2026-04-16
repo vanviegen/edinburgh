@@ -1,0 +1,2 @@
+- The "API Reference" section of README.md is generated from tsdoc. Do not edit directly.
+- The skill/ folder is generated from tsdoc, README.md and skill-header.md. Do not edit directly.
