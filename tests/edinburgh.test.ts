@@ -114,6 +114,16 @@ function noNeedToRunThis() {
     p.ownedData[0].subjects[0].ownedData[0].createdAt = "x"; // error: string is not assignable to number
     p.ownedData[0].subjects[0].ownedData[0].createdAt = 123;
 
+    const simpleRows = Simple.find();
+    simpleRows.map(row => row.value.toFixed());
+    // @ts-expect-error - iterator rows are typed, so number methods do not include toUpperCase
+    simpleRows.map(row => row.value.toUpperCase());
+
+    const userRows = User.findBy("byEmail", {from: "a@test.com"});
+    userRows.map(row => row.email.toUpperCase());
+    // @ts-expect-error - iterator rows are typed, so unknown properties are rejected
+    userRows.map(row => row.notARealField);
+
 }
 
 let lastOnSaveItems: {model: Record<string,any>, change: Change}[] | undefined;
@@ -304,7 +314,7 @@ test("Update a lazy-loaded row", async () => {
     });
 
     await E.transact(async () => {
-        const simple = Simple.byValue.find({is: 1234}).fetch();
+        const simple = Simple.findBy("byValue", {is: 1234}).fetch();
         expect(simple).toBeDefined();
         expect(simple!.isLazyField('id')).toBe(false); // Primary key must be loaded
         expect(simple!.isLazyField('value')).toBe(false); // As well as fields in this index
@@ -319,7 +329,7 @@ test("Update a lazy-loaded row", async () => {
     });
 
     await E.transact(async () => {
-        const simple = Simple.byValue.find({is: 4321}).fetch();
+        const simple = Simple.findBy("byValue", {is: 4321}).fetch();
         expect(simple).toBeDefined();
         expect(simple!.value).toBe(4321);
 
@@ -542,7 +552,7 @@ test("Index system comprehensive", async () => {
 
     // Test unique index lookup
     await E.transact(() => {
-        const foundByValue = CompositeKeyModel.byValue.get(999);
+        const foundByValue = CompositeKeyModel.getBy("byValue", 999);
         expect(foundByValue).toBeDefined();
         expect(foundByValue!.name).toBe("iPhone");
     });
@@ -568,7 +578,7 @@ test("Model state management and persistence", async () => {
         let loaded = User.get(userId);
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("State Test");
-        loaded = User.byEmail.get("state@test.com");
+        loaded = User.getBy("byEmail", "state@test.com");
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("State Test");
     });
@@ -583,7 +593,7 @@ test("Model state management and persistence", async () => {
     await E.transact(() => {
         let loaded = User.get(userId);
         expect(loaded).toBeUndefined();
-        loaded = User.byEmail.get("state@test.com");
+        loaded = User.getBy("byEmail", "state@test.com");
         expect(loaded).toBeUndefined();
     });
 
@@ -598,7 +608,7 @@ test("Model state management and persistence", async () => {
         let loaded = User.get(userId);
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("State Test");
-        loaded = User.byEmail.get("state@test.com");
+        loaded = User.getBy("byEmail", "state@test.com");
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("State Test");
     });
@@ -761,7 +771,7 @@ test("Modification tracking and proxy behavior", async () => {
 
     // Verify the change was persisted (proving modification tracking worked)
     await E.transact(() => {
-        const loaded = User.byEmail.get("track@test.com");
+        const loaded = User.getBy("byEmail", "track@test.com");
         expect(loaded).toBeDefined();
         expect(loaded!.name).toBe("Changed Name");
     });
@@ -798,7 +808,7 @@ test("Error handling and recovery", async () => {
     
     // Verify transaction was rolled back
     await E.transact(() => {
-        const user = User.byEmail.get("error@test.com");
+        const user = User.getBy("byEmail", "error@test.com");
         expect(user).toBeUndefined();
     });
 });
@@ -829,7 +839,7 @@ test("Database operations and debugging", async () => {
 
     // Test database state after operations
     await E.transact(() => {
-        const user = User.byEmail.get("dump@test.com");
+        const user = User.getBy("byEmail", "dump@test.com");
         expect(user).toBeDefined();
         expect(user!.name).toBe("Dump Test");
     });
@@ -853,7 +863,7 @@ test("Database operations and debugging", async () => {
     // Verify all users were created
     await E.transact(() => {
         for (let i = 0; i < 5; i++) {
-            const user = User.byEmail.get(`concurrent${i}@test.com`);
+            const user = User.getBy("byEmail", `concurrent${i}@test.com`);
             expect(user).toBeDefined();
             expect(user!.name).toBe(`Concurrent ${i}`);
         }
@@ -928,7 +938,7 @@ test("Range queries on primary indices", async () => {
 test("Range queries on unique indices", async () => {
     function testRange() {
         let names: string[] = [];
-        const users = User.byEmail.find({from: "b@test.com", to: "f@test.com"});
+        const users = User.findBy("byEmail", {from: "b@test.com", to: "f@test.com"});
         for(const user of users) {
             names.push(user.name);
         }
@@ -937,7 +947,7 @@ test("Range queries on unique indices", async () => {
 
     function testExclusiveRange() {
         let names: string[] = [];
-        const users = User.byEmail.find({from: "b@test.com", before: "f@test.com"});
+        const users = User.findBy("byEmail", {from: "b@test.com", before: "f@test.com"});
         for(const user of users) {
             names.push(user.name);
         }
@@ -972,7 +982,7 @@ test("Range queries on unique indices", async () => {
     // Test with no bounds (all users)
     await E.transact(() => {
         let allNames: string[] = [];
-        const users = User.byEmail.find({});
+        const users = User.findBy("byEmail", {});
         for(const user of users) {
             allNames.push(user.name);
         }
@@ -982,7 +992,7 @@ test("Range queries on unique indices", async () => {
     // Test single bound (from start)
     await E.transact(() => {
         let fromStart: string[] = [];
-        const users = User.byEmail.find({to: "d@test.com"});
+        const users = User.findBy("byEmail", {to: "d@test.com"});
         for(const user of users) {
             fromStart.push(user.name);
         }
@@ -992,7 +1002,7 @@ test("Range queries on unique indices", async () => {
     // Test single bound (to end)
     await E.transact(() => {
         let toEnd: string[] = [];
-        const users = User.byEmail.find({from: "f@test.com"});
+        const users = User.findBy("byEmail", {from: "f@test.com"});
         for(const user of users) {
             toEnd.push(user.name);
         }
@@ -1002,7 +1012,7 @@ test("Range queries on unique indices", async () => {
     // Test exact match behavior
     await E.transact(() => {
         let exactMatch: string[] = [];
-        const users = User.byEmail.find({is: "d@test.com"});
+        const users = User.findBy("byEmail", {is: "d@test.com"});
         for(const user of users) {
             exactMatch.push(user.name);
         }
@@ -1032,7 +1042,7 @@ test("Secondary index implementation", async () => {
     });
 
     // Test that secondary indexes don't have get() method (compile-time check)
-    // This should not compile: Product.byPrice.get(1000);
+    // This should not compile: Product.findBy("byPrice", {is: 1000});
     
     // Create test data in first transaction
     await E.transact(() => {
@@ -1049,28 +1059,28 @@ test("Secondary index implementation", async () => {
     await E.transact(() => {
         // Find products by price
         const expensiveProducts: string[] = [];
-        for (const product of Product.byPrice.find({from: 500})) {
+        for (const product of Product.findBy("byPrice", {from: 500})) {
             expensiveProducts.push(product.name);
         }
         expect(expensiveProducts.sort()).toEqual(["Desk", "Laptop", "Phone", "Tablet"]);
 
         // Find products in specific price range
         const midRangeProducts: string[] = [];
-        for (const product of Product.byPrice.find({from: 200, to: 600})) {
+        for (const product of Product.findBy("byPrice", {from: 200, to: 600})) {
             midRangeProducts.push(product.name);
         }
         expect(midRangeProducts.sort()).toEqual(["Chair", "Desk", "Tablet"]);
 
         // Find products by category
         const electronicsProducts: string[] = [];
-        for (const product of Product.byCategory.find({is: "electronics"})) {
+        for (const product of Product.findBy("byCategory", {is: "electronics"})) {
             electronicsProducts.push(product.name);
         }
         expect(electronicsProducts.sort()).toEqual(["Laptop", "Phone", "Tablet"]);
 
         // Find out of stock products
         const outOfStockProducts: string[] = [];
-        for (const product of Product.byStock.find({is: false})) {
+        for (const product of Product.findBy("byStock", {is: false})) {
             outOfStockProducts.push(product.name);
         }
         expect(outOfStockProducts).toEqual(["Book"]);
@@ -1080,14 +1090,14 @@ test("Secondary index implementation", async () => {
     await E.transact(() => {
         // Find electronics under $700
         const cheapElectronics: string[] = [];
-        for (const product of Product.byCategoryPrice.find({from: ["electronics"], to: ["electronics", 700]})) {
+        for (const product of Product.findBy("byCategoryPrice", {from: ["electronics"], to: ["electronics", 700]})) {
             cheapElectronics.push(product.name);
         }
         expect(cheapElectronics.sort()).toEqual(["Tablet"]);
 
         // Find all furniture
         const furnitureProducts: Array<{name: string, price: number}> = [];
-        for (const product of Product.byCategoryPrice.find({from: ["furniture"], to: ["furniture", Number.MAX_SAFE_INTEGER]})) {
+        for (const product of Product.findBy("byCategoryPrice", {from: ["furniture"], to: ["furniture", Number.MAX_SAFE_INTEGER]})) {
             furnitureProducts.push({name: product.name, price: product.price});
         }
         expect(furnitureProducts.sort((a, b) => a.price - b.price)).toEqual([
@@ -1097,7 +1107,7 @@ test("Secondary index implementation", async () => {
 
         // Find books with exact category match
         const bookProducts: string[] = [];
-        for (const product of Product.byCategoryPrice.find({is: ["books"]})) {
+        for (const product of Product.findBy("byCategoryPrice", {is: ["books"]})) {
             bookProducts.push(product.name);
         }
         expect(bookProducts.sort()).toEqual(["Book", "Notebook"]);
@@ -1106,7 +1116,7 @@ test("Secondary index implementation", async () => {
     // Test range queries with reverse iteration
     await E.transact(() => {
         const productsByPriceDesc: string[] = [];
-        for (const product of Product.byPrice.find({reverse: true})) {
+        for (const product of Product.findBy("byPrice", {reverse: true})) {
             productsByPriceDesc.push(`${product.name}(${product.price})`);
         }
         expect(productsByPriceDesc).toEqual([
@@ -1118,7 +1128,7 @@ test("Secondary index implementation", async () => {
     // Modify an item's price: 800 -> 799, updating one index and leaving the rest unchanged
     await E.transact(() => {
         let cnt = 0;
-        for (const product of Product.byPrice.find({is: 800})) {
+        for (const product of Product.findBy("byPrice", {is: 800})) {
             product.price--;
             cnt++;
         }
@@ -1127,20 +1137,20 @@ test("Secondary index implementation", async () => {
 
     // Verify both the changed and unchanged indices are still okay
     await E.transact(() => {
-        // expect(Product.byName.get("Phone")!.price).toBe(799);
+        // expect(Product.getBy("byName", "Phone")!.price).toBe(799);
         let count = 0;
-        for (const product of Product.byPrice.find({from: 790, to: 810})) {
+        for (const product of Product.findBy("byPrice", {from: 790, to: 810})) {
             expect(product.price).toBe(799);
             expect(product.name).toBe("Phone");
             count++;
         }
         expect(count).toBe(1);
 
-        expect(Product.byCategoryPrice.find({is: ["electronics", 799]}).count()).toBe(1);
-        expect(Product.byCategoryPrice.find({is: ["electronics", 800]}).count()).toBe(0);
+        expect(Product.findBy("byCategoryPrice", {is: ["electronics", 799]}).count()).toBe(1);
+        expect(Product.findBy("byCategoryPrice", {is: ["electronics", 800]}).count()).toBe(0);
 
         count = 0;
-        for (const product of Product.byPrice.find({from: 790, to: 810})) {
+        for (const product of Product.findBy("byPrice", {from: 790, to: 810})) {
             expect(product.price).toBe(799);
             expect(product.name).toBe("Phone");
             count++;
@@ -1157,7 +1167,7 @@ test("Secondary index implementation", async () => {
     await E.transact(() => {
         // Both products with price 600 should be found
         const products600: string[] = [];
-        for (const product of Product.byPrice.find({is: 600})) {
+        for (const product of Product.findBy("byPrice", {is: 600})) {
             products600.push(product.name);
         }
         expect(products600.sort()).toEqual(["Monitor", "Tablet"]);
@@ -1166,7 +1176,7 @@ test("Secondary index implementation", async () => {
     // Test exclusive range queries
     await E.transact(() => {
         const expensiveButNotMost: string[] = [];
-        for (const product of Product.byPrice.find({after: 500, before: 1000})) {
+        for (const product of Product.findBy("byPrice", {after: 500, before: 1000})) {
             expensiveButNotMost.push(product.name);
         }
         expect(expensiveButNotMost.sort()).toEqual(["Monitor", "Phone", "Tablet"]);
@@ -1175,13 +1185,13 @@ test("Secondary index implementation", async () => {
     // Test empty results
     await E.transact(() => {
         const noResults: string[] = [];
-        for (const product of Product.byCategory.find({is: "nonexistent"})) {
+        for (const product of Product.findBy("byCategory", {is: "nonexistent"})) {
             noResults.push(product.name);
         }
         expect(noResults).toEqual([]);
 
         const noResultsRange: string[] = [];
-        for (const product of Product.byPrice.find({from: 2000, to: 3000})) {
+        for (const product of Product.findBy("byPrice", {from: 2000, to: 3000})) {
             noResultsRange.push(product.name);
         }
         expect(noResultsRange).toEqual([]);
@@ -1264,7 +1274,7 @@ test("onSave callback with transaction rollback", async () => {
 
     // Verify the user was not created
     await E.transact(() => {
-        expect(User.byEmail.get("rollback@test.com")).toBeUndefined();
+        expect(User.getBy("byEmail", "rollback@test.com")).toBeUndefined();
     });
 });
 
@@ -1286,7 +1296,7 @@ test("onSave callback with unique constraint failures", async () => {
     
     // Verify only first user exists
     await E.transact(() => {
-        const user = User.byEmail.get("unique@test.com");
+        const user = User.getBy("byEmail", "unique@test.com");
         expect(user).toBeDefined();
         expect(user!.name).toBe("First User");
     });
@@ -1320,7 +1330,7 @@ test("onSave callback with multiple models and operations", async () => {
     // Test multiple updates in one transaction
     await E.transact(() => {
         const user = User.get(userId);
-        const post = Post.byAuthor.find({is: [user!, "Test Post"]}).fetch();
+        const post = Post.findBy("byAuthor", {is: [user!, "Test Post"]}).fetch();
         user!.name = "Updated Multi Test";
         post!.title = "Updated Test Post";
     });
@@ -1352,7 +1362,7 @@ test("onSave callback with multiple models and operations", async () => {
     // Test mixed operations in one transaction
     await E.transact(() => {
         const user = User.get(userId);
-        const post = Post.byAuthor.find({is: [user!, "Updated Test Post"]}).fetch();
+        const post = Post.findBy("byAuthor", {is: [user!, "Updated Test Post"]}).fetch();
         post!.delete();
         user!.name = "Final Update";
         new User({email: "mixed@test.com", name: "Mixed Test"});
@@ -1521,11 +1531,11 @@ test("runMigration populates new secondary indexes", async () => {
 
     // Step 4: Verify the new secondary index works
     await E.transact(() => {
-        const xItems = [...SecPopV2.byCategory.find({is: "x"})];
+        const xItems = [...SecPopV2.findBy("byCategory", {is: "x"})];
         expect(xItems.length).toBe(2);
         expect(xItems.map((i: any) => i.id).sort()).toEqual(["a", "c"]);
 
-        const yItems = [...SecPopV2.byCategory.find({is: "y"})];
+        const yItems = [...SecPopV2.findBy("byCategory", {is: "y"})];
         expect(yItems.length).toBe(1);
         expect(yItems[0].id).toBe("b");
     });
@@ -1548,8 +1558,8 @@ test("runMigration fixes secondaries affected by migrate()", async () => {
 
     // Verify initial state
     await E.transact(() => {
-        expect([...SecMigV1.byTag.find({is: "old"})].length).toBe(1);
-        expect([...SecMigV1.byTag.find({is: "keep"})].length).toBe(1);
+        expect([...SecMigV1.findBy("byTag", {is: "old"})].length).toBe(1);
+        expect([...SecMigV1.findBy("byTag", {is: "keep"})].length).toBe(1);
     });
 
     // Step 2: Register V2 (override V1) with a migrate() that changes indexed tag values
@@ -1573,10 +1583,10 @@ test("runMigration fixes secondaries affected by migrate()", async () => {
 
     // Step 4: Verify secondary index reflects migrated values
     await E.transact(() => {
-        expect([...SecMigV2.byTag.find({is: "old"})].length).toBe(0);
-        expect([...SecMigV2.byTag.find({is: "new"})].length).toBe(1);
-        expect([...SecMigV2.byTag.find({is: "new"})][0].id).toBe("a");
-        expect([...SecMigV2.byTag.find({is: "keep"})].length).toBe(1);
+        expect([...SecMigV2.findBy("byTag", {is: "old"})].length).toBe(0);
+        expect([...SecMigV2.findBy("byTag", {is: "new"})].length).toBe(1);
+        expect([...SecMigV2.findBy("byTag", {is: "new"})][0].id).toBe("a");
+        expect([...SecMigV2.findBy("byTag", {is: "keep"})].length).toBe(1);
     });
 });
 
@@ -1603,8 +1613,8 @@ test("runMigration removes orphaned secondary index entries", async () => {
 
     // Step 3: Verify that indexes still exist on disk, by going through V1
     await E.transact(() => {
-        expect(OrphanV1.byTag.find({is: "x"}).count()).toBe(1);
-        expect(OrphanV1.byTag.find({is: "y"}).count()).toBe(1);
+        expect(OrphanV1.findBy("byTag", {is: "x"}).count()).toBe(1);
+        expect(OrphanV1.findBy("byTag", {is: "y"}).count()).toBe(1);
     });
 
     // Step 4: Run migration - Phase 3 should delete the 2 orphaned secondary index entries
@@ -1613,8 +1623,8 @@ test("runMigration removes orphaned secondary index entries", async () => {
 
     // Step 5: Verify that indexes no longer exist on disk
     await E.transact(() => {
-        expect(OrphanV1.byTag.find({is: "x"}).count()).toBe(0);
-        expect(OrphanV1.byTag.find({is: "y"}).count()).toBe(0);
+        expect(OrphanV1.findBy("byTag", {is: "x"}).count()).toBe(0);
+        expect(OrphanV1.findBy("byTag", {is: "y"}).count()).toBe(0);
     });
 
     // Step 6: Verify rows are still accessible via primary key
@@ -1797,7 +1807,7 @@ test("find() with fetch: 'first' returns first or undefined", async () => {
         expect(typeof first!.value).toBe('number');
 
         // Returns undefined when no match
-        const none = Simple.byValue.find({is: 999, fetch: 'first'});
+        const none = Simple.findBy("byValue", {is: 999, fetch: 'first'});
         expect(none).toBeUndefined();
     });
 });
@@ -1809,13 +1819,13 @@ test("find() with fetch: 'single' returns exactly one or throws", async () => {
 
     // Exactly one result: returns it
     await E.transact(() => {
-        const one = Simple.byValue.find({is: 42, fetch: 'single'});
+        const one = Simple.findBy("byValue", {is: 42, fetch: 'single'});
         expect(one.value).toBe(42);
     });
 
     // No results: throws
     await E.transact(() => {
-        expectErrorCode("NOT_FOUND", () => Simple.byValue.find({is: 999, fetch: 'single'}));
+        expectErrorCode("NOT_FOUND", () => Simple.findBy("byValue", {is: 999, fetch: 'single'}));
     });
 
     // Multiple results: throws
@@ -1865,7 +1875,7 @@ test("batchProcess respects range options via secondary index", async () => {
     });
 
     const seen: number[] = [];
-    await Simple.byValue.batchProcess({ from: 3, to: 7, limitRows: 2 }, (row) => {
+    await Simple.batchProcessBy("byValue", { from: 3, to: 7, limitRows: 2 }, (row) => {
         seen.push(row.value);
     });
     expect(seen.sort((a, b) => a - b)).toEqual([3, 4, 5, 6, 7]);
@@ -1969,16 +1979,16 @@ test("computed unique index: basic CRUD and get", async () => {
     });
 
     await E.transact(() => {
-        const john = Employee.byFullName.get("John Doe");
+        const john = Employee.getBy("byFullName", "John Doe");
         expect(john).toBeDefined();
         expect(john!.firstName).toBe("John");
         expect(john!.lastName).toBe("Doe");
 
-        const jane = Employee.byFullName.get("Jane Smith");
+        const jane = Employee.getBy("byFullName", "Jane Smith");
         expect(jane).toBeDefined();
         expect(jane!.firstName).toBe("Jane");
 
-        expect(Employee.byFullName.get("Nobody Here")).toBeUndefined();
+        expect(Employee.getBy("byFullName", "Nobody Here")).toBeUndefined();
     });
 });
 
@@ -2022,20 +2032,20 @@ test("computed secondary index: basic find", async () => {
 
     await E.transact(() => {
         // Find all products in the $0-$99 bucket
-        const bucket0 = [...Product.byPriceBucket.find({is: 0})];
+        const bucket0 = [...Product.findBy("byPriceBucket", {is: 0})];
         expect(bucket0.length).toBe(1);
         expect(bucket0[0].price).toBe(50);
 
         // Find all products in the $100-$199 bucket
-        const bucket1 = [...Product.byPriceBucket.find({is: 1})];
+        const bucket1 = [...Product.findBy("byPriceBucket", {is: 1})];
         expect(bucket1.length).toBe(2);
 
         // Range query
-        const buckets01 = [...Product.byPriceBucket.find({from: 0, to: 1})];
+        const buckets01 = [...Product.findBy("byPriceBucket", {from: 0, to: 1})];
         expect(buckets01.length).toBe(3);
 
         // Find all
-        const all = [...Product.byPriceBucket.find()];
+        const all = [...Product.findBy("byPriceBucket")];
         expect(all.length).toBe(4);
     });
 });
@@ -2061,10 +2071,10 @@ test("computed index: undefined return skips indexing (partial index)", async ()
 
     await E.transact(() => {
         // Only active items should appear in the index
-        const all = [...MaybeIndexed.byActivePriority.find()];
+        const all = [...MaybeIndexed.findBy("byActivePriority")];
         expect(all.length).toBe(2);
 
-        const p1 = [...MaybeIndexed.byActivePriority.find({is: 1})];
+        const p1 = [...MaybeIndexed.findBy("byActivePriority", {is: 1})];
         expect(p1.length).toBe(1);
         expect(p1[0].status).toBe("active");
     });
@@ -2088,7 +2098,7 @@ test("computed index: updates re-index on any field change", async () => {
 
     await E.transact(() => {
         // Sum is 7
-        const found7 = [...Updatable.bySum.find({is: 7})];
+        const found7 = [...Updatable.findBy("bySum", {is: 7})];
         expect(found7.length).toBe(1);
 
         // Update x, sum changes to 10
@@ -2096,10 +2106,10 @@ test("computed index: updates re-index on any field change", async () => {
     });
 
     await E.transact(() => {
-        const found7 = [...Updatable.bySum.find({is: 7})];
+        const found7 = [...Updatable.findBy("bySum", {is: 7})];
         expect(found7.length).toBe(0);
 
-        const found10 = [...Updatable.bySum.find({is: 10})];
+        const found10 = [...Updatable.findBy("bySum", {is: 10})];
         expect(found10.length).toBe(1);
     });
 });
@@ -2120,16 +2130,16 @@ test("computed index: delete removes index entries", async () => {
     });
 
     await E.transact(() => {
-        expect([...Deletable.byTag.find({is: "foo"})].length).toBe(2);
+        expect([...Deletable.findBy("byTag", {is: "foo"})].length).toBe(2);
 
         // Delete one
-        const first = [...Deletable.byTag.find({is: "foo"})][0];
+        const first = [...Deletable.findBy("byTag", {is: "foo"})][0];
         first.delete();
     });
 
     await E.transact(() => {
-        expect([...Deletable.byTag.find({is: "foo"})].length).toBe(1);
-        expect([...Deletable.byTag.find({is: "bar"})].length).toBe(1);
+        expect([...Deletable.findBy("byTag", {is: "foo"})].length).toBe(1);
+        expect([...Deletable.findBy("byTag", {is: "bar"})].length).toBe(1);
     });
 });
 
@@ -2152,19 +2162,19 @@ test("computed unique index: find with range and reverse", async () => {
 
     await E.transact(() => {
         // Range query
-        const mid = [...Scored.byScore.find({from: 20, to: 30})];
+        const mid = [...Scored.findBy("byScore", {from: 20, to: 30})];
         expect(mid.length).toBe(2);
         expect(mid[0].name).toBe("B");
         expect(mid[1].name).toBe("C");
 
         // Reverse
-        const rev = [...Scored.byScore.find({reverse: true})];
+        const rev = [...Scored.findBy("byScore", {reverse: true})];
         expect(rev.length).toBe(4);
         expect(rev[0].name).toBe("D");
         expect(rev[3].name).toBe("A");
 
         // Exclusive range
-        const excl = [...Scored.byScore.find({after: 10, before: 40})];
+        const excl = [...Scored.findBy("byScore", {after: 10, before: 40})];
         expect(excl.length).toBe(2);
         expect(excl[0].name).toBe("B");
         expect(excl[1].name).toBe("C");
@@ -2187,36 +2197,36 @@ test("computed index: multi-value indexing", async () => {
     });
 
     await E.transact(() => {
-        expect([...Article.byWord.find({is: "hello"})].length).toBe(2);
-        expect([...Article.byWord.find({is: "world"})].length).toBe(2);
-        expect([...Article.byWord.find({is: "there"})].length).toBe(1);
-        expect([...Article.byWord.find({is: "goodbye"})].length).toBe(1);
+        expect([...Article.findBy("byWord", {is: "hello"})].length).toBe(2);
+        expect([...Article.findBy("byWord", {is: "world"})].length).toBe(2);
+        expect([...Article.findBy("byWord", {is: "there"})].length).toBe(1);
+        expect([...Article.findBy("byWord", {is: "goodbye"})].length).toBe(1);
     });
 
     // Update "Hello There" → "Greetings Everyone" (pick via "there" to be deterministic)
     await E.transact(() => {
-        const target = [...Article.byWord.find({is: "there"})][0];
+        const target = [...Article.findBy("byWord", {is: "there"})][0];
         target.title = "Greetings Everyone";
     });
 
     await E.transact(() => {
-        expect([...Article.byWord.find({is: "hello"})].length).toBe(1);
-        expect([...Article.byWord.find({is: "there"})].length).toBe(0);
-        expect([...Article.byWord.find({is: "greetings"})].length).toBe(1);
-        expect([...Article.byWord.find({is: "everyone"})].length).toBe(1);
-        expect([...Article.byWord.find({is: "world"})].length).toBe(2); // unchanged
+        expect([...Article.findBy("byWord", {is: "hello"})].length).toBe(1);
+        expect([...Article.findBy("byWord", {is: "there"})].length).toBe(0);
+        expect([...Article.findBy("byWord", {is: "greetings"})].length).toBe(1);
+        expect([...Article.findBy("byWord", {is: "everyone"})].length).toBe(1);
+        expect([...Article.findBy("byWord", {is: "world"})].length).toBe(2); // unchanged
     });
 
     // Delete the "Greetings Everyone" article
     await E.transact(() => {
-        const greet = [...Article.byWord.find({is: "greetings"})][0];
+        const greet = [...Article.findBy("byWord", {is: "greetings"})][0];
         greet.delete();
     });
 
     await E.transact(() => {
-        expect([...Article.byWord.find({is: "greetings"})].length).toBe(0);
-        expect([...Article.byWord.find({is: "everyone"})].length).toBe(0);
-        expect([...Article.byWord.find({is: "world"})].length).toBe(2);
+        expect([...Article.findBy("byWord", {is: "greetings"})].length).toBe(0);
+        expect([...Article.findBy("byWord", {is: "everyone"})].length).toBe(0);
+        expect([...Article.findBy("byWord", {is: "world"})].length).toBe(2);
     });
 });
 

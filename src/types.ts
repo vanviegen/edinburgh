@@ -1,6 +1,7 @@
 import DataPack from "./datapack.js";
 import { DatabaseError } from "olmdb/lowlevel";
-import { Model, modelRegistry, FieldConfig, currentTxn } from "./models.js";
+import { currentTxn } from "./edinburgh.js";
+import { Model, modelRegistry, FieldConfig, type AnyModelClass } from "./models.js";
 import { assert, addErrorPath, dbGet } from "./utils.js";
 
 
@@ -70,7 +71,7 @@ export abstract class TypeWrapper<const T> {
         return value1 === value2;
     }
 
-    getLinkedModel(): undefined | typeof Model<unknown> {
+    getLinkedModel(): undefined | AnyModelClass {
         return;
     }
 }
@@ -595,7 +596,7 @@ class IdentifierType extends TypeWrapper<string> {
         let id: string;
         do {
             id = DataPack.generateIdentifier();
-        } while (dbGet(model._txn.id, new DataPack().write(model.constructor._primary!._indexId!).writeIdentifier(id).toUint8Array()));
+        } while (dbGet(model._txn.id, new DataPack().write(model.constructor._indexId!).writeIdentifier(id).toUint8Array()));
         return id;
     }
 }
@@ -617,7 +618,7 @@ export class LinkType<T extends new (...args: any[]) => Model<any>> extends Type
         this.TargetModel = TargetModel;
     }
 
-    getLinkedModel(): typeof Model<unknown> {
+    getLinkedModel(): AnyModelClass {
         if (!('getLazy' in this.TargetModel)) this.TargetModel = (this.TargetModel as unknown as () => T)();
         return this.TargetModel as any;
     }
@@ -627,7 +628,7 @@ export class LinkType<T extends new (...args: any[]) => Model<any>> extends Type
     }
     
     deserialize(pack: DataPack) {
-        return this.getLinkedModel()._primary._get(currentTxn(), pack.readUint8Array(), false);
+        return this.getLinkedModel()._get(currentTxn(), pack.readUint8Array(), false);
     }
     
     getError(value: InstanceType<T>) {

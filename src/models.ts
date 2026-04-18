@@ -1,9 +1,11 @@
+import * as lowlevel from "olmdb/lowlevel";
 import { DatabaseError } from "olmdb/lowlevel";
-import { AsyncLocalStorage } from "node:async_hooks";
-import { TypeWrapper, identifier } from "./types.js";
-import { scheduleInit } from "./edinburgh.js";
+import DataPack from "./datapack.js";
+import { deserializeType, serializeType, TypeWrapper, identifier } from "./types.js";
+import { transact, currentTxn, type Transaction } from "./edinburgh.js";
 
-export const txnStorage = new AsyncLocalStorage<Transaction>();
+import { PrimaryKey, NonPrimaryIndex, IndexRangeIterator, UniqueIndex, SecondaryIndex, FindOptions, VersionInfo } from "./indexes.js";
+import { addErrorPath, dbGet, hashBytes, hashFunction } from "./utils.js";
 
 
 const PREVENT_PERSIST_DESCRIPTOR = {
@@ -11,25 +13,6 @@ const PREVENT_PERSIST_DESCRIPTOR = {
         throw new DatabaseError("Operation not allowed after preventPersist()", "NO_PERSIST");
     },
 };
-
-/**
- * Returns the current transaction from AsyncLocalStorage.
- * Throws if called outside a transact() callback.
- * @internal
- */
-export function currentTxn(): Transaction {
-    const txn = txnStorage.getStore();
-    if (!txn) throw new DatabaseError("No active transaction. Operations must be performed within a transact() callback.", 'NO_TRANSACTION');
-    return txn;
-}
-
-export interface Transaction {
-    id: number;
-    instances: Set<Model<unknown>>;
-    instancesByPk: Map<number, Model<unknown>>;
-}
-import { BaseIndex, NonPrimaryIndex, PrimaryIndex, IndexRangeIterator, UniqueIndex, SecondaryIndex, FindOptions } from "./indexes.js";
-import { addErrorPath, logLevel, assert, dbGet, hashBytes } from "./utils.js";
 
 /**
  * Configuration interface for model fields.
@@ -63,18 +46,15 @@ export interface FieldConfig<T> {
  *   age = E.field(E.opt(E.number), {description: "User's age", default: 25});
  * });
  * ```
- */
+  */
 export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> = {}): T {
     // Return the config object, but TypeScript sees it as type T
     options.type = type;
     return options as any;
 }
 
-// Model registration and initialization
-export const modelRegistry: Record<string, typeof Model> = {};
-
 function isObjectEmpty(obj: object) {
-    for (let _ of Object.keys(obj)) {
+    for (const _ of Object.keys(obj)) {
         return false;
     }
     return true;
@@ -83,7 +63,6 @@ function isObjectEmpty(obj: object) {
 export type Change = Record<any, any> | "created" | "deleted";
 
 type FieldsOf<T> = T extends new () => infer I ? I : never;
-type ModelInstance<FIELDS> = FIELDS & Model<FIELDS>;
 
 type PKArgs<FIELDS, PK> =
     PK extends readonly (keyof FIELDS & string)[]
@@ -92,36 +71,331 @@ type PKArgs<FIELDS, PK> =
             ? [FIELDS[PK]]
             : [string];
 
-type UniqueFor<SPEC> =
-    SPEC extends readonly string[] ? UniqueIndex<any, SPEC>
-    : SPEC extends string ? UniqueIndex<any, [SPEC]>
+type IndexArgs<FIELDS, SPEC> =
+    SPEC extends readonly (keyof FIELDS & string)[]
+        ? { [I in keyof SPEC]: SPEC[I] extends keyof FIELDS ? FIELDS[SPEC[I]] : never }
+    : SPEC extends keyof FIELDS & string
+        ? [FIELDS[SPEC]]
     : SPEC extends (instance: any) => infer R
-        ? R extends (infer V)[] ? UniqueIndex<any, [], [V]>
-        : UniqueIndex<any, [], [R]>
+        ? R extends (infer V)[] ? [V] : [R]
     : never;
 
-type SecondaryFor<SPEC> =
-    SPEC extends readonly string[] ? SecondaryIndex<any, SPEC>
-    : SPEC extends string ? SecondaryIndex<any, [SPEC]>
-    : SPEC extends (instance: any) => infer R
-        ? R extends (infer V)[] ? SecondaryIndex<any, [], [V]>
-        : SecondaryIndex<any, [], [R]>
-    : never;
+export type AnyModelClass = ModelClass<any, readonly any[], any, any>;
 
-type RegisteredModel<FIELDS, PKA extends readonly any[], UNIQUE, INDEX> = {
-    new (initial?: Partial<FIELDS>): ModelInstance<FIELDS>;
-    tableName: string;
-    fields: Record<string | symbol | number, FieldConfig<unknown>>;
-    get(...args: PKA): ModelInstance<FIELDS> | undefined;
-    getLazy(...args: PKA): ModelInstance<FIELDS>;
-    find(opts: FindOptions<PKA, 'first'>): ModelInstance<FIELDS> | undefined;
-    find(opts: FindOptions<PKA, 'single'>): ModelInstance<FIELDS>;
-    find(opts?: FindOptions<PKA>): IndexRangeIterator<any>;
-    batchProcess(opts?: FindOptions<PKA> & { limitSeconds?: number; limitRows?: number }, callback?: (row: ModelInstance<FIELDS>) => any): Promise<void>;
-    replaceInto(obj: Partial<FIELDS>): ModelInstance<FIELDS>;
-} &
-    { [K in keyof UNIQUE]: UniqueFor<UNIQUE[K]> } &
-    { [K in keyof INDEX]: SecondaryFor<INDEX[K]> };
+type SecondaryRegistry<FIELDS> = Record<string, NonPrimaryIndex<Model<FIELDS>, readonly (keyof FIELDS & string)[], readonly any[]>>;
+
+// Model registration and initialization
+export const modelRegistry: Record<string, AnyModelClass> = {};
+export const pendingModelInits = new Set<AnyModelClass>();
+
+// These static members are attached dynamically in defineModel(), so 'declare' tells TypeScript
+// they exist at runtime without emitting duplicate class fields that would shadow those assignments.
+export class ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> extends PrimaryKey<Model<FIELDS>, readonly (keyof FIELDS & string)[], PKA> {
+    // Runtime table identifier used for index naming and diagnostics.
+    declare tableName: string;
+    // Field schema map used for validation and serialization.
+    declare fields: Record<string | symbol | number, FieldConfig<unknown>>;
+    // Registered unique/secondary indexes for this model.
+    declare _secondaries?: SecondaryRegistry<FIELDS>;
+    // Signals model definition override semantics during registration.
+    declare override?: boolean;
+    // Reference to the original user class to preserve static hooks like migrate().
+    declare _original?: new () => any;
+    // Cached list of non-primary fields used for value serialization.
+    _nonKeyFields!: (keyof FIELDS & string)[];
+    // Lazy getter/setter descriptors installed on unloaded non-key fields.
+    _lazyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
+    // Writable descriptors temporarily installed before hydrating value fields.
+    _resetDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
+    // Frozen descriptors applied to primary-key fields after key materialization.
+    _freezePrimaryKeyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
+    // Active schema version number for value encoding.
+    _currentVersion!: number;
+    // Hash of the active migrate() function for schema identity.
+    _currentMigrateHash!: number;
+    // Cached historical schema metadata for lazy migration of old rows.
+    _versions: Map<number, VersionInfo> = new Map();
+
+    _serializeVersionValue(): Uint8Array {
+        const fields: [string, Uint8Array][] = [];
+        for (const fieldName of this._nonKeyFields) {
+            const tp = new DataPack();
+            serializeType(this.fields[fieldName].type, tp);
+            fields.push([fieldName, tp.toUint8Array()]);
+        }
+        return new DataPack().write({
+            migrateHash: this._currentMigrateHash,
+            fields,
+            secondaryKeys: new Set(Object.values(this._secondaries || {}).map(sec => sec._signature!)),
+        }).toUint8Array();
+    }
+
+    async _initialize(reset = false): Promise<void> {
+        const allFieldTypes = new Map<string, TypeWrapper<any>>();
+        for (const [fieldName, fieldConfig] of Object.entries(this.fields)) {
+            allFieldTypes.set(fieldName, fieldConfig.type);
+        }
+        await super._initializeIndex(allFieldTypes, reset);
+
+        if (reset || this._nonKeyFields === undefined) {
+            this._nonKeyFields = Object.keys(this.fields).filter(fieldName => !this._indexFields.has(fieldName as any)) as any;
+            this._lazyDescriptors = {};
+            this._resetDescriptors = {};
+            this._freezePrimaryKeyDescriptors = {};
+
+            for (const fieldName of this._nonKeyFields) {
+                this._lazyDescriptors[fieldName] = {
+                    configurable: true,
+                    enumerable: true,
+                    get(this: Model<FIELDS>) {
+                        (this.constructor as AnyModelClass)._lazyLoad(this);
+                        return this[fieldName];
+                    },
+                    set(this: Model<FIELDS>, value: any) {
+                        (this.constructor as AnyModelClass)._lazyLoad(this);
+                        this[fieldName] = value;
+                    },
+                };
+                this._resetDescriptors[fieldName] = {
+                    writable: true,
+                    enumerable: true,
+                };
+            }
+
+            for (const fieldName of this._indexFields.keys()) {
+                this._freezePrimaryKeyDescriptors[fieldName] = {
+                    writable: false,
+                    enumerable: true,
+                };
+            }
+        }
+
+        for (const sec of Object.values(this._secondaries || {})) {
+            await sec._initializeIndex(allFieldTypes, reset, this._indexFields);
+        }
+
+        const migrateFn = (this._original as any)?.migrate ?? (this as any).migrate;
+        this._currentMigrateHash = migrateFn ? hashFunction(migrateFn) : 0;
+
+        const currentValueBytes = this._serializeVersionValue();
+        this._currentVersion = (await this._ensureVersionEntry(currentValueBytes)).version;
+    }
+
+    _getSecondary(name: string) {
+        const index = this._secondaries?.[name];
+        if (!index) throw new DatabaseError(`Unknown index '${name}' on model '${this.tableName}'`, 'INIT_ERROR');
+        return index;
+    }
+
+    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: false | Uint8Array): Model<FIELDS>;
+    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: true): Model<FIELDS> | undefined;
+    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: boolean | Uint8Array): Model<FIELDS> | undefined {
+        let key: Uint8Array;
+        let keyParts: readonly any[] | undefined;
+        if (args instanceof Uint8Array) {
+            key = args;
+        } else {
+            key = this._argsToKeyBytes(args, false).toUint8Array();
+            keyParts = args;
+        }
+
+        const keyHash = hashBytes(key);
+        const cached = txn.instancesByPk.get(keyHash) as Model<FIELDS> | undefined;
+        if (cached) {
+            if (loadNow && loadNow !== true) {
+                Object.defineProperties(cached, this._resetDescriptors);
+                this._loadValueFields(cached, loadNow);
+            }
+            return cached;
+        }
+
+        let valueBuffer: Uint8Array | undefined;
+        if (loadNow) {
+            if (loadNow === true) {
+                valueBuffer = dbGet(txn.id, key);
+                if (!valueBuffer) return;
+            } else {
+                valueBuffer = loadNow;
+            }
+        }
+
+        const model = new (this as any)(undefined, txn) as Model<FIELDS>;
+        model._oldValues = {};
+
+        if (keyParts) {
+            let i = 0;
+            for (const fieldName of this._indexFields.keys()) {
+                model._setLoadedField(fieldName, keyParts[i++]);
+            }
+        } else {
+            const keyPack = new DataPack(key);
+            keyPack.readNumber();
+            for (const [fieldName, fieldType] of this._indexFields.entries()) {
+                model._setLoadedField(fieldName, fieldType.deserialize(keyPack));
+            }
+        }
+
+        model._setPrimaryKey(key, keyHash);
+        if (valueBuffer) {
+            this._loadValueFields(model, valueBuffer);
+        } else {
+            Object.defineProperties(model, this._lazyDescriptors);
+        }
+
+        txn.instancesByPk.set(keyHash, model);
+        return model;
+    }
+
+    _lazyLoad(model: Model<FIELDS>) {
+        const key = model._primaryKey!;
+        const valueBuffer = dbGet(model._txn.id, key);
+        if (!valueBuffer) throw new DatabaseError(`Lazy-loaded ${this.tableName}#${key} does not exist`, 'LAZY_FAIL');
+        Object.defineProperties(model, this._resetDescriptors);
+        this._loadValueFields(model, valueBuffer);
+    }
+
+    get(...args: PKA): Model<FIELDS> | undefined {
+        return this._get(currentTxn(), args, true);
+    }
+
+    getLazy(...args: PKA): Model<FIELDS> {
+        return this._get(currentTxn(), args, false);
+    }
+
+    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): Model<FIELDS> {
+        return this._get(txn, new Uint8Array(keyBuffer), new Uint8Array(valueBuffer))!;
+    }
+
+    /**
+     * Load an existing instance by primary key and update it, or create a new one.
+      * If a row already exists, its non-primary-key fields are updated in place.
+      * Otherwise, a new instance is created with `obj` as its initial properties.
+     *
+     * @param obj Partial model data that **must** include every primary key field.
+     */
+    replaceInto(obj: Partial<FIELDS>): Model<FIELDS> {
+        const keyArgs: any[] = [];
+        for (const fieldName of this._indexFields.keys()) {
+            if (!(fieldName in (obj as any))) {
+                throw new DatabaseError(`replaceInto: missing primary key field '${fieldName}'`, "MISSING_PRIMARY_KEY");
+            }
+            keyArgs.push((obj as any)[fieldName]);
+        }
+        const existing = this.get(...keyArgs as any) as Model<FIELDS> | undefined;
+        if (existing) {
+            for (const key in obj as any) {
+                if (!this._indexFields.has(key as any)) {
+                    (existing as any)[key] = (obj as any)[key];
+                }
+            }
+            return existing;
+        }
+        return new (this as any)(obj);
+    }
+
+    getBy<K extends string & keyof UNIQUE>(name: K, ...args: IndexArgs<FIELDS, UNIQUE[K]>): Model<FIELDS> | undefined {
+        return (this._getSecondary(name) as any).getPK(...args);
+    }
+
+    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>, 'first'>): Model<FIELDS> | undefined;
+    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>, 'single'>): Model<FIELDS>;
+    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts?: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>>): IndexRangeIterator<Model<FIELDS>>;
+    findBy(name: string, opts?: any): any {
+        return this._getSecondary(name).find(opts);
+    }
+
+    batchProcessBy<K extends string & keyof (UNIQUE & INDEX)>(
+        name: K,
+        opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>> & { limitSeconds?: number; limitRows?: number },
+        callback: (row: Model<FIELDS>) => any,
+    ): Promise<void> {
+        return this._getSecondary(name).batchProcess(opts, callback as any);
+    }
+
+    _loadValueFields(model: Model<FIELDS>, valueArray: Uint8Array) {
+        const valuePack = new DataPack(valueArray);
+        const version = valuePack.readNumber();
+
+        if (version === this._currentVersion) {
+            for (const fieldName of this._nonKeyFields) {
+                model._setLoadedField(fieldName, this.fields[fieldName].type.deserialize(valuePack));
+            }
+        } else {
+            this._migrateValueFields(model, version, valuePack);
+        }
+    }
+
+    _loadVersionInfo(txnId: number, version: number): VersionInfo {
+        let info = this._versions.get(version);
+        if (info) return info;
+
+        const key = this._versionInfoKey(version);
+        const raw = dbGet(txnId, key);
+        if (!raw) throw new DatabaseError(`Version ${version} info not found for index ${this}`, 'CONSISTENCY_ERROR');
+
+        const obj = new DataPack(raw).read() as any;
+        if (!obj || typeof obj.migrateHash !== 'number' || !Array.isArray(obj.fields) || !(obj.secondaryKeys instanceof Set)) {
+            throw new DatabaseError(`Version ${version} info is corrupted for index ${this}`, 'CONSISTENCY_ERROR');
+        }
+
+        const nonKeyFields = new Map<string, TypeWrapper<any>>();
+        for (const [name, typeBytes] of obj.fields) {
+            nonKeyFields.set(name, deserializeType(new DataPack(typeBytes), 0));
+        }
+
+        info = { migrateHash: obj.migrateHash, nonKeyFields, secondaryKeys: obj.secondaryKeys as Set<string> };
+        this._versions.set(version, info);
+        return info;
+    }
+
+    _migrateValueFields(model: Model<FIELDS>, version: number, valuePack: DataPack) {
+        const versionInfo = this._loadVersionInfo(model._txn.id, version);
+        const record: Record<string, any> = {};
+        for (const [name] of this._indexFields.entries()) record[name] = (model as any)[name];
+        for (const [name, type] of versionInfo.nonKeyFields.entries()) {
+            record[name] = type.deserialize(valuePack);
+        }
+
+        const migrateFn = (this as any).migrate;
+        if (migrateFn) migrateFn(record);
+
+        for (const fieldName of this._nonKeyFields) {
+            if (fieldName in record) {
+                model._setLoadedField(fieldName, record[fieldName]);
+            } else if (fieldName in model) {
+                model._setLoadedField(fieldName, (model as any)[fieldName]);
+            } else {
+                throw new DatabaseError(`Field ${fieldName} is missing in migrated data for ${model}`, 'MIGRATION_ERROR');
+            }
+        }
+    }
+
+    _serializeValue(data: Record<string, any>): Uint8Array {
+        const valueBytes = new DataPack();
+        valueBytes.write(this._currentVersion);
+        for (const fieldName of this._nonKeyFields) {
+            const fieldConfig = this.fields[fieldName] as FieldConfig<unknown>;
+            fieldConfig.type.serialize(data[fieldName], valueBytes);
+        }
+        return valueBytes.toUint8Array();
+    }
+}
+
+export interface ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> {
+    new (initial?: Partial<FIELDS>, txn?: Transaction): Model<FIELDS>;
+    find(opts: FindOptions<PKA, 'first'>): Model<FIELDS> | undefined;
+    find(opts: FindOptions<PKA, 'single'>): Model<FIELDS>;
+    find(opts?: FindOptions<PKA>): IndexRangeIterator<Model<FIELDS>>;
+    batchProcess(
+        opts: FindOptions<PKA> & { limitSeconds?: number; limitRows?: number },
+        callback: (row: Model<FIELDS>) => any,
+    ): Promise<void>;
+    batchProcessBy(
+        name: string & keyof (UNIQUE & INDEX),
+        opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[string & keyof (UNIQUE & INDEX)]>> & { limitSeconds?: number; limitRows?: number },
+        callback: (row: Model<FIELDS>) => any,
+    ): Promise<void>;
+}
 
 /**
  * Register a model class with the Edinburgh ORM system.
@@ -147,25 +421,26 @@ export function defineModel<
     tableName: string,
     cls: T,
     opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, override?: boolean }
-): RegisteredModel<FieldsOf<T>, PKArgs<FieldsOf<T>, PK>, UNIQUE, INDEX>;
-
-export function defineModel(tableName: string, cls: any, opts?: any): any {
-    Object.setPrototypeOf(cls.prototype, Model.prototype);
-
+): ModelClass<FieldsOf<T>, PKArgs<FieldsOf<T>, PK>, UNIQUE, INDEX> {
+    Object.setPrototypeOf(cls.prototype, ModelBase.prototype);
     const MockModel = function(this: any, initial?: Record<string, any>, txn: Transaction = currentTxn()) {
         this._txn = txn;
         txn.instances.add(this);
         if (initial) Object.assign(this, initial);
     } as any;
 
+    const normalizeSpec = (spec: any) => typeof spec === 'string' ? [spec] : spec;
+    const queueInitialization = () => { pendingModelInits.add(MockModel); };
+    const loadPrimary = (txn: Transaction, primaryKey: Uint8Array, loadNow: boolean | Uint8Array) => MockModel._get(txn, primaryKey, loadNow);
+
     cls.prototype.constructor = MockModel;
-    Object.setPrototypeOf(MockModel, Model);
+    Object.setPrototypeOf(MockModel, ModelClass.prototype);
     MockModel.prototype = cls.prototype;
     MockModel._original = cls;
 
     for (const name of Object.getOwnPropertyNames(cls)) {
         if (name !== 'length' && name !== 'prototype' && name !== 'name') {
-            MockModel[name] = cls[name];
+            MockModel[name] = (cls as any)[name];
         }
     }
 
@@ -212,36 +487,43 @@ export function defineModel(tableName: string, cls: any, opts?: any): any {
         }
     }
 
-    if (opts?.pk) {
-        new PrimaryIndex(MockModel, Array.isArray(opts.pk) ? opts.pk : [opts.pk]);
-    } else {
-        new PrimaryIndex(MockModel, ['id']);
+    const primaryFields = opts?.pk ? (Array.isArray(opts.pk) ? opts.pk : [opts.pk]) : ['id'];
+    MockModel._indexFields = new Map();
+    for (const fieldName of primaryFields) {
+        const fieldConfig = MockModel.fields[fieldName];
+        if (!fieldConfig) {
+            throw new DatabaseError(`Unknown primary key field '${fieldName}' on model '${tableName}'`, 'INIT_ERROR');
+        }
+        MockModel._indexFields.set(fieldName, fieldConfig.type);
     }
 
-    const normalizeSpec = (spec: any) => typeof spec === 'string' ? [spec] : spec;
+    MockModel._secondaries = {};
+    MockModel._lazyDescriptors = {};
+    MockModel._resetDescriptors = {};
+    MockModel._freezePrimaryKeyDescriptors = {};
+    MockModel._versions = new Map();
 
     if (opts?.unique) {
         for (const [name, spec] of Object.entries<any>(opts.unique)) {
-            MockModel[name] = new UniqueIndex(MockModel, normalizeSpec(spec));
+            MockModel._secondaries[name] = new UniqueIndex(tableName, normalizeSpec(spec), loadPrimary, queueInitialization);
         }
     }
     if (opts?.index) {
         for (const [name, spec] of Object.entries<any>(opts.index)) {
-            MockModel[name] = new SecondaryIndex(MockModel, normalizeSpec(spec));
+            MockModel._secondaries[name] = new SecondaryIndex(tableName, normalizeSpec(spec), loadPrimary, queueInitialization);
         }
     }
 
     modelRegistry[MockModel.tableName] = MockModel;
-    scheduleInit();
+    pendingModelInits.add(MockModel);
     return MockModel;
 }
 
 /**
  * Model interface that ensures proper typing for the constructor property.
- * @template SUB - The concrete model subclass.
  */
-export interface Model<SUB> {
-  constructor: typeof Model<SUB>;
+export interface ModelBase {
+    constructor: AnyModelClass;
 }
 
 /**
@@ -281,8 +563,6 @@ export interface Model<SUB> {
  *   Useful for computing derived fields, enforcing cross-field invariants, or creating related
  *   instances. See {@link Model.preCommit}.
  *
- * @template SUB - The concrete model subclass (for proper typing).
- * 
  * @example
  * ```typescript
  * const User = E.defineModel("User", class {
@@ -293,59 +573,12 @@ export interface Model<SUB> {
  *   pk: "id",
  *   unique: { byEmail: "email" },
  * });
+ * // Optional: declare a companion type so `let u: User` works.
+ * // Not needed if you only use `new User()`, `User.find()`, etc.
+ * type User = InstanceType<typeof User>;
  * ```
  */
-
-
-export abstract class Model<SUB> {
-    static _primary: PrimaryIndex<any, any>;
-
-    /** @internal All non-primary indexes for this model. */
-    static _secondaries?: NonPrimaryIndex<any, readonly (keyof any & string)[]>[];
-
-    /** The database table name. */
-    static tableName: string;
-
-    /** When true, defineModel replaces an existing model with the same tableName. */
-    static override?: boolean;
-
-    /** Field configuration metadata. */
-    static fields: Record<string | symbol | number, FieldConfig<unknown>>;
-
-    // Alias statics that delegate to _primary, used by migrate.ts
-    static get _indexId() { return this._primary?._indexId; }
-    static get _currentVersion() { return this._primary._currentVersion; }
-    static get _pkFieldTypes() { return this._primary._fieldTypes; }
-    static _loadVersionInfo(txnId: number, version: number) { return this._primary._loadVersionInfo(txnId, version); }
-    static _writePrimary(txn: Transaction, pk: Uint8Array, data: Record<string, any>) { this._primary._write(txn, pk, data as any); }
-
-    /**
-     * Optional migration function called when deserializing rows written with an older schema version.
-     * Receives a plain record with all fields (primary key fields + value fields) and should mutate it
-     * in-place to match the current schema.
-     *
-     * This is called both during lazy loading (when a row is read from disk) and during batch
-     * migration (via `runMigration()` / `npx migrate-edinburgh`). The function's source code is hashed
-     * to detect changes. Modifying `migrate()` triggers a new schema version.
-     *
-     * If `migrate()` changes values of fields used in secondary or unique indexes, those indexes
-     * will only be updated when `runMigration()` is run (not during lazy loading).
-     *
-     * @param record A plain object with all field values from the old schema version.
-     *
-     * @example
-     * ```typescript
-     * const User = E.defineModel("User", class {
-     *   id = E.field(E.identifier);
-     *   name = E.field(E.string);
-     *   role = E.field(E.string);  // new field
-     *
-     *   static migrate(record: Record<string, any>) {
-     *     record.role ??= "user";  // default for rows that predate the 'role' field
-     *   }
-     * }, { pk: "id" });
-     * ```
-     */
+export abstract class ModelBase {
     static migrate?(record: Record<string, any>): void;
 
     /*
@@ -390,23 +623,11 @@ export abstract class Model<SUB> {
      */
     preCommit?(): void;
 
-    static _resetIndexes(): void {
-        this._primary._indexId = undefined;
-        this._primary._versions.clear();
-        for (const sec of this._secondaries || []) sec._indexId = undefined;
-    }
-
-    static async _loadCreateIndexes(): Promise<void> {
-        await this._primary._delayedInit();
-        for (const sec of this._secondaries || []) await sec._delayedInit();
-        await this._primary._initVersioning();
-    }
-
     _setLoadedField(fieldName: string, value: any) {
         const oldValues = this._oldValues!;
         if (oldValues.hasOwnProperty(fieldName)) return; // Already loaded earlier (as part of index key?)
 
-        this[fieldName as keyof Model<SUB>] = value;
+        this[fieldName as keyof ModelBase] = value;
         if (typeof value === 'object' && value !== null) {            
             const fieldType = (this.constructor.fields[fieldName] as FieldConfig<unknown>).type;
             oldValues[fieldName] = fieldType.clone(value);
@@ -416,13 +637,23 @@ export abstract class Model<SUB> {
         }
     }
 
+    _restoreLazyFields() {
+        const oldValues = this._oldValues;
+        if (!oldValues || oldValues === null) return;
+        for (const [fieldName, descriptor] of Object.entries(this.constructor._lazyDescriptors)) {
+            if (!oldValues.hasOwnProperty(fieldName)) {
+                Object.defineProperty(this, fieldName, descriptor);
+            }
+        }
+    }
+
     /**
      * @returns The primary key for this instance.
      */
     getPrimaryKey(): Uint8Array {
         let key = this._primaryKey;
         if (key === undefined) {
-            key = this.constructor._primary!._serializeKey(this).toUint8Array();
+            key = this.constructor._serializePK(this).toUint8Array();
             this._setPrimaryKey(key);
         }
         return key;
@@ -431,7 +662,7 @@ export abstract class Model<SUB> {
     _setPrimaryKey(key: Uint8Array, hash?: number) {
         this._primaryKey = key;
         this._primaryKeyHash = hash ?? hashBytes(key);
-        Object.defineProperties(this, this.constructor._primary._freezePrimaryKeyDescriptors);
+        Object.defineProperties(this, this.constructor._freezePrimaryKeyDescriptors);
     }
 
     /**
@@ -443,8 +674,8 @@ export abstract class Model<SUB> {
     }
 
     isLazyField(field: keyof this) {
-        const descr = this.constructor._primary!._lazyDescriptors[field];
-        return !!(descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, field)?.get);
+        const oldValues = this._oldValues;
+        return !!(oldValues && oldValues !== null && field in this.constructor._lazyDescriptors && !oldValues.hasOwnProperty(field));
     }
 
     _write(txn: Transaction): undefined | Change {
@@ -454,10 +685,10 @@ export abstract class Model<SUB> {
             const pk = this._primaryKey;
             // Temporarily restore _oldValues so computed indexes can trigger lazy loads
             this._oldValues = {};
-            for(const index of this.constructor._secondaries || []) {
+            for (const index of Object.values(this.constructor._secondaries || {})) {
                 index._delete(txn, pk!, this);
             }
-            this.constructor._primary._delete(txn, pk!, this);
+            this.constructor._deletePK(txn, pk!, this);
             
             return "deleted";
         }
@@ -472,10 +703,10 @@ export abstract class Model<SUB> {
             }
 
             // Insert the primary index
-            this.constructor._primary!._write(txn, pk!, this);
+            this.constructor._writePK(txn, pk!, this);
 
             // Insert all secondaries
-            for (const index of this.constructor._secondaries || []) {
+            for (const index of Object.values(this.constructor._secondaries || {})) {
                 index._write(txn, pk!, this);
             }
 
@@ -491,7 +722,7 @@ export abstract class Model<SUB> {
         const fields = this.constructor.fields;
         for(const fieldName in oldValues) {
             const oldValue = oldValues[fieldName];
-            const newValue = this[fieldName as keyof Model<SUB>];
+            const newValue = this[fieldName as keyof ModelBase];
             if (newValue !== oldValue  && !(fields[fieldName] as FieldConfig<unknown>).type.equals(newValue, oldValue)) {
                 changed[fieldName] = oldValue;
             }
@@ -500,7 +731,7 @@ export abstract class Model<SUB> {
         if (isObjectEmpty(changed)) return; // No changes, nothing to do
 
         // Make sure primary has not been changed
-        for (const field of this.constructor._primary!._fieldTypes.keys()) {
+        for (const field of this.constructor._indexFields.keys()) {
             if (changed.hasOwnProperty(field)) {
                 throw new DatabaseError(`Cannot modify primary key field: ${field}`, "CHANGE_PRIMARY");
             }
@@ -513,10 +744,10 @@ export abstract class Model<SUB> {
 
         // Update the primary index
         const pk = this._primaryKey!;
-        this.constructor._primary!._write(txn, pk, this);
+        this.constructor._writePK(txn, pk, this);
 
         // Update any secondaries with changed fields
-        for (const index of this.constructor._secondaries || []) {
+        for (const index of Object.values(this.constructor._secondaries || {})) {
             index._update(txn, pk, this, oldValues);
         }
         return changed;
@@ -539,54 +770,6 @@ export abstract class Model<SUB> {
         // Have access to '_txn' throw a descriptive error:
         Object.defineProperty(this, "_txn", PREVENT_PERSIST_DESCRIPTOR);
         return this;
-    }
-
-    static get(...args: any[]): any {
-        return this._primary!.get(...args);
-    }
-
-    static getLazy(...args: any[]): any {
-        return this._primary!.getLazy(...args);
-    }
-
-    static find(opts?: any): any {
-        return this._primary!.find(opts);
-    }
-
-    static batchProcess(opts: any, callback?: any): any {
-        return this._primary!.batchProcess(opts, callback);
-    }
-
-    /**
-     * Load an existing instance by primary key and update it, or create a new one.
-     *
-     * The provided object must contain all primary key fields. If a matching row exists,
-     * the remaining properties from `obj` are set on the loaded instance. Otherwise a
-     * new instance is created with `obj` as its initial properties.
-     *
-     * @param obj Partial model data that **must** include every primary key field.
-     * @returns The loaded-and-updated or newly created instance.
-     */
-    static replaceInto<T extends typeof Model<any>>(this: T, obj: Partial<Record<string, any>>): InstanceType<T> {
-        const pk = this._primary!;
-        const keyArgs = [];
-        for (const fieldName of pk._fieldTypes.keys()) {
-            if (!(fieldName in (obj as any))) {
-                throw new DatabaseError(`replaceInto: missing primary key field '${fieldName}'`, "MISSING_PRIMARY_KEY");
-            }
-            keyArgs.push((obj as any)[fieldName]);
-        }
-
-        const existing = pk.get(...keyArgs as any) as InstanceType<T> | undefined;
-        if (existing) {
-            for (const key in obj as any) {
-                if (!pk._fieldTypes.has(key as any)) {
-                    (existing as any)[key] = (obj as any)[key];
-                }
-            }
-            return existing;
-        }
-        return new (this as any)(obj) as InstanceType<T>;
     }
 
     /**
@@ -650,7 +833,7 @@ export abstract class Model<SUB> {
     getState(): "deleted" | "created" | "loaded" | "lazy" {
         if (this._oldValues === null) return "deleted";
         if (this._oldValues === undefined) return "created";
-        for(const [key,descr] of Object.entries(this.constructor._primary!._lazyDescriptors)) {
+        for(const [key,descr] of Object.entries(this.constructor._lazyDescriptors)) {
             if (descr && 'get' in descr && descr.get === Reflect.getOwnPropertyDescriptor(this, key)?.get) {
                 return "lazy";
             }
@@ -659,12 +842,49 @@ export abstract class Model<SUB> {
     }
 
     toString(): string {
-        const primary = this.constructor._primary;
-        const pk = primary._keyToArray(this._primaryKey || primary._serializeKey(this).toUint8Array(false));
-        return `{Model:${this.constructor.tableName} ${this.getState()} ${pk}}`;
+        const cls = this.constructor;
+        const pk = cls._pkToArray(this._primaryKey || cls._serializePK(this).toUint8Array(false));
+        return `{Model:${cls.tableName} ${this.getState()} ${pk}}`;
     }
 
     [Symbol.for('nodejs.util.inspect.custom')]() {
         return this.toString();
     }
 }
+
+export async function deleteEverything(): Promise<void> {
+    let done = false;
+    while (!done) {
+        await transact(() => {
+            const txn = currentTxn();
+            const iteratorId = lowlevel.createIterator(txn.id, undefined, undefined, false);
+            const deadline = Date.now() + 150;
+            let count = 0;
+            try {
+                while (true) {
+                    const raw = lowlevel.readIterator(iteratorId);
+                    if (!raw) {
+                        done = true;
+                        break;
+                    }
+                    lowlevel.del(txn.id, raw.key);
+                    if (++count >= 4096 || Date.now() >= deadline) break;
+                }
+            } finally {
+                lowlevel.closeIterator(iteratorId);
+            }
+        });
+    }
+
+    for (const model of Object.values(modelRegistry)) {
+        pendingModelInits.delete(model);
+        await model._initialize(true);
+    }
+}
+
+/**
+ * A model instance, including its user-defined fields.
+ * @template FIELDS - The fields defined on this model.
+ */
+export type Model<FIELDS> = FIELDS & InstanceType<typeof ModelBase>;
+export const Model = ModelBase;

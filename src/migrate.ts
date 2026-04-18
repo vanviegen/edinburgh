@@ -1,9 +1,9 @@
 import * as lowlevel from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
-import { modelRegistry, currentTxn, Transaction } from "./models.js";
+import { currentTxn, type Transaction, transact } from "./edinburgh.js";
+import { modelRegistry } from "./models.js";
 import { dbDel, toBuffer, bytesEqual } from "./utils.js";
 import { deserializeType, TypeWrapper } from "./types.js";
-import { transact } from "./edinburgh.js";
 
 const INDEX_ID_PREFIX = -2;
 
@@ -123,7 +123,7 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
         if (options.tables && !options.tables.includes(model.tableName)) continue;
         knownIndexIds.add(model._indexId!);
         modelByPkIndexId.set(model._indexId!, model);
-        for (const sec of model._secondaries || []) {
+        for (const sec of Object.values(model._secondaries || {})) {
             knownIndexIds.add(sec._indexId!);
         }
     }
@@ -157,7 +157,7 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
             let secondaryCount = 0;
             let rewrittenCount = 0;
             const migrateFn = (model as any).migrate as ((record: Record<string, any>) => void) | undefined;
-            const secondaries = model._secondaries || [];
+            const secondaries = Object.values(model._secondaries || {});
 
             await forEachRow(indexId, (txn, keyBuf, valueBuf) => {
                 const valuePack = new DataPack(valueBuf);
@@ -170,7 +170,7 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
                 const record: Record<string, any> = {};
                 const keyPack = new DataPack(keyBuf);
                 keyPack.readNumber(); // skip indexId
-                for (const [name, type] of model._pkFieldTypes.entries()) {
+                for (const [name, type] of model._indexFields.entries()) {
                     record[name] = type.deserialize(keyPack);
                 }
                 for (const [name, type] of versionInfo.nonKeyFields.entries()) {
@@ -189,14 +189,14 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
                             sec._write(txn, keyBuf, record as any);
                             secondaryCount++;
                         } else if (preMigrate) {
-                            if (sec._update(txn, keyBuf, record, preMigrate)) secondaryCount++;
+                            if (sec._update(txn, keyBuf, record as any, preMigrate)) secondaryCount++;
                         }
                     }
                 }
 
                 // Rewrite primary row data to current version
                 if (rewriteData) {
-                    model._writePrimary(txn, keyBuf, record);
+                    model._writePK(txn, keyBuf, record);
                     rewrittenCount++;
                 }
             });

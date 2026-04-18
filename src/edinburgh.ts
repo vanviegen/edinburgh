@@ -1,20 +1,19 @@
 import * as lowlevel from "olmdb/lowlevel";
 import { init as olmdbInit, DatabaseError } from "olmdb/lowlevel";
-import { modelRegistry, txnStorage, currentTxn } from "./models.js";
-
-let initNeeded = true;
-export function scheduleInit() { initNeeded = true; }
+import { AsyncLocalStorage } from "node:async_hooks";
+import { pendingModelInits } from "./models.js";
 
 
 // Re-export public API from models
 export {
     Model,
+    ModelClass,
     defineModel,
+    deleteEverything,
     field,
-    currentTxn,
 } from "./models.js";
 
-import type { Transaction, Change, Model } from "./models.js";
+import type { Change, Model } from "./models.js";
 
 // Re-export public API from types (only factory functions and instances)
 export {
@@ -41,13 +40,33 @@ export {
     dump,
 } from "./indexes.js";
 
-export { BaseIndex, NonPrimaryIndex, UniqueIndex, SecondaryIndex } from './indexes.js';
+export type { FindOptions, IndexRangeIterator } from './indexes.js';
 
 export { type Change } from './models.js';
-export type { Transaction } from './models.js';
+export type { FieldConfig } from './models.js';
+export { TypeWrapper } from './types.js';
 export { DatabaseError } from "olmdb/lowlevel";
 export { runMigration } from './migrate.js';
 export type { MigrationOptions, MigrationResult } from './migrate.js';
+
+export interface Transaction {
+    id: number;
+    instances: Set<Model<unknown>>;
+    instancesByPk: Map<number, Model<unknown>>;
+}
+
+export const txnStorage = new AsyncLocalStorage<Transaction>();
+
+/**
+ * Returns the current transaction from AsyncLocalStorage.
+ * Throws if called outside a transact() callback.
+ * @internal
+ */
+export function currentTxn(): Transaction {
+    const txn = txnStorage.getStore();
+    if (!txn) throw new DatabaseError("No active transaction. Operations must be performed within a transact() callback.", 'NO_TRANSACTION');
+    return txn;
+}
 
 let olmdbReady = false;
 let maxRetryCount = 6;
@@ -114,17 +133,17 @@ const STALE_INSTANCE_DESCRIPTOR = {
 * ```
 */
 export async function transact<T>(fn: () => T): Promise<T> {
-    while (initNeeded || pendingInit) {
-        // Make sure only one async task is doing the inits, the rest should wait for it
+    while (pendingModelInits.size || pendingInit) {
         if (pendingInit) {
             await pendingInit;
         } else {
             pendingInit = (async () => {
                 if (!olmdbReady) olmdbInit('.edinburgh');
                 olmdbReady = true;
-                initNeeded = false;
-                for (const model of Object.values(modelRegistry)) {
-                    await model._loadCreateIndexes();
+                const models = [...pendingModelInits];
+                pendingModelInits.clear();
+                for (const model of models) {
+                    await model._initialize();
                 }
             })();
             await pendingInit;
@@ -207,7 +226,7 @@ export function setMaxRetryCount(count: number) {
     maxRetryCount = count;
 }
 
-let onSaveCallback: ((commitId: number, items: Map<Model<any>, Change>) => void) | undefined;
+let onSaveCallback: ((commitId: number, items: Map<Model<unknown>, Change>) => void) | undefined;
  
 /**
  * Set a callback function to be called after a model is saved and committed.
@@ -217,35 +236,6 @@ let onSaveCallback: ((commitId: number, items: Map<Model<any>, Change>) => void)
  *   - A sequential number. Higher numbers have been committed after lower numbers.
  *   - A map of model instances to their changes. The change can be "created", "deleted", or an object containing the old values.
  */
-export function setOnSaveCallback(callback: ((commitId: number, items: Map<Model<any>, Change>) => void) | undefined) {
+export function setOnSaveCallback(callback: ((commitId: number, items: Map<Model<unknown>, Change>) => void) | undefined) {
     onSaveCallback = callback;
-}
-
-
-export async function deleteEverything(): Promise<void> {
-    let done = false;
-    while (!done) {
-        await transact(() => {
-            const txn = currentTxn();
-            const iteratorId = lowlevel.createIterator(txn.id, undefined, undefined, false);
-            const deadline = Date.now() + 150;
-            let count = 0;
-            try {
-                while (true) {
-                    const raw = lowlevel.readIterator(iteratorId);
-                    if (!raw) { done = true; break; }
-                    lowlevel.del(txn.id, raw.key);
-                    if (++count >= 4096 || Date.now() >= deadline) break;
-                }
-            } finally {
-                lowlevel.closeIterator(iteratorId);
-            }
-        });
-    }
-    // Re-init indexes since metadata was deleted
-    for (const model of Object.values(modelRegistry)) {
-        if (!model.fields) continue;
-        model._resetIndexes();
-        await model._loadCreateIndexes();
-    }
 }

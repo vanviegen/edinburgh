@@ -1,15 +1,26 @@
 import * as lowlevel from "olmdb/lowlevel";
 import { DatabaseError } from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
-import { FieldConfig, Model, Transaction, currentTxn } from "./models.js";
-import { scheduleInit, transact } from "./edinburgh.js";
+import { currentTxn, transact, type Transaction } from "./edinburgh.js";
 import { assert, logLevel, dbGet, dbPut, dbDel, hashBytes, hashFunction, bytesEqual, toBuffer } from "./utils.js";
 import { deserializeType, serializeType, TypeWrapper } from "./types.js";
 
-// Index system types and utilities
-type IndexArgTypes<M extends typeof Model<any>, F extends readonly (keyof InstanceType<M> & string)[]> = {
-    [I in keyof F]: InstanceType<M>[F[I]]
-}
+type IndexItem = {
+    _setLoadedField(fieldName: string, value: any): void;
+    _restoreLazyFields?(): void;
+};
+type PrimaryKeyItem = IndexItem & {
+    _oldValues: Record<string, any> | undefined | null;
+    _primaryKey: Uint8Array | undefined;
+    _txn: Transaction;
+    _setPrimaryKey(key: Uint8Array, hash?: number): void;
+};
+type FieldTypes = ReadonlyMap<string, TypeWrapper<any>>;
+type LoadPrimary<ITEM> = (txn: Transaction, primaryKey: Uint8Array, loadNow: boolean | Uint8Array) => ITEM | undefined;
+type QueueInitialization = () => void;
+type IndexArgTypes<ITEM, F extends readonly (keyof ITEM & string)[]> = {
+    [I in keyof F]: ITEM[F[I]]
+};
 
 const MAX_INDEX_ID_PREFIX = -1;
 const INDEX_ID_PREFIX = -2;
@@ -22,7 +33,7 @@ export interface VersionInfo {
     migrateHash: number;
     /** Non-key field names → TypeWrappers for deserialization of this version's data. */
     nonKeyFields: Map<string, TypeWrapper<any>>;
-    /** Set of serialized secondary index signatures that existed in this version. */
+    /** Set of serialized secondary index signatures that existed in this version's data. */
     secondaryKeys: Set<string>;
 }
 
@@ -31,21 +42,18 @@ export interface VersionInfo {
  * Handles common iteration logic for both primary and unique indexes.
  * Extends built-in Iterator to provide map/filter/reduce/toArray/etc.
  */
-export class IndexRangeIterator<M extends typeof Model> extends Iterator<InstanceType<M>> {
+export class IndexRangeIterator<ITEM> extends Iterator<ITEM> {
     constructor(
         private txn: Transaction,
         private iteratorId: number,
-        private indexId: number,
-        private parentIndex: BaseIndex<M, any>
+        private parentIndex: BaseIndex<ITEM, any>
     ) {
         super();
     }
 
-    // This is also in Iterator<InstanceType<M>>, but we'll repeat it here for deps that
-    // don't have ESNext.Iterator in their TypeScript lib set.
     [Symbol.iterator](): this { return this; }
 
-    next(): IteratorResult<InstanceType<M>> {
+    next(): IteratorResult<ITEM> {
         if (this.iteratorId < 0) return { done: true, value: undefined };
         const raw = lowlevel.readIterator(this.iteratorId);
         if (!raw) {
@@ -53,10 +61,8 @@ export class IndexRangeIterator<M extends typeof Model> extends Iterator<Instanc
             this.iteratorId = -1;
             return { done: true, value: undefined };
         }
-        
-        // Dispatches to the _pairToInstance specific to the index type
-        const model = this.parentIndex._pairToInstance(this.txn, raw.key, raw.value);
 
+        const model = this.parentIndex._pairToInstance(this.txn, raw.key, raw.value);
         return { done: false, value: model };
     }
 
@@ -66,9 +72,9 @@ export class IndexRangeIterator<M extends typeof Model> extends Iterator<Instanc
         return result;
     }
 
-    fetch(): InstanceType<M> | undefined {
+    fetch(): ITEM | undefined {
         for (const model of this) {
-            return model; // Return the first model found
+            return model;
         }
     }
 }
@@ -77,7 +83,7 @@ type ArrayOrOnlyItem<ARG_TYPES extends readonly any[]> = ARG_TYPES extends reado
 
 export type FindOptions<ARG_TYPES extends readonly any[], FETCH extends 'first' | 'single' | undefined = undefined> = (
     (
-        {is: ArrayOrOnlyItem<ARG_TYPES>;} // Shortcut for setting `from` and `to` to the same value
+        {is: ArrayOrOnlyItem<ARG_TYPES>;}
     |
         (
             (
@@ -103,76 +109,66 @@ export type FindOptions<ARG_TYPES extends readonly any[], FETCH extends 'first' 
     & (FETCH extends undefined ? { fetch?: undefined } : { fetch: FETCH })
 );
 
-
 /**
  * Base class for database indexes for efficient lookups on model fields.
- * 
+ *
  * Indexes enable fast queries on specific field combinations and enforce uniqueness constraints.
- * 
- * @template M - The model class this index belongs to.
- * @template F - The field names that make up this index.
  */
-export abstract class BaseIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> {
-    public _MyModel: M;
-    public _fieldTypes: Map<keyof InstanceType<M> & string, TypeWrapper<any>> = new Map();
-    public _fieldCount!: number;
+export abstract class BaseIndex<ITEM, const F extends readonly (keyof ITEM & string)[], ARGS extends readonly any[] = IndexArgTypes<ITEM, F>> {
+    public tableName!: string;
+    public _indexFields: Map<F[number], TypeWrapper<any>> = new Map();
     _computeFn?: (data: any) => any[];
-    
-    /**
-     * Create a new index.
-     * @param MyModel The model class this index belongs to.
-     * @param _fieldNames Array of field names that make up this index.
-     */
-    constructor(MyModel: M, public _fieldNames: F) {
-        this._MyModel = MyModel;
+    _indexId?: number;
+    _signature?: string;
+
+    constructor(tableName: string, fieldNames: F) {
+        this.tableName = tableName;
+        this._indexFields = new Map(fieldNames.map(fieldName => [fieldName, undefined as unknown as TypeWrapper<any>]));
     }
 
-    async _delayedInit() {
-        if (this._indexId != null) return; // Already initialized
-        if (this._computeFn) {
-            this._fieldCount = 1;
-        } else {
-            for(const fieldName of this._fieldNames) {
-                assert(typeof fieldName === 'string', 'Field names must be strings');
-                this._fieldTypes.set(fieldName, this._MyModel.fields[fieldName].type);
-            }
-            this._fieldCount = this._fieldNames.length;
+    async _initializeIndex(fields: FieldTypes, reset = false, primaryFieldTypes?: FieldTypes) {
+        const fieldNames = [...this._indexFields.keys()];
+        if (reset) {
+            this._indexId = undefined;
+            this._signature = undefined;
+        } else if (this._indexId != null) {
+            return;
         }
-        await this._retrieveIndexId();
 
-        // Human-readable signature for version tracking, e.g. "secondary category:string"
+        if (this._computeFn) {
+            this._indexFields = new Map();
+        } else {
+            this._indexFields = new Map();
+            for (const fieldName of fieldNames) {
+                assert(typeof fieldName === 'string', 'Field names must be strings');
+                const fieldType = fields.get(fieldName);
+                assert(fieldType, `Unknown field '${fieldName}' in ${this}`);
+                this._indexFields.set(fieldName, fieldType);
+            }
+        }
+
+        await this._retrieveIndexId(fields, primaryFieldTypes);
+
         if (this._computeFn) {
             this._signature = this._getTypeName() + ' ' + hashFunction(this._computeFn);
         } else {
             this._signature = this._getTypeName() + ' ' +
-                Array.from(this._fieldTypes.entries()).map(([n, t]) => n + ':' + t).join(' ');
+                Array.from(this._indexFields.entries()).map(([name, fieldType]) => name + ':' + fieldType).join(' ');
         }
     }
 
-    _indexId?: number;
-
-    /** Human-readable signature for version tracking, e.g. "secondary category:string" */
-    _signature?: string;
-
-    /**
-     * Serialize array of key values to a (index-id prefixed) Bytes instance that can be used as a key.
-     * @param args Field values to serialize (can be partial for range queries).
-     * @returns A Bytes instance containing the index id and serialized key parts.
-     * @internal
-     */
     _argsToKeyBytes(args: [], allowPartial: boolean): DataPack;
     _argsToKeyBytes(args: Partial<ARGS>, allowPartial: boolean): DataPack;
-
     _argsToKeyBytes(args: any, allowPartial: boolean) {
-        assert(allowPartial ? args.length <= this._fieldCount : args.length === this._fieldCount);
+        const expectedCount = this._computeFn ? 1 : this._indexFields.size;
+        assert(allowPartial ? args.length <= expectedCount : args.length === expectedCount);
         const bytes = new DataPack();
         bytes.write(this._indexId!);
         if (this._computeFn) {
             if (args.length > 0) bytes.write(args[0]);
         } else {
             let index = 0;
-            for(const fieldType of this._fieldTypes.values()) {
-                // For partial keys, undefined values are acceptable and represent open range suffixes
+            for (const fieldType of this._indexFields.values()) {
                 if (index >= args.length) break;
                 fieldType.serialize(args[index++], bytes);
             }
@@ -180,36 +176,25 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         return bytes;
     }
 
-    /**
-     * Extract model from iterator entry - implemented differently by each index type.
-     * @param keyBuffer Key bytes (including index id).
-     * @param valueBuffer Value bytes from the entry.
-     * @returns Model instance or undefined.
-     * @internal
-     */
-    abstract _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M>;
+    abstract _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): ITEM;
 
-    /**
-     * Retrieve (or create) a stable index ID from the DB, with retry on transaction races.
-     * Sets `this._indexId` on success.
-     */
-    async _retrieveIndexId(): Promise<void> {
-        const indexNameBytes = new DataPack().write(INDEX_ID_PREFIX).write(this._MyModel.tableName).write(this._getTypeName());
+    abstract _getTypeName(): string;
+
+    async _retrieveIndexId(fields: FieldTypes, primaryFieldTypes?: FieldTypes): Promise<void> {
+        const indexNameBytes = new DataPack().write(INDEX_ID_PREFIX).write(this.tableName).write(this._getTypeName());
         if (this._computeFn) {
             indexNameBytes.write(hashFunction(this._computeFn));
         } else {
-            for(let name of this._fieldNames) {
+            for (const name of this._indexFields.keys()) {
                 indexNameBytes.write(name);
-                serializeType(this._MyModel.fields[name].type, indexNameBytes);
+                serializeType(fields.get(name)!, indexNameBytes);
             }
         }
-        // For non-primary indexes, include primary key field info to avoid misinterpreting
-        // values when the primary key schema changes.
-        if (this._MyModel._primary !== (this as any)) {
-            indexNameBytes.write(undefined); // separator
-            for (const name of this._MyModel._primary._fieldNames) {
+        if (primaryFieldTypes) {
+            indexNameBytes.write(undefined);
+            for (const [name, fieldType] of primaryFieldTypes.entries()) {
                 indexNameBytes.write(name);
-                serializeType(this._MyModel.fields[name].type, indexNameBytes);
+                serializeType(fieldType, indexNameBytes);
             }
         }
         const indexNameBuf = indexNameBytes.toUint8Array();
@@ -242,65 +227,6 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         }
     }
 
-
-    /**
-     * Find model instances using flexible range query options.
-     * 
-     * Supports exact matches, inclusive/exclusive range queries, and reverse iteration.
-     * For single-field indexes, you can pass values directly or in arrays.
-     * For multi-field indexes, pass arrays or partial arrays for prefix matching.
-     * 
-     * @param opts Query options object
-     * @param opts.is Exact match (sets both `from` and `to` to same value)
-     * @param opts.from Range start (inclusive)
-     * @param opts.after Range start (exclusive)
-     * @param opts.to Range end (inclusive)
-     * @param opts.before Range end (exclusive)
-     * @param opts.reverse Whether to iterate in reverse order
-     * @returns An iterable of model instances matching the query
-     * 
-     * @example
-     * ```typescript
-     * // Exact match
-     * for (const user of User.byEmail.find({is: "john@example.com"})) {
-     *   console.log(user.name);
-     * }
-     * 
-     * // Range query (inclusive)
-     * for (const user of User.byEmail.find({from: "a@", to: "m@"})) {
-     *   console.log(user.email);
-     * }
-     * 
-     * // Range query (exclusive)
-     * for (const user of User.byEmail.find({after: "a@", before: "m@"})) {
-     *   console.log(user.email);
-     * }
-     * 
-     * // Open-ended ranges
-     * for (const user of User.byEmail.find({from: "m@"})) { // m@ and later
-     *   console.log(user.email);
-     * }
-     * 
-     * for (const user of User.byEmail.find({to: "m@"})) { // up to and including m@
-     *   console.log(user.email);
-     * }
-     * 
-     * // Reverse iteration
-     * for (const user of User.byEmail.find({reverse: true})) {
-     *   console.log(user.email); // Z to A order
-     * }
-     * 
-     * // Multi-field index prefix matching
-     * for (const item of CompositeModel.find({from: ["electronics", "phones"]})) {
-     *   console.log(item.name); // All electronics/phones items
-     * }
-     * 
-     * // For single-field indexes, you can use the value directly
-     * for (const user of User.byEmail.find({is: "john@example.com"})) {
-     *   console.log(user.name);
-     * }
-     * ```
-     */
     _computeKeyBounds(opts: FindOptions<ARGS>): [DataPack | undefined, DataPack | undefined] | null {
         let startKey: DataPack | undefined;
         let endKey: DataPack | undefined;
@@ -327,27 +253,25 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         return [startKey, endKey];
     }
 
-    public find(opts?: FindOptions<ARGS, 'first'>): InstanceType<M> | undefined;
-    public find(opts: FindOptions<ARGS, 'single'>): InstanceType<M>;
-    public find(opts?: FindOptions<ARGS>): IndexRangeIterator<M>;
-    public find(opts: any = {}): IndexRangeIterator<M> | InstanceType<M> | undefined {
+    public find(opts: FindOptions<ARGS, 'first'>): ITEM | undefined;
+    public find(opts: FindOptions<ARGS, 'single'>): ITEM;
+    public find(opts?: FindOptions<ARGS>): IndexRangeIterator<ITEM>;
+    public find(opts: any = {}): IndexRangeIterator<ITEM> | ITEM | undefined {
         const txn = currentTxn();
-        const indexId = this._indexId!;
 
         const bounds = this._computeKeyBounds(opts);
         if (!bounds) {
             if (opts.fetch === 'single') throw new DatabaseError('Expected exactly one result, got none', 'NOT_FOUND');
             if (opts.fetch === 'first') return undefined;
-            return new IndexRangeIterator(txn, -1, indexId, this);
+            return new IndexRangeIterator(txn, -1, this);
         }
         const [startKey, endKey] = bounds;
 
-        // For reverse scans, swap start/end keys since OLMDB expects it
         const scanStart = opts.reverse ? endKey : startKey;
         const scanEnd = opts.reverse ? startKey : endKey;
 
         if (logLevel >= 3) {
-            console.log(`[edinburgh] Scan ${this} start=${scanStart} end=${scanEnd} reverse=${opts.reverse||false}`);
+            console.log(`[edinburgh] Scan ${this} start=${scanStart} end=${scanEnd} reverse=${opts.reverse || false}`);
         }
         const startBuf = scanStart?.toUint8Array();
         const endBuf = scanEnd?.toUint8Array();
@@ -357,8 +281,8 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
             endBuf ? toBuffer(endBuf) : undefined,
             opts.reverse || false,
         );
-        
-        const iter = new IndexRangeIterator(txn, iteratorId, indexId, this);
+
+        const iter = new IndexRangeIterator(txn, iteratorId, this);
         if (opts.fetch === 'first') return iter.fetch();
         if (opts.fetch === 'single') {
             const first = iter.fetch();
@@ -369,20 +293,9 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         return iter;
     }
 
-    /**
-     * Process all matching rows in batched transactions.
-     *
-     * Uses the same query options as {@link find}. The batch is committed and a new
-     * transaction started once either `limitSeconds` or `limitRows` is exceeded.
-     *
-     * @param opts Query options (same as `find()`), plus:
-     * @param opts.limitSeconds Max seconds per transaction batch (default: 1)
-     * @param opts.limitRows Max rows per transaction batch (default: 4096)
-     * @param callback Called for each matching row within a transaction
-     */
     public async batchProcess(
         opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number } = {} as any,
-        callback: (row: InstanceType<M>) => void | Promise<void>
+        callback: (row: ITEM) => void | Promise<void>
     ): Promise<void> {
         const limitMs = (opts.limitSeconds ?? 1) * 1000;
         const limitRows = opts.limitRows ?? 4096;
@@ -424,10 +337,10 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
                     lowlevel.closeIterator(iteratorId);
                 }
 
-                lastRawKey = lastRawKey.slice(); // Copy, as lastRawKey points at OLMDB's internal read-only mmap
-                if (reverse) return lastRawKey!;
-                const nk = new DataPack(lastRawKey!);
-                return nk.increment() ? nk.toUint8Array() : null;
+                lastRawKey = lastRawKey.slice();
+                if (reverse) return lastRawKey;
+                const nextKey = new DataPack(lastRawKey);
+                return nextKey.increment() ? nextKey.toUint8Array() : null;
             });
 
             if (next === null) break;
@@ -435,104 +348,27 @@ export abstract class BaseIndex<M extends typeof Model, const F extends readonly
         }
     }
 
-    abstract _getTypeName(): string;
-
     toString() {
-        return `${this._indexId}:${this._MyModel.tableName}:${this._getTypeName()}[${Array.from(this._fieldTypes.keys()).join(',')}]`;
+        return `${this._indexId}:${this.tableName}:${this._getTypeName()}[${Array.from(this._indexFields.keys()).join(',')}]`;
     }
 }
 
-function toArray<ARG_TYPES extends readonly any[]>(args: ArrayOrOnlyItem<ARG_TYPES>): Partial<ARG_TYPES> {
-    // Convert single value or array to array format compatible with Partial<ARG_TYPES>
-    return (Array.isArray(args) ? args : [args]) as Partial<ARG_TYPES>;
-}
-
-/**
- * Primary index that stores the actual model data.
- * 
- * @template M - The model class this index belongs to.
- * @template F - The field names that make up this index.
- */
-export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[]> extends BaseIndex<M, F, IndexArgTypes<M, F>> {
-
-    _nonKeyFields!: (keyof InstanceType<M> & string)[];
-    _lazyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
-    _resetDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
-    _freezePrimaryKeyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
-
-    /** Current version number for this primary index's value format. */
-    _currentVersion!: number;
-    /** Hash of the current migrate() function source, or 0 if none. */
-    _currentMigrateHash!: number;
-    /** Cached version info for old versions (loaded on demand). */
-    _versions: Map<number, VersionInfo> = new Map();
-
-    constructor(MyModel: M, fieldNames: F) {
-        super(MyModel, fieldNames);
-        if (MyModel._primary) {
-            throw new DatabaseError(`There's already a primary index defined: ${MyModel._primary}. This error may also indicate that your tsconfig.json needs to have "target": "ES2022" set.`, 'INIT_ERROR');
-        }
-        MyModel._primary = this;
+export abstract class PrimaryKey<ITEM extends PrimaryKeyItem, const F extends readonly (keyof ITEM & string)[], ARGS extends readonly any[] = IndexArgTypes<ITEM, F>> extends BaseIndex<ITEM, F, ARGS> {
+    _getTypeName(): string {
+        return 'primary';
     }
 
-    async _delayedInit() {
-        if (this._indexId != null) return; // Already initialized
-        await super._delayedInit();
-        const MyModel = this._MyModel;
-        this._nonKeyFields = Object.keys(MyModel.fields).filter(fieldName => !this._fieldNames.includes(fieldName as any)) as any;
+    abstract _serializeValue(data: Record<string, any>): Uint8Array;
 
-        for(const fieldName of this._nonKeyFields) {
-            this._lazyDescriptors[fieldName] = {
-                configurable: true,
-                enumerable: true,
-                get(this: InstanceType<M>) {
-                    this.constructor._primary._lazyNow(this);
-                    return this[fieldName];
-                },
-                set(this: InstanceType<M>, value: any) {
-                    this.constructor._primary._lazyNow(this);
-                    this[fieldName] = value;
-                }
-            };
-            this._resetDescriptors[fieldName] = {
-                writable: true,
-                enumerable: true
-            };
-        }
-
-        for(const fieldName of this._fieldNames) {
-            this._freezePrimaryKeyDescriptors[fieldName] = {
-                writable: false,
-                enumerable: true
-            };
-        }
-
+    _versionInfoKey(version: number): Uint8Array {
+        return new DataPack()
+            .write(VERSION_INFO_PREFIX)
+            .write(this._indexId!)
+            .write(version)
+            .toUint8Array();
     }
 
-    /** Serialize the current version fingerprint as a DataPack object. */
-    _serializeVersionValue(): Uint8Array {
-        const fields: [string, Uint8Array][] = [];
-        for (const fieldName of this._nonKeyFields) {
-            const tp = new DataPack();
-            serializeType(this._MyModel.fields[fieldName].type, tp);
-            fields.push([fieldName, tp.toUint8Array()]);
-        }
-        return new DataPack().write({
-            migrateHash: this._currentMigrateHash,
-            fields,
-            secondaryKeys: new Set((this._MyModel._secondaries || []).map(sec => sec._signature!)),
-        }).toUint8Array();
-    }
-
-    /** Look up or create the current version number for this primary index. */
-    async _initVersioning(): Promise<void> {
-        // Compute migrate hash from function source
-        const migrateFn = (this._MyModel as any)._original?.migrate ?? (this._MyModel as any).migrate;
-        this._currentMigrateHash = migrateFn ? hashFunction(migrateFn) : 0;
-
-        const currentValueBytes = this._serializeVersionValue();
-
-        // Scan last 20 version info rows for this primary index
+    async _ensureVersionEntry(currentValueBytes: Uint8Array): Promise<{ version: number; created: boolean }> {
         const scanStart = new DataPack().write(VERSION_INFO_PREFIX).write(this._indexId!);
         const scanEnd = scanStart.clone(true).increment();
 
@@ -543,12 +379,12 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
                     txnId,
                     scanEnd ? toBuffer(scanEnd.toUint8Array()) : undefined,
                     toBuffer(scanStart.toUint8Array()),
-                    true // reverse - scan newest versions first
+                    true,
                 );
 
                 let count = 0;
                 let maxVersion = 0;
-                let found = false;
+                let matchingVersion: number | undefined;
 
                 try {
                     while (count < 20) {
@@ -557,15 +393,14 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
                         count++;
 
                         const keyPack = new DataPack(new Uint8Array(raw.key));
-                        keyPack.readNumber(); // skip VERSION_INFO_PREFIX
-                        keyPack.readNumber(); // skip indexId
+                        keyPack.readNumber();
+                        keyPack.readNumber();
                         const versionNum = keyPack.readNumber();
                         maxVersion = Math.max(maxVersion, versionNum);
 
                         const valueBytes = new Uint8Array(raw.value);
                         if (bytesEqual(valueBytes, currentValueBytes)) {
-                            this._currentVersion = versionNum;
-                            found = true;
+                            matchingVersion = versionNum;
                             break;
                         }
                     }
@@ -573,25 +408,18 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
                     lowlevel.closeIterator(iteratorId);
                 }
 
-                if (found) {
+                if (matchingVersion !== undefined) {
                     lowlevel.abortTransaction(txnId);
-                    return;
+                    return { version: matchingVersion, created: false };
                 }
 
-                // No match found - create new version
-                this._currentVersion = maxVersion + 1;
-                const versionKey = new DataPack()
-                    .write(VERSION_INFO_PREFIX)
-                    .write(this._indexId!)
-                    .write(this._currentVersion)
-                    .toUint8Array();
-                dbPut(txnId, versionKey, currentValueBytes);
-                if (logLevel >= 1) console.log(`[edinburgh] Create version ${this._currentVersion} for ${this}`);
+                const version = maxVersion + 1;
+                dbPut(txnId, this._versionInfoKey(version), currentValueBytes);
+                if (logLevel >= 1) console.log(`[edinburgh] Create version ${version} for ${this}`);
 
                 const commitResult = lowlevel.commitTransaction(txnId);
                 const commitSeq = typeof commitResult === 'number' ? commitResult : await commitResult;
-                if (commitSeq > 0) return;
-                // Race - retry
+                if (commitSeq > 0) return { version, created: true };
             } catch (e) {
                 try { lowlevel.abortTransaction(txnId); } catch {}
                 throw e;
@@ -599,229 +427,34 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
         }
     }
 
-    /**
-     * Get a model instance by primary key values.
-     * @param args The primary key values.
-     * @returns The model instance if found, undefined otherwise.
-     * 
-     * @example
-     * ```typescript
-     * const user = User.get("john_doe");
-     * ```
-     */
-    get(...args: IndexArgTypes<M, F>): InstanceType<M> | undefined {
-        return this._get(currentTxn(), args, true);
-    }
-
-    /**
-     * Does the same as as `get()`, but will delay loading the instance from disk until the first
-     * property access. In case it turns out the instance doesn't exist, an error will be thrown
-     * at that time.
-     * @param args Primary key field values. (Or a single Uint8Array containing the key.)
-     * @returns The (lazily loaded) model instance.
-     */
-    getLazy(...args: IndexArgTypes<M, F>): InstanceType<M> {
-        return this._get(currentTxn(), args, false);
-    }
-
-    _get(txn: Transaction, args: IndexArgTypes<M, F> | Uint8Array, loadNow: false | Uint8Array): InstanceType<M>;
-    _get(txn: Transaction, args: IndexArgTypes<M, F> | Uint8Array, loadNow: true): InstanceType<M> | undefined;
-    _get(txn: Transaction, args: IndexArgTypes<M, F> | Uint8Array, loadNow: boolean | Uint8Array) {
-        let key: Uint8Array, keyParts;
-        if (args instanceof Uint8Array) {
-            key = args;
-        } else {
-            key = this._argsToKeyBytes(args as IndexArgTypes<M, F>, false).toUint8Array();
-            keyParts = args;
-        }
-
-        const keyHash = hashBytes(key);
-        const cached = txn.instancesByPk.get(keyHash) as InstanceType<M>;
-        if (cached) {
-            if (loadNow && loadNow !== true) {
-                // The object already exists, but it may still be lazy-loaded
-                Object.defineProperties(cached, this._resetDescriptors);
-                this._setNonKeyValues(cached, loadNow);
-            }
-            return cached;
-        }
-        
-        let valueBuffer: Uint8Array | undefined;
-        if (loadNow) {
-            if (loadNow === true) {
-                valueBuffer = dbGet(txn.id, key);
-                if (logLevel >= 3) {
-                    console.log(`[edinburgh] Get ${this} key=${new DataPack(key)} result=${valueBuffer && new DataPack(valueBuffer)}`);
-                }
-                if (!valueBuffer) return;
-            } else {
-                valueBuffer = loadNow; // Uint8Array
-            }
-        }
-        
-        // This is a primary index. So we can now deserialize all primary and non-primary fields into instance values.
-        const model = new (this._MyModel as any)(undefined, txn) as InstanceType<M>;
-
-        // Set to the original value for all fields that are loaded by _setLoadedField
-        model._oldValues = {};
-
-        // Set the primary key fields on the model
-        if (keyParts) {
-            let index = 0;
-            for(const fieldName of this._fieldTypes.keys()) {
-                model._setLoadedField(fieldName, keyParts[index++] as any);
-            }
-        } else {
-            const bytes = new DataPack(key);
-            assert(bytes.readNumber() === this._MyModel._primary._indexId); // Skip index id
-            for(const [fieldName, fieldType] of this._fieldTypes.entries()) {
-                model._setLoadedField(fieldName, fieldType.deserialize(bytes));
-            }
-        }
-
-        // Store the primary key on the model, set the hash, and freeze the primary key fields.
-        model._setPrimaryKey(key, keyHash);
-
-        if (valueBuffer) {
-            // Non-lazy load. Set other fields
-            this._setNonKeyValues(model, valueBuffer);
-        } else {
-            // Lazy - set getters for other fields
-            Object.defineProperties(model, this._lazyDescriptors);
-            // When creating a lazy instance, we don't need to add it to txn.instances yet, as only the
-            // primary key fields are loaded, and they cannot be modified (so we don't need to check).
-            // When any other field is set, that will trigger a lazy-load, adding the instance to
-            // txn.instances.
-        }
-
-        txn.instancesByPk.set(keyHash, model);
-        return model;
-    }
-
-    /**
-     * Serialize primary key bytes from field values: indexId + typed field values.
-     */
-    _serializeKey(data: Record<string, any>): DataPack {
+    _serializePK(data: Record<string, any>): DataPack {
         const bytes = new DataPack();
         bytes.write(this._indexId!);
-        for (const [fieldName, fieldType] of this._fieldTypes.entries()) {
+        for (const [fieldName, fieldType] of this._indexFields.entries()) {
             fieldType.serialize(data[fieldName], bytes);
         }
         return bytes;
     }
 
-    _lazyNow(model: InstanceType<M>) {
-        let valueBuffer = dbGet(model._txn.id, model._primaryKey!);
-        if (logLevel >= 3) {
-            console.log(`[edinburgh] Lazy retrieve ${this} key=${new DataPack(model._primaryKey)} result=${valueBuffer && new DataPack(valueBuffer)}`);
-        }
-        if (!valueBuffer) throw new DatabaseError(`Lazy-loaded ${model.constructor.name}#${model._primaryKey} does not exist`, 'LAZY_FAIL');
-        Object.defineProperties(model, this._resetDescriptors);
-        this._setNonKeyValues(model, valueBuffer);
-    }
-
-    _setNonKeyValues(model: InstanceType<M>, valueArray: Uint8Array) {
-        const fieldConfigs = this._MyModel.fields;
-        const valuePack = new DataPack(valueArray);
-        const version = valuePack.readNumber();
-
-        if (version === this._currentVersion) {
-            for (const fieldName of this._nonKeyFields) {
-                model._setLoadedField(fieldName, fieldConfigs[fieldName].type.deserialize(valuePack));
-            }
-        } else {
-            this._migrateFromVersion(model, version, valuePack);
-        }
-    }
-
-    /** Load a version's info from DB, caching the result. */
-    _loadVersionInfo(txnId: number, version: number): VersionInfo {
-        let info = this._versions.get(version);
-        if (info) return info;
-
-        const key = new DataPack()
-            .write(VERSION_INFO_PREFIX)
-            .write(this._indexId!)
-            .write(version)
-            .toUint8Array();
-        const raw = dbGet(txnId, key);
-        if (!raw) throw new DatabaseError(`Version ${version} info not found for index ${this}`, 'CONSISTENCY_ERROR');
-
-        const obj = new DataPack(raw).read() as any;
-        if (!obj || typeof obj.migrateHash !== 'number' || !Array.isArray(obj.fields) || !(obj.secondaryKeys instanceof Set))
-            throw new DatabaseError(`Version ${version} info is corrupted for index ${this}`, 'CONSISTENCY_ERROR');
-
-        const nonKeyFields = new Map<string, TypeWrapper<any>>();
-        for (const [name, typeBytes] of obj.fields) {
-            nonKeyFields.set(name, deserializeType(new DataPack(typeBytes), 0));
-        }
-
-        info = { migrateHash: obj.migrateHash, nonKeyFields, secondaryKeys: obj.secondaryKeys as Set<string> };
-        this._versions.set(version, info);
-        return info;
-    }
-
-    /** Deserialize and migrate a row from an old version. */
-    _migrateFromVersion(model: InstanceType<M>, version: number, valuePack: DataPack) {
-        const versionInfo = this._loadVersionInfo(model._txn.id, version);
-
-        // Deserialize using old field types into a plain record
-        const record: Record<string, any> = {};
-        for (const [name] of this._fieldTypes.entries()) record[name] = (model as any)[name]; // pk fields
-        for (const [name, type] of versionInfo.nonKeyFields.entries()) {
-            record[name] = type.deserialize(valuePack);
-        }
-
-        // Run migrate() if it exists
-        const migrateFn = (this._MyModel as any).migrate;
-        if (migrateFn) migrateFn(record);
-
-        // Set non-key fields on model from the (possibly migrated) record
-        for (const fieldName of this._nonKeyFields) {
-            if (fieldName in record) {
-                model._setLoadedField(fieldName, record[fieldName]);
-            } else if (fieldName in model) {
-                // Instantiate the default value
-                model._setLoadedField(fieldName, (model as any)[fieldName]);
-            } else {
-                throw new DatabaseError(`Field ${fieldName} is missing in migrated data for ${model}`, 'MIGRATION_ERROR');
-            }
-        }
-    }
-
-    _keyToArray(key: Uint8Array): IndexArgTypes<M, F> {
+    _pkToArray(key: Uint8Array): ARGS {
         const bytes = new DataPack(key);
         assert(bytes.readNumber() === this._indexId);
         const result = [] as any[];
-        for (const fieldType of this._fieldTypes.values()) {
+        for (const fieldType of this._indexFields.values()) {
             result.push(fieldType.deserialize(bytes));
         }
-        return result as any;
+        return result as unknown as ARGS;
     }
 
-    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M> {
-        return this._get(txn, new Uint8Array(keyBuffer), new Uint8Array(valueBuffer));
-    }
-
-    _getTypeName(): string {
-        return 'primary';
-    }
-
-    _write(txn: Transaction, primaryKey: Uint8Array, data: Record<string, any>) {
-        let valueBytes = new DataPack();
-        valueBytes.write(this._currentVersion);
-        const fieldConfigs = this._MyModel.fields as any;
-        for (const fieldName of this._nonKeyFields) {
-            const fieldConfig = fieldConfigs[fieldName] as FieldConfig<unknown>;
-            fieldConfig.type.serialize(data[fieldName], valueBytes);
-        }
+    _writePK(txn: Transaction, primaryKey: Uint8Array, data: Record<string, any>) {
+        const valueBytes = this._serializeValue(data);
         if (logLevel >= 2) {
-            console.log(`[edinburgh] Write ${this} key=${new DataPack(primaryKey)} value=${valueBytes}`);
+            console.log(`[edinburgh] Write ${this} key=${new DataPack(primaryKey)} value=${new DataPack(valueBytes)}`);
         }
-        dbPut(txn.id, primaryKey, valueBytes.toUint8Array());
+        dbPut(txn.id, primaryKey, valueBytes);
     }
 
-    _delete(txn: Transaction, primaryKey: Uint8Array, _data: Record<string, any>) {
+    _deletePK(txn: Transaction, primaryKey: Uint8Array, _data: Record<string, any>) {
         if (logLevel >= 2) {
             console.log(`[edinburgh] Delete ${this} key=${new DataPack(primaryKey)}`);
         }
@@ -829,38 +462,33 @@ export class PrimaryIndex<M extends typeof Model, const F extends readonly (keyo
     }
 }
 
-// OLMDB does not support storing empty values, so we use a single byte value for secondary indexes.
+function toArray<ARG_TYPES extends readonly any[]>(args: ArrayOrOnlyItem<ARG_TYPES>): Partial<ARG_TYPES> {
+    return (Array.isArray(args) ? args : [args]) as Partial<ARG_TYPES>;
+}
+
 const SECONDARY_VALUE = new DataPack().write(undefined).toUint8Array();
 
-/**
- * Abstract base for all non-primary indexes (unique and secondary).
- * Provides shared key serialization, write/delete/update logic.
- */
-export abstract class NonPrimaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends BaseIndex<M, F, ARGS> {
+export abstract class NonPrimaryIndex<ITEM extends IndexItem, const F extends readonly (keyof ITEM & string)[], ARGS extends readonly any[] = IndexArgTypes<ITEM, F>> extends BaseIndex<ITEM, F, ARGS> {
     _resetIndexFieldDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
 
-    constructor(MyModel: M, fieldsOrFn: F | ((data: any) => any[])) {
-        super(MyModel, typeof fieldsOrFn === 'function' ? [] as any : fieldsOrFn);
+    constructor(tableName: string, fieldsOrFn: F | ((data: any) => any[]), protected _loadPrimary: LoadPrimary<ITEM>, queueInitialization: QueueInitialization) {
+        super(tableName, typeof fieldsOrFn === 'function' ? [] as any : fieldsOrFn);
         if (typeof fieldsOrFn === 'function') this._computeFn = fieldsOrFn;
-        (this._MyModel._secondaries ||= []).push(this);
-        scheduleInit();
+        queueInitialization();
     }
 
-    async _delayedInit() {
-        await super._delayedInit();
-        for (const fieldName of this._fieldTypes.keys()) {
+    async _initializeIndex(fields: FieldTypes, reset = false, primaryFieldTypes?: FieldTypes) {
+        if (reset) this._resetIndexFieldDescriptors = {};
+        await super._initializeIndex(fields, reset, primaryFieldTypes);
+        for (const fieldName of this._indexFields.keys()) {
             this._resetIndexFieldDescriptors[fieldName] = {
                 writable: true,
                 configurable: true,
-                enumerable: true
+                enumerable: true,
             };
         }
     }
 
-    /**
-     * Build DataPack key prefixes (indexId + field/computed values). Returns [] to skip indexing.
-     * SecondaryIndex appends the primary key to each pack before converting to Uint8Array.
-     */
     _buildKeyPacks(data: Record<string, any>): DataPack[] {
         if (this._computeFn) {
             return this._computeFn(data).map((value: any) => {
@@ -870,48 +498,41 @@ export abstract class NonPrimaryIndex<M extends typeof Model, const F extends re
                 return bytes;
             });
         }
-        for (const fieldName of this._fieldTypes.keys()) {
+        for (const fieldName of this._indexFields.keys()) {
             if (data[fieldName] == null) return [];
         }
         const bytes = new DataPack();
         bytes.write(this._indexId!);
-        for (const [fieldName, fieldType] of this._fieldTypes.entries()) {
+        for (const [fieldName, fieldType] of this._indexFields.entries()) {
             fieldType.serialize(data[fieldName], bytes);
         }
         return [bytes];
     }
 
-    /** Serialize all index keys. Default: key = indexId + fields. */
     _serializeKeys(primaryKey: Uint8Array, data: Record<string, any>): Uint8Array[] {
-        return this._buildKeyPacks(data).map(p => p.toUint8Array());
+        return this._buildKeyPacks(data).map(pack => pack.toUint8Array());
     }
 
-    /** Write a single pre-serialized key — subclasses define value and uniqueness check. */
     abstract _writeKey(txn: Transaction, key: Uint8Array, primaryKey: Uint8Array): void;
 
-    _write(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>): void {
+    _write(txn: Transaction, primaryKey: Uint8Array, model: ITEM): void {
         for (const key of this._serializeKeys(primaryKey, model as any)) {
             if (logLevel >= 2) console.log(`[edinburgh] Write ${this} key=${new DataPack(key)}`);
             this._writeKey(txn, key, primaryKey);
         }
     }
 
-    _delete(txn: Transaction, primaryKey: Uint8Array, model: InstanceType<M>): void {
+    _delete(txn: Transaction, primaryKey: Uint8Array, model: ITEM): void {
         for (const key of this._serializeKeys(primaryKey, model as any)) {
             if (logLevel >= 2) console.log(`[edinburgh] Delete ${this} key=${new DataPack(key)}`);
             dbDel(txn.id, key);
         }
     }
 
-    /**
-     * Granular update: diff old vs new keys and only insert/delete what changed.
-     * For non-computed indexes, uses a fast path that checks which fields changed.
-     */
-    _update(txn: Transaction, primaryKey: Uint8Array, newData: InstanceType<M>, oldData: Record<string, any>): number {
+    _update(txn: Transaction, primaryKey: Uint8Array, newData: ITEM, oldData: Record<string, any>): number {
         const oldKeys = this._serializeKeys(primaryKey, oldData);
         const newKeys = this._serializeKeys(primaryKey, newData as any);
 
-        // Fast path: no changes and max 1 key
         if (oldKeys.length === newKeys.length && (oldKeys.length === 0 || bytesEqual(oldKeys[0], newKeys[0]))) {
             return 0;
         }
@@ -939,23 +560,26 @@ export abstract class NonPrimaryIndex<M extends typeof Model, const F extends re
     }
 }
 
-/**
- * Unique index that stores references to the primary key.
- */
-export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends NonPrimaryIndex<M, F, ARGS> {
+export class UniqueIndex<ITEM extends IndexItem, const F extends readonly (keyof ITEM & string)[], ARGS extends readonly any[] = IndexArgTypes<ITEM, F>> extends NonPrimaryIndex<ITEM, F, ARGS> {
+    constructor(tableName: string, fieldsOrFn: F | ((data: any) => any[]), loadPrimary: LoadPrimary<ITEM>, queueInitialization: QueueInitialization) {
+        super(tableName, fieldsOrFn, loadPrimary, queueInitialization);
+    }
 
-    get(...args: ARGS): InstanceType<M> | undefined {
+    _getTypeName(): string {
+        return this._computeFn ? 'fn-unique' : 'unique';
+    }
+
+    getPK(...args: ARGS): ITEM | undefined {
         const txn = currentTxn();
-        let keyBuffer = this._argsToKeyBytes(args, false).toUint8Array();
+        const keyBuffer = this._argsToKeyBytes(args, false).toUint8Array();
 
-        let valueBuffer = dbGet(txn.id, keyBuffer);
+        const valueBuffer = dbGet(txn.id, keyBuffer);
         if (logLevel >= 3) {
             console.log(`[edinburgh] Get ${this} key=${new DataPack(keyBuffer)} result=${valueBuffer}`);
         }
         if (!valueBuffer) return;
 
-        const pk = this._MyModel._primary!;
-        const result = pk._get(txn, valueBuffer, true);
+        const result = this._loadPrimary(txn, valueBuffer, true);
         if (!result) throw new DatabaseError(`Unique index ${this} points at non-existing primary for key: ${args.join(', ')}`, 'CONSISTENCY_ERROR');
         return result;
     }
@@ -965,45 +589,46 @@ export class UniqueIndex<M extends typeof Model, const F extends readonly (keyof
         dbPut(txn.id, key, primaryKey);
     }
 
-    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): InstanceType<M> {
-        const pk = this._MyModel._primary!;
-        const model = pk._get(txn, new Uint8Array(valueBuffer), false);
+    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): ITEM {
+        const model = this._loadPrimary(txn, new Uint8Array(valueBuffer), false)!;
 
-        if (this._fieldTypes.size > 0) {
+        if (this._indexFields.size > 0) {
             const keyPack = new DataPack(new Uint8Array(keyBuffer));
-            keyPack.readNumber(); // discard index id
+            keyPack.readNumber();
 
             Object.defineProperties(model, this._resetIndexFieldDescriptors);
-            for(const [name, fieldType] of this._fieldTypes.entries()) {
+            for (const [name, fieldType] of this._indexFields.entries()) {
                 model._setLoadedField(name, fieldType.deserialize(keyPack));
             }
         }
 
-        return model;
-    }
+        model._restoreLazyFields?.();
 
-    _getTypeName(): string {
-        return this._computeFn ? 'fn-unique' : 'unique';
+        return model;
     }
 }
 
-/**
- * Secondary index for non-unique lookups.
- */
-export class SecondaryIndex<M extends typeof Model, const F extends readonly (keyof InstanceType<M> & string)[], ARGS extends readonly any[] = IndexArgTypes<M, F>> extends NonPrimaryIndex<M, F, ARGS> {
+export class SecondaryIndex<ITEM extends IndexItem, const F extends readonly (keyof ITEM & string)[], ARGS extends readonly any[] = IndexArgTypes<ITEM, F>> extends NonPrimaryIndex<ITEM, F, ARGS> {
+    constructor(tableName: string, fieldsOrFn: F | ((data: any) => any[]), loadPrimary: LoadPrimary<ITEM>, queueInitialization: QueueInitialization) {
+        super(tableName, fieldsOrFn, loadPrimary, queueInitialization);
+    }
 
-    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, _valueBuffer: ArrayBuffer): InstanceType<M> {
+    _getTypeName(): string {
+        return this._computeFn ? 'fn-secondary' : 'secondary';
+    }
+
+    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, _valueBuffer: ArrayBuffer): ITEM {
         const keyPack = new DataPack(new Uint8Array(keyBuffer));
-        keyPack.readNumber(); // discard index id
-        
-        const indexFields = new Map();
-        for (const [name, type] of this._fieldTypes.entries()) {
-            indexFields.set(name, type.deserialize(keyPack));
+        keyPack.readNumber();
+
+        const indexFields = new Map<string, any>();
+        for (const [name, fieldType] of this._indexFields.entries()) {
+            indexFields.set(name, fieldType.deserialize(keyPack));
         }
-        if (this._computeFn) keyPack.read(); // skip computed value
+        if (this._computeFn) keyPack.read();
 
         const primaryKey = keyPack.readUint8Array();
-        const model = this._MyModel._primary!._get(txn, primaryKey, false);
+        const model = this._loadPrimary(txn, primaryKey, false)!;
 
         if (indexFields.size > 0) {
             Object.defineProperties(model, this._resetIndexFieldDescriptors);
@@ -1012,94 +637,86 @@ export class SecondaryIndex<M extends typeof Model, const F extends readonly (ke
             }
         }
 
+        model._restoreLazyFields?.();
+
         return model;
     }
 
     _serializeKeys(primaryKey: Uint8Array, data: Record<string, any>): Uint8Array[] {
-        return this._buildKeyPacks(data).map(p => { p.write(primaryKey); return p.toUint8Array(); });
+        return this._buildKeyPacks(data).map(pack => {
+            pack.write(primaryKey);
+            return pack.toUint8Array();
+        });
     }
 
     _writeKey(txn: Transaction, key: Uint8Array, _primaryKey: Uint8Array): void {
         dbPut(txn.id, key, SECONDARY_VALUE);
     }
-
-    _getTypeName(): string {
-        return this._computeFn ? 'fn-secondary' : 'secondary';
-    }
 }
 
-/**
- * Dump database contents for debugging.
- * 
- * Prints all indexes and their data to the console for inspection.
- * This is primarily useful for development and debugging purposes.
- */
 export function dump() {
     const txn = currentTxn();
-    let indexesById = new Map<number, {name: string, type: string, fields: Record<string, TypeWrapper<any>>}>();
-    let versions = new Map<number, Map<number, Map<string, TypeWrapper<any>>>>();
-    console.log("--- edinburgh database dump ---")
+    const indexesById = new Map<number, {name: string, type: string, fields: Record<string, TypeWrapper<any>>}>();
+    const versions = new Map<number, Map<number, Map<string, TypeWrapper<any>>>>();
+    console.log("--- edinburgh database dump ---");
     const iteratorId = lowlevel.createIterator(txn.id, undefined, undefined, false);
     try {
-    while (true) {
-        const raw = lowlevel.readIterator(iteratorId);
-        if (!raw) break;
-        const kb = new DataPack(new Uint8Array(raw.key));
-        const vb = new DataPack(new Uint8Array(raw.value));
-        const indexId = kb.readNumber();
-        if (indexId === MAX_INDEX_ID_PREFIX) {
-            console.log("* Max index id", vb.readNumber());
-        } else if (indexId === VERSION_INFO_PREFIX) {
-            const idxId = kb.readNumber();
-            const version = kb.readNumber();
-            const obj = vb.read() as any;
-            const nonKeyFields = new Map<string, TypeWrapper<any>>();
-            for (const [name, typeBytes] of obj.fields) {
-                nonKeyFields.set(name, deserializeType(new DataPack(typeBytes), 0));
-            }
-            if (!versions.has(idxId)) versions.set(idxId, new Map());
-            versions.get(idxId)!.set(version, nonKeyFields);
-            console.log(`* Version ${version} for index ${idxId}: fields=[${[...nonKeyFields.keys()].join(',')}]`);
-        } else if (indexId === INDEX_ID_PREFIX) {
-            const name = kb.readString();
-            const type = kb.readString();
-            const fields: Record<string, TypeWrapper<any>> = {};
-            while(kb.readAvailable()) {
-                const name = kb.read();
-                if (typeof name !== 'string') break; // undefined separator or computed hash
-                fields[name] = deserializeType(kb, 0);
-            }
+        while (true) {
+            const raw = lowlevel.readIterator(iteratorId);
+            if (!raw) break;
+            const kb = new DataPack(new Uint8Array(raw.key));
+            const vb = new DataPack(new Uint8Array(raw.value));
+            const indexId = kb.readNumber();
+            if (indexId === MAX_INDEX_ID_PREFIX) {
+                console.log("* Max index id", vb.readNumber());
+            } else if (indexId === VERSION_INFO_PREFIX) {
+                const idxId = kb.readNumber();
+                const version = kb.readNumber();
+                const obj = vb.read() as any;
+                const nonKeyFields = new Map<string, TypeWrapper<any>>();
+                for (const [name, typeBytes] of obj.fields) {
+                    nonKeyFields.set(name, deserializeType(new DataPack(typeBytes), 0));
+                }
+                if (!versions.has(idxId)) versions.set(idxId, new Map());
+                versions.get(idxId)!.set(version, nonKeyFields);
+                console.log(`* Version ${version} for index ${idxId}: fields=[${[...nonKeyFields.keys()].join(',')}]`);
+            } else if (indexId === INDEX_ID_PREFIX) {
+                const name = kb.readString();
+                const type = kb.readString();
+                const fields: Record<string, TypeWrapper<any>> = {};
+                while (kb.readAvailable()) {
+                    const fieldName = kb.read();
+                    if (typeof fieldName !== 'string') break;
+                    fields[fieldName] = deserializeType(kb, 0);
+                }
 
-            const indexId = vb.readNumber();
-            console.log(`* Index definition ${indexId}:${name}:${type}[${Object.keys(fields).join(',')}]`);
-            indexesById.set(indexId, {name, type, fields});
-        } else if (indexId > 0 && indexesById.has(indexId)) {
-            const index = indexesById.get(indexId)!;
-            let name, type, rowKey: any, rowValue: any;
-            if (index) {
-                name = index.name;
-                type = index.type;
-                const fields = index.fields;
-                rowKey = {};
-                for(const [fieldName, fieldType] of Object.entries(fields)) {
+                const definedIndexId = vb.readNumber();
+                console.log(`* Index definition ${definedIndexId}:${name}:${type}[${Object.keys(fields).join(',')}]`);
+                indexesById.set(definedIndexId, {name, type, fields});
+            } else if (indexId > 0 && indexesById.has(indexId)) {
+                const index = indexesById.get(indexId)!;
+                let rowKey: any = {};
+                let rowValue: any;
+                for (const [fieldName, fieldType] of Object.entries(index.fields)) {
                     rowKey[fieldName] = fieldType.deserialize(kb);
                 }
-                if (type === 'primary') {
+                if (index.type === 'primary') {
                     const version = vb.readNumber();
-                    const vFields = versions.get(indexId)?.get(version);
-                    if (vFields) {
+                    const valueFields = versions.get(indexId)?.get(version);
+                    if (valueFields) {
                         rowValue = {};
-                        for (const [fieldName, fieldType] of vFields) {
+                        for (const [fieldName, fieldType] of valueFields) {
                             rowValue[fieldName] = fieldType.deserialize(vb);
                         }
                     }
                 }
+                console.log(`* Row for ${indexId}:${index.name}:${index.type}`, rowKey ?? kb, rowValue ?? vb);
+            } else {
+                console.log(`* Unhandled '${indexId}' key=${kb} value=${vb}`);
             }
-            console.log(`* Row for ${indexId}:${name}:${type}`, rowKey ?? kb, rowValue ?? vb);
-        } else {
-            console.log(`* Unhandled '${indexId}' key=${kb} value=${vb}`);
         }
+    } finally {
+        lowlevel.closeIterator(iteratorId);
     }
-    } finally { lowlevel.closeIterator(iteratorId); }
-    console.log("--- end ---")
+    console.log("--- end ---");
 }
