@@ -92,7 +92,7 @@ export const pendingModelInits = new Set<AnyModelClass>();
 
 // These static members are attached dynamically in defineModel(), so 'declare' tells TypeScript
 // they exist at runtime without emitting duplicate class fields that would shadow those assignments.
-export class ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> extends PrimaryKey<Model<FIELDS>, readonly (keyof FIELDS & string)[], PKA> {
+class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> extends PrimaryKey<Model<FIELDS>, readonly (keyof FIELDS & string)[], PKA> {
     // Runtime table identifier used for index naming and diagnostics.
     declare tableName: string;
     // Field schema map used for validation and serialization.
@@ -150,11 +150,11 @@ export class ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
                     configurable: true,
                     enumerable: true,
                     get(this: Model<FIELDS>) {
-                        (this.constructor as AnyModelClass)._lazyLoad(this);
+                        this.constructor._lazyLoad(this);
                         return this[fieldName];
                     },
                     set(this: Model<FIELDS>, value: any) {
-                        (this.constructor as AnyModelClass)._lazyLoad(this);
+                        this.constructor._lazyLoad(this);
                         this[fieldName] = value;
                     },
                 };
@@ -221,7 +221,7 @@ export class ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
             }
         }
 
-        const model = Object.create(this.prototype) as Model<FIELDS>;
+        const model = Object.create((this as any).prototype) as Model<FIELDS>;
         model._txn = txn;
         model._oldValues = {};
         txn.instances.set(keyHash, model);
@@ -383,20 +383,14 @@ export class ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
     }
 }
 
-export interface ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> {
+export const ModelClass = ModelClassRuntime;
+
+export type ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> = ModelClassRuntime<FIELDS, PKA, UNIQUE, INDEX> & {
     new (initial?: Partial<FIELDS>, txn?: Transaction): Model<FIELDS>;
-    find(opts: FindOptions<PKA, 'first'>): Model<FIELDS> | undefined;
-    find(opts: FindOptions<PKA, 'single'>): Model<FIELDS>;
-    find(opts?: FindOptions<PKA>): IndexRangeIterator<Model<FIELDS>>;
-    batchProcess(
-        opts: FindOptions<PKA> & { limitSeconds?: number; limitRows?: number },
-        callback: (row: Model<FIELDS>) => any,
-    ): Promise<void>;
-    batchProcessBy(
-        name: string & keyof (UNIQUE & INDEX),
-        opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[string & keyof (UNIQUE & INDEX)]>> & { limitSeconds?: number; limitRows?: number },
-        callback: (row: Model<FIELDS>) => any,
-    ): Promise<void>;
+};
+
+export interface ModelBase {
+    constructor: AnyModelClass;
 }
 
 /**
@@ -436,7 +430,7 @@ export function defineModel<
     const loadPrimary = (txn: Transaction, primaryKey: Uint8Array, loadNow: boolean | Uint8Array) => MockModel._get(txn, primaryKey, loadNow);
 
     cls.prototype.constructor = MockModel;
-    Object.setPrototypeOf(MockModel, ModelClass.prototype);
+    Object.setPrototypeOf(MockModel, ModelClassRuntime.prototype);
     MockModel.prototype = cls.prototype;
     MockModel._original = cls;
 
@@ -519,13 +513,6 @@ export function defineModel<
     modelRegistry[MockModel.tableName] = MockModel;
     pendingModelInits.add(MockModel);
     return MockModel;
-}
-
-/**
- * Model interface that ensures proper typing for the constructor property.
- */
-export interface ModelBase {
-    constructor: AnyModelClass;
 }
 
 /**
@@ -725,7 +712,8 @@ export abstract class ModelBase {
 
         // Add old values of changed fields to 'changed'.
         const changed: Record<string, any> = {};
-        const fields = this.constructor.fields;
+        const cls = this.constructor;
+        const fields = cls.fields;
         for(const fieldName in oldValues) {
             const oldValue = oldValues[fieldName];
             const newValue = this[fieldName as keyof ModelBase];
@@ -737,7 +725,7 @@ export abstract class ModelBase {
         if (isObjectEmpty(changed)) return; // No changes, nothing to do
 
         // Make sure primary has not been changed
-        for (const field of this.constructor._indexFields.keys()) {
+        for (const field of cls._indexFields.keys()) {
             if (changed.hasOwnProperty(field)) {
                 throw new DatabaseError(`Cannot modify primary key field: ${field}`, "CHANGE_PRIMARY");
             }
@@ -750,10 +738,10 @@ export abstract class ModelBase {
 
         // Update the primary index
         const pk = this._primaryKey!;
-        this.constructor._writePK(txn, pk, this);
+        cls._writePK(txn, pk, this);
 
         // Update any secondaries with changed fields
-        for (const index of Object.values(this.constructor._secondaries || {})) {
+        for (const index of Object.values(cls._secondaries || {})) {
             index._update(txn, pk, this, oldValues);
         }
         return changed;
@@ -813,11 +801,12 @@ export abstract class ModelBase {
      */
     validate(raise: boolean = false): Error[] {
         const errors: Error[] = [];
+        const cls = this.constructor;
         
-        for (const [key, fieldConfig] of Object.entries(this.constructor.fields)) {
+        for (const [key, fieldConfig] of Object.entries(cls.fields)) {
             let e = fieldConfig.type.getError((this as any)[key]);
             if (e) {
-                e = addErrorPath(e, this.constructor.tableName+"."+key);
+                e = addErrorPath(e, cls.tableName+"."+key);
                 if (raise) throw e;
                 errors.push(e as Error);
             }
@@ -895,5 +884,5 @@ export async function deleteEverything(): Promise<void> {
  * A model instance, including its user-defined fields.
  * @template FIELDS - The fields defined on this model.
  */
-export type Model<FIELDS> = FIELDS & InstanceType<typeof ModelBase>;
+export type Model<FIELDS> = FIELDS & ModelBase;
 export const Model = ModelBase;
