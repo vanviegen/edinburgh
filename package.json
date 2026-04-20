@@ -1,6 +1,6 @@
 {
   "name": "edinburgh",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "author": "Frank van Viegen",
   "devDependencies": {
     "@types/bun": "^1.2.16",

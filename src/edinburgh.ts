@@ -7,7 +7,9 @@ import { pendingModelInits } from "./models.js";
 // Re-export public API from models
 export {
     Model,
-    ModelClass,
+    type ModelClass,
+    type AnyModelClass,
+    type ModelBase,
     defineModel,
     deleteEverything,
     field,

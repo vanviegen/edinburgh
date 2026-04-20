@@ -479,10 +479,18 @@ test("Type system comprehensive validation", async () => {
 });
 
 test("Advanced model lifecycle and registration", async () => {
+    class StaticHelperBase {
+        static describe(this: { tableName: string }) {
+            return `model:${this.tableName}`;
+        }
+    }
+
     // Test automatic ID field creation
-    const AutoIdModel = E.defineModel("AutoIdModel", class {
+    const AutoIdModel = E.defineModel("AutoIdModel", class extends StaticHelperBase {
         name = E.field(E.string, {description: "Name field"});
     }, { override: true });
+
+    expect(AutoIdModel.describe()).toBe("model:AutoIdModel");
     
     await E.transact(() => {
         const model = new AutoIdModel({name: "test"});
@@ -518,6 +526,11 @@ test("Advanced model lifecycle and registration", async () => {
         expect(b.isValid()).toBe(true);
         a.preventPersist();
         b.preventPersist();
+    });
+
+    await E.transact(() => {
+        const model = new AutoIdModel({name: "meta"});
+        model.preventPersist();
     });
 });
 
@@ -1464,6 +1477,34 @@ test("lazy migration adds a new non-key field", async () => {
         expectErrorCode("MIGRATION_ERROR", () => {
             LazyMigV3.get("row2");
         });
+    });
+});
+
+test("lazy migration keeps inherited static migrate", async () => {
+    const InheritedMigV1 = E.defineModel("InheritedMigrateTest", class {
+        id = E.field(E.string);
+        name = E.field(E.string);
+    }, { pk: "id" });
+
+    await E.transact(() => {
+        new InheritedMigV1({id: "row1", name: "Alice"});
+    });
+
+    class InheritedMigrateBase {
+        static migrate(record: Record<string, any>) {
+            record.role = record.name === "Alice" ? "admin" : "user";
+            delete record.name;
+        }
+    }
+
+    const InheritedMigV2 = E.defineModel("InheritedMigrateTest", class extends InheritedMigrateBase {
+        id = E.field(E.string);
+        role = E.field(E.string);
+    }, { pk: "id", override: true });
+
+    await E.transact(() => {
+        const row = InheritedMigV2.get("row1")!;
+        expect(row.role).toBe("admin");
     });
 });
 

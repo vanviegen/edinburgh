@@ -82,9 +82,19 @@ type IndexArgs<FIELDS, SPEC> =
         ? R extends (infer V)[] ? [V] : [R]
     : never;
 
-export type AnyModelClass = ModelClass<any, readonly any[], any, any>;
+export type AnyModelClass = ModelClass<new () => any, readonly any[], any, any>;
 
 type SecondaryRegistry<FIELDS> = Record<string, NonPrimaryIndex<Model<FIELDS>, readonly (keyof FIELDS & string)[], readonly any[]>>;
+
+function copyStaticMembersFromClassChain(target: object, source: Function) {
+    for (let current: any = source; current && current !== Function.prototype; current = Object.getPrototypeOf(current)) {
+        for (const key of Object.getOwnPropertyNames(current)) {
+            if (key === 'length' || key === 'name' || key === 'prototype') continue;
+            if (Object.prototype.hasOwnProperty.call(target, key)) continue;
+            Object.defineProperty(target, key, Object.getOwnPropertyDescriptor(current, key)!);
+        }
+    }
+}
 
 // Model registration and initialization
 export const modelRegistry: Record<string, AnyModelClass> = {};
@@ -99,10 +109,6 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
     declare fields: Record<string | symbol | number, FieldConfig<unknown>>;
     // Registered unique/secondary indexes for this model.
     declare _secondaries?: SecondaryRegistry<FIELDS>;
-    // Signals model definition override semantics during registration.
-    declare override?: boolean;
-    // Reference to the original user class to preserve static hooks like migrate().
-    declare _original?: new () => any;
     // Cached list of non-primary fields used for value serialization.
     _nonKeyFields!: (keyof FIELDS & string)[];
     // Lazy getter/setter descriptors installed on unloaded non-key fields.
@@ -176,7 +182,7 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
             await sec._initializeIndex(allFieldTypes, reset, this._indexFields);
         }
 
-        const migrateFn = (this._original as any)?.migrate ?? (this as any).migrate;
+        const migrateFn = (this as any).migrate;
         this._currentMigrateHash = migrateFn ? hashFunction(migrateFn) : 0;
 
         const currentValueBytes = this._serializeVersionValue();
@@ -385,9 +391,12 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
 
 export const ModelClass = ModelClassRuntime;
 
-export type ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> = ModelClassRuntime<FIELDS, PKA, UNIQUE, INDEX> & {
-    new (initial?: Partial<FIELDS>, txn?: Transaction): Model<FIELDS>;
-};
+export type ModelClass<T extends new () => any, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> =
+    T
+    & ModelClassRuntime<FieldsOf<T>, PKA, UNIQUE, INDEX>
+    & {
+        new (initial?: Partial<FieldsOf<T>>, txn?: Transaction): Model<FieldsOf<T>>;
+    };
 
 export interface ModelBase {
     constructor: AnyModelClass;
@@ -417,7 +426,7 @@ export function defineModel<
     tableName: string,
     cls: T,
     opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, override?: boolean }
-): ModelClass<FieldsOf<T>, PKArgs<FieldsOf<T>, PK>, UNIQUE, INDEX> {
+): ModelClass<T, PKArgs<FieldsOf<T>, PK>, UNIQUE, INDEX> {
     Object.setPrototypeOf(cls.prototype, ModelBase.prototype);
     const MockModel = function(this: any, initial?: Record<string, any>, txn: Transaction = currentTxn()) {
         this._txn = txn;
@@ -432,13 +441,7 @@ export function defineModel<
     cls.prototype.constructor = MockModel;
     Object.setPrototypeOf(MockModel, ModelClassRuntime.prototype);
     MockModel.prototype = cls.prototype;
-    MockModel._original = cls;
-
-    for (const name of Object.getOwnPropertyNames(cls)) {
-        if (name !== 'length' && name !== 'prototype' && name !== 'name') {
-            MockModel[name] = (cls as any)[name];
-        }
-    }
+    copyStaticMembersFromClassChain(MockModel, cls);
 
     MockModel.tableName = tableName;
 
@@ -617,7 +620,7 @@ export abstract class ModelBase {
         const oldValues = this._oldValues! as Record<string, any>;
         if (oldValues.hasOwnProperty(fieldName)) return; // Already loaded earlier (as part of index key?)
 
-        this[fieldName as keyof ModelBase] = value;
+        (this as any)[fieldName] = value;
         if (typeof value === 'object' && value !== null) {            
             const fieldType = (this.constructor.fields[fieldName] as FieldConfig<unknown>).type;
             oldValues[fieldName] = fieldType.clone(value);

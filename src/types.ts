@@ -1,7 +1,8 @@
 import DataPack from "./datapack.js";
 import { DatabaseError } from "olmdb/lowlevel";
 import { currentTxn } from "./edinburgh.js";
-import { Model, modelRegistry, FieldConfig, type AnyModelClass } from "./models.js";
+import { Model, modelRegistry } from "./models.js";
+import type { AnyModelClass } from "./models.js";
 import { assert, addErrorPath, dbGet } from "./utils.js";
 
 
