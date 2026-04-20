@@ -42,7 +42,7 @@ const User = E.defineModel("User", class {
 }, {
     pk: "id",
     unique: {
-        byEmail: "email",
+        email: "email",
     },
 });
 
@@ -60,7 +60,7 @@ await E.transact(() => {
 
 await E.transact(() => {
     // Query by unique index
-    const john = User.byEmail.get("john@example.com")!;
+  const john = User.getBy("email", "john@example.com")!;
 
     // The transaction will retry if there's a conflict, such as another transaction
     // modifying the same user (from another async function or another process)
@@ -92,7 +92,7 @@ const User = E.defineModel("User", class {
 }, {
   pk: "id",
   unique: {
-    byEmail: "email",
+    email: "email",
   },
 });
 // Add this if you want to use User as a type annotation (e.g. `let u: User`).
@@ -146,13 +146,13 @@ await E.transact(() => {
 
 // Read + Update
 await E.transact(() => {
-  const user = User.byEmail.get("alice@example.com");
+  const user = User.getBy("email", "alice@example.com");
   if (user) user.age++;
 });
 
 // Return values from transactions
 const name = await E.transact(() => {
-  const user = User.byEmail.get("alice@example.com");
+  const user = User.getBy("email", "alice@example.com");
   return user?.name;
 });
 ```
@@ -171,8 +171,8 @@ const Product = E.defineModel("Product", class {
   price = E.field(E.number);
 }, {
   pk: "sku",
-  unique: { byName: "name" },
-  index: { byCategory: "category" },
+  unique: { name: "name" },
+  index: { category: "category" },
 });
 ```
 
@@ -186,7 +186,7 @@ await E.transact(() => {
   const p1 = Product.get("SKU-001");
 
   // Unique index lookup
-  const p2 = Product.byName.get("Widget");
+  const p2 = Product.getBy("name", "Widget");
 
   // All return undefined if not found
 });
@@ -194,12 +194,12 @@ await E.transact(() => {
 
 #### Range Queries
 
-All index types support `.find()` for range iteration:
+Primary-key queries use `.find()`. Named unique and secondary indexes use `.findBy(name, ...)`:
 
 ```typescript
 await E.transact(() => {
   // Exact match
-  for (const p of Product.byCategory.find({is: "electronics"})) {
+  for (const p of Product.findBy("category", {is: "electronics"})) {
     console.log(p.name);
   }
 
@@ -218,8 +218,8 @@ await E.transact(() => {
   for (const p of Product.find({reverse: true})) { ... }
 
   // Count and fetch helpers
-  const count = Product.byCategory.find({is: "electronics"}).count();
-  const first = Product.byCategory.find({is: "electronics"}).fetch(); // first match or undefined
+  const count = Product.findBy("category", {is: "electronics"}).count();
+  const first = Product.findBy("category", {is: "electronics"}).fetch(); // first match or undefined
 });
 ```
 
@@ -281,11 +281,11 @@ const Article = E.defineModel("Article", class {
 }, {
   pk: "id",
   unique: {
-    byFullName: (a: any) => [`${a.firstName} ${a.lastName}`], // computed covering unique index
+    fullName: (a: any) => [`${a.firstName} ${a.lastName}`], // computed covering unique index
   },
   index: {
-    byDomain: (a: any) => a.email ? [a.email.split("@")[1]] : [], // computed partial index
-    byWord: (a: any) => a.title.toLowerCase().split(" "), // computed multi-index
+    domain: (a: any) => a.email ? [a.email.split("@")[1]] : [], // computed partial index
+    word: (a: any) => a.title.toLowerCase().split(" "), // computed multi-index
   },
 });
 
@@ -293,13 +293,13 @@ await E.transact(() => {
   new Article({ firstName: "Jane", lastName: "Doe", title: "Hello World", email: "jane@acme.com" });
 
   // Lookup via computed unique index
-  const jane = Article.byFullName.get("Jane Doe");
+  const jane = Article.getBy("fullName", "Jane Doe");
 
   // Multi-value: each word in the title is indexed separately
-  for (const a of Article.byWord.find({is: "hello"})) { ... }
+  for (const a of Article.findBy("word", {is: "hello"})) { ... }
 
   // Partial index: articles without email are skipped
-  for (const a of Article.byDomain.find({is: "acme.com"})) { ... }
+  for (const a of Article.findBy("domain", {is: "acme.com"})) { ... }
 });
 ```
 
@@ -583,15 +583,57 @@ Set a callback function to be called after a model is saved and committed.
 
 ### ModelClass · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L243)
 
+Runtime base constructor for model classes returned by `defineModel()`.
+
+Prefer the `ModelClass` type alias for annotations and the result of
+`defineModel()` for concrete model classes.
+
 **Type:** `typeof ModelClassRuntime`
 
-### AnyModelClass · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L107)
+### AnyModelClass · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L111)
+
+A model constructor with its generic information erased.
+
+Useful when accepting or storing arbitrary registered model classes.
 
 **Type:** `ModelClass<new () => any, readonly any[], any, any>`
 
 ### ModelBase · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L243)
 
-[object Object],[object Object],[object Object],[object Object],[object Object]
+Base class for all database models in the Edinburgh ORM.
+
+Models represent database entities with typed fields, automatic serialization,
+change tracking, and relationship management. Model classes are created using
+`E.defineModel()`.
+
+### Schema Evolution
+
+Edinburgh tracks the schema version of each model automatically. When you add, remove, or
+change the types of fields, or add/remove indexes, Edinburgh detects the new schema version.
+
+**Lazy migration:** Changes to non-key field values are migrated lazily, when a row with an
+old schema version is read from disk, it is deserialized using the old schema and optionally
+transformed by the static `migrate()` function. This happens transparently on every read
+and requires no downtime or batch processing.
+
+**Batch migration (via `npx migrate-edinburgh` or `runMigration()`):** Certain schema changes
+require an explicit migration run:
+- Adding or removing secondary/unique indexes
+- Changing the fields or types of an existing index
+- A `migrate()` function that changes values used in secondary index fields
+
+The batch migration tool populates new indexes, deletes orphaned ones, and updates index
+entries whose values were changed by `migrate()`. It does *not* rewrite primary data rows
+(lazy migration handles that).
+
+### Lifecycle Hooks
+
+- **`static migrate(record)`**: Called when deserializing rows written with an older schema
+  version. Receives a plain record object; mutate it in-place to match the current schema.
+
+- **`preCommit()`**: Called on each modified instance right before the transaction commits.
+  Useful for computing derived fields, enforcing cross-field invariants, or creating related
+  instances.
 
 **Examples:**
 
@@ -602,7 +644,7 @@ const User = E.defineModel("User", class {
   email = E.field(E.string);
 }, {
   pk: "id",
-  unique: { byEmail: "email" },
+  unique: { email: "email" },
 });
 // Optional: declare a companion type so `let u: User` works.
 // Not needed if you only use `new User()`, `User.find()`, etc.
@@ -611,11 +653,30 @@ type User = InstanceType<typeof User>;
 
 #### ModelBase.migrate · [static method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L243)
 
+Optional migration function called when deserializing rows written with an older schema version.
+Receives a plain record with all fields and should mutate it in-place to match the current schema.
+It runs during lazy loading and during `runMigration()`. Changing this method creates a new schema version.
+If it updates values used by secondary or unique indexes, those index entries are refreshed only by `runMigration()`.
+
 **Signature:** `(record: Record<string, any>) => void`
 
 **Parameters:**
 
-- `record: Record<string, any>`
+- `record: Record<string, any>` - A plain object containing the row's field values from the older schema version.
+
+**Examples:**
+
+```typescript
+const User = E.defineModel("User", class {
+  id = E.field(E.identifier);
+  name = E.field(E.string);
+  role = E.field(E.string);
+
+  static migrate(record: Record<string, any>) {
+    record.role ??= "user";
+  }
+}, { pk: "id" });
+```
 
 #### modelBase.preCommit · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L243)
 
@@ -769,6 +830,11 @@ typed fields, primary key access, and optional secondary and unique indexes.
 **Returns:** The enhanced model constructor.
 
 ### deleteEverything · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L243)
+
+Delete every key/value entry in the database and reinitialize all registered models.
+
+This clears rows, index metadata, and schema-version records. It is mainly useful
+for tests, local resets, or tooling that needs a completely empty database.
 
 **Signature:** `() => Promise<void>`
 
@@ -1021,11 +1087,19 @@ const Book = E.defineModel("Book", class {
 
 **Signature:** `() => void`
 
-### FindOptions · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L107)
+### FindOptions · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L115)
+
+Range-query options accepted by `find()`, `findBy()`, `batchProcess()`, and `batchProcessBy()`.
+
+Supports exact-match lookups via `is`, inclusive bounds via `from` / `to`,
+exclusive bounds via `after` / `before`, and reverse scans.
+
+For single-field indexes, values can be passed directly. For composite indexes,
+pass tuples or partial tuples for prefix matching.
 
 **Type:** `(
     (
-        {is: ArrayOrOnlyItem<ARG_TYPES>;}
+        {is: ArrayOrOnlyItem<ARG_TYPES>;} // Shortcut for setting `from` and `to` to the same value
     |
         (
             (

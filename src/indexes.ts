@@ -81,9 +81,21 @@ export class IndexRangeIterator<ITEM> extends Iterator<ITEM> {
 
 type ArrayOrOnlyItem<ARG_TYPES extends readonly any[]> = ARG_TYPES extends readonly [infer A] ? (A | Partial<ARG_TYPES>) : Partial<ARG_TYPES>;
 
+/**
+ * Range-query options accepted by `find()`, `findBy()`, `batchProcess()`, and `batchProcessBy()`.
+ *
+ * Supports exact-match lookups via `is`, inclusive bounds via `from` / `to`,
+ * exclusive bounds via `after` / `before`, and reverse scans.
+ *
+ * For single-field indexes, values can be passed directly. For composite indexes,
+ * pass tuples or partial tuples for prefix matching.
+ *
+ * @template ARG_TYPES - Tuple of index argument types.
+ * @template FETCH - Optional fetch mode used by overloads that return one row.
+ */
 export type FindOptions<ARG_TYPES extends readonly any[], FETCH extends 'first' | 'single' | undefined = undefined> = (
     (
-        {is: ArrayOrOnlyItem<ARG_TYPES>;}
+        {is: ArrayOrOnlyItem<ARG_TYPES>;} // Shortcut for setting `from` and `to` to the same value
     |
         (
             (
@@ -253,6 +265,20 @@ export abstract class BaseIndex<ITEM, const F extends readonly (keyof ITEM & str
         return [startKey, endKey];
     }
 
+    /**
+     * Find rows using exact-match or range-query options.
+     *
+     * Supports exact matches, inclusive and exclusive bounds, open-ended ranges,
+     * and reverse iteration. For single-field indexes, values can be passed
+     * directly. For composite indexes, pass tuples or partial tuples.
+     *
+     * @example
+     * ```typescript
+     * const exact = User.find({ is: "user-123", fetch: "first" });
+     * const email = [...User.findBy("email", { from: "a@test.com", to: "m@test.com" })];
+     * const reverse = [...Product.findBy("category", { is: "electronics", reverse: true })];
+     * ```
+     */
     public find(opts: FindOptions<ARGS, 'first'>): ITEM | undefined;
     public find(opts: FindOptions<ARGS, 'single'>): ITEM;
     public find(opts?: FindOptions<ARGS>): IndexRangeIterator<ITEM>;
@@ -293,6 +319,15 @@ export abstract class BaseIndex<ITEM, const F extends readonly (keyof ITEM & str
         return iter;
     }
 
+    /**
+     * Process matching rows in batched transactions.
+     *
+     * Uses the same range options as {@link find}, plus optional row and time
+     * limits that control when the current transaction is committed and a new one starts.
+     *
+     * @param opts Query options plus batch limits.
+     * @param callback Called for each matching row inside a transaction.
+     */
     public async batchProcess(
         opts: FindOptions<ARGS> & { limitSeconds?: number; limitRows?: number } = {} as any,
         callback: (row: ITEM) => void | Promise<void>

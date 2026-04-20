@@ -48,7 +48,7 @@ export interface FieldConfig<T> {
  *   age = E.field(E.opt(E.number), {description: "User's age", default: 25});
  * });
  * ```
-  */
+ */
 export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> = {}): T {
     // Return the config object, but TypeScript sees it as type T
     options.type = type;
@@ -82,6 +82,11 @@ type IndexArgs<FIELDS, SPEC> =
         ? R extends (infer V)[] ? [V] : [R]
     : never;
 
+/**
+ * A model constructor with its generic information erased.
+ *
+ * Useful when accepting or storing arbitrary registered model classes.
+ */
 export type AnyModelClass = ModelClass<new () => any, readonly any[], any, any>;
 
 type SecondaryRegistry<FIELDS> = Record<string, NonPrimaryIndex<Model<FIELDS>, readonly (keyof FIELDS & string)[], readonly any[]>>;
@@ -262,10 +267,20 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
         this._loadValueFields(model, valueBuffer);
     }
 
+    /**
+     * Load a model by primary key inside the current transaction.
+     *
+     * @returns The matching model, or `undefined` if no row exists.
+     */
     get(...args: PKA): Model<FIELDS> | undefined {
         return this._get(currentTxn(), args, true);
     }
 
+    /**
+     * Load a model by primary key without fetching its non-key fields immediately.
+     *
+     * Accessing a lazy field later will load the remaining fields transparently.
+     */
     getLazy(...args: PKA): Model<FIELDS> {
         return this._get(currentTxn(), args, false);
     }
@@ -280,6 +295,7 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
       * Otherwise, a new instance is created with `obj` as its initial properties.
      *
      * @param obj Partial model data that **must** include every primary key field.
+      * @returns The loaded-and-updated or newly created instance.
      */
     replaceInto(obj: Partial<FIELDS>): Model<FIELDS> {
         const keyArgs: any[] = [];
@@ -301,10 +317,23 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
         return new (this as any)(obj);
     }
 
+    /**
+     * Look up a model through a named unique index.
+     *
+     * @param name The name from the model's `unique` definition.
+     * @param args The unique-index key values.
+     * @returns The matching model instance, if any.
+     */
     getBy<K extends string & keyof UNIQUE>(name: K, ...args: IndexArgs<FIELDS, UNIQUE[K]>): Model<FIELDS> | undefined {
         return (this._getSecondary(name) as any).getPK(...args);
     }
 
+    /**
+     * Query rows through a named unique or secondary index.
+     *
+     * This mirrors `find()`, but targets a named entry from the model's `unique`
+     * or `index` registration.
+     */
     findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>, 'first'>): Model<FIELDS> | undefined;
     findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>, 'single'>): Model<FIELDS>;
     findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts?: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>>): IndexRangeIterator<Model<FIELDS>>;
@@ -312,6 +341,11 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
         return this._getSecondary(name).find(opts);
     }
 
+    /**
+     * Process rows from a named unique or secondary index in batched transactions.
+     *
+     * Uses the same range options as `findBy()`, plus batch limits.
+     */
     batchProcessBy<K extends string & keyof (UNIQUE & INDEX)>(
         name: K,
         opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>> & { limitSeconds?: number; limitRows?: number },
@@ -389,8 +423,26 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
     }
 }
 
+/**
+ * Runtime base constructor for model classes returned by `defineModel()`.
+ *
+ * Prefer the `ModelClass` type alias for annotations and the result of
+ * `defineModel()` for concrete model classes.
+ */
 export const ModelClass = ModelClassRuntime;
 
+/**
+ * The static side of a model class returned by `defineModel()`.
+ *
+ * Besides the class constructor itself, this includes primary-key lookup
+ * helpers like `get()` and `getLazy()`, range-query helpers like `find()`, and
+ * named-index helpers like `getBy()` and `findBy()`.
+ *
+ * @template T - The original class passed to `defineModel()`.
+ * @template PKA - Tuple of primary-key argument types.
+ * @template UNIQUE - Named unique-index specifications.
+ * @template INDEX - Named secondary-index specifications.
+ */
 export type ModelClass<T extends new () => any, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> =
     T
     & ModelClassRuntime<FieldsOf<T>, PKA, UNIQUE, INDEX>
@@ -398,6 +450,9 @@ export type ModelClass<T extends new () => any, PKA extends readonly any[], UNIQ
         new (initial?: Partial<FieldsOf<T>>, txn?: Transaction): Model<FieldsOf<T>>;
     };
 
+/**
+ * Minimal instance-side model shape used for typing the constructor property.
+ */
 export interface ModelBase {
     constructor: AnyModelClass;
 }
@@ -549,11 +604,10 @@ export function defineModel<
  *
  * - **`static migrate(record)`**: Called when deserializing rows written with an older schema
  *   version. Receives a plain record object; mutate it in-place to match the current schema.
- *   See {@link Model.migrate}.
  *
  * - **`preCommit()`**: Called on each modified instance right before the transaction commits.
  *   Useful for computing derived fields, enforcing cross-field invariants, or creating related
- *   instances. See {@link Model.preCommit}.
+ *   instances.
  *
  * @example
  * ```typescript
@@ -563,7 +617,7 @@ export function defineModel<
  *   email = E.field(E.string);
  * }, {
  *   pk: "id",
- *   unique: { byEmail: "email" },
+ *   unique: { email: "email" },
  * });
  * // Optional: declare a companion type so `let u: User` works.
  * // Not needed if you only use `new User()`, `User.find()`, etc.
@@ -571,6 +625,27 @@ export function defineModel<
  * ```
  */
 export abstract class ModelBase {
+    /**
+     * Optional migration function called when deserializing rows written with an older schema version.
+    * Receives a plain record with all fields and should mutate it in-place to match the current schema.
+    * It runs during lazy loading and during `runMigration()`. Changing this method creates a new schema version.
+    * If it updates values used by secondary or unique indexes, those index entries are refreshed only by `runMigration()`.
+     *
+     * @param record A plain object containing the row's field values from the older schema version.
+     *
+     * @example
+     * ```typescript
+     * const User = E.defineModel("User", class {
+     *   id = E.field(E.identifier);
+     *   name = E.field(E.string);
+     *   role = E.field(E.string);
+     *
+     *   static migrate(record: Record<string, any>) {
+     *     record.role ??= "user";
+     *   }
+     * }, { pk: "id" });
+     * ```
+     */
     static migrate?(record: Record<string, any>): void;
 
     /*
@@ -853,6 +928,12 @@ export abstract class ModelBase {
     }
 }
 
+/**
+ * Delete every key/value entry in the database and reinitialize all registered models.
+ *
+ * This clears rows, index metadata, and schema-version records. It is mainly useful
+ * for tests, local resets, or tooling that needs a completely empty database.
+ */
 export async function deleteEverything(): Promise<void> {
     let done = false;
     while (!done) {
