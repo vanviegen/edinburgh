@@ -51,8 +51,7 @@ export type { MigrationOptions, MigrationResult } from './migrate.js';
 
 export interface Transaction {
     id: number;
-    instances: Set<Model<unknown>>;
-    instancesByPk: Map<number, Model<unknown>>;
+    instances: Map<number, Model<unknown>>; // pkHash => instance
 }
 
 export const txnStorage = new AsyncLocalStorage<Transaction>();
@@ -154,7 +153,7 @@ export async function transact<T>(fn: () => T): Promise<T> {
     // try {
         for (let retryCount = 0; retryCount < maxRetryCount; retryCount++) {
             const txnId = lowlevel.startTransaction();
-            const txn: Transaction = { id: txnId, instances: new Set(), instancesByPk: new Map() };
+            const txn: Transaction = { id: txnId, instances: new Map() };
             const onSaveItems: Map<Model<unknown>, Change> | undefined = onSaveCallback ? new Map() : undefined;
 
             let result: T | undefined;
@@ -163,16 +162,16 @@ export async function transact<T>(fn: () => T): Promise<T> {
                     result = await fn();
 
                     // Call preCommit() on all instances before writing.
-                    // Note: Set iteration visits newly added items, so preCommit() creating
+                    // Note: Map iteration visits newly added items, so preCommit() creating
                     // new instances is handled correctly.
-                    for (const instance of txn.instances) {
-                        instance.preCommit?.();
+                    for (const instance of txn.instances.values()) {
+                        if (instance._oldValues !== false) instance.preCommit?.();
                     }
 
                     // Save all modified instances before committing
                     // This needs to happen inside txnStorage.run, because resolving default values
                     // for identifiers requires database access.
-                    for (const instance of txn.instances) {
+                    for (const instance of txn.instances.values()) {
                         const change = instance._write(txn);
                         if (onSaveItems && change) {
                             onSaveItems.set(instance, change);
@@ -184,14 +183,14 @@ export async function transact<T>(fn: () => T): Promise<T> {
                 throw e;
             } finally {
                 // Make the instances read-only to make it clear that their transaction has ended.
-                for (const instance of txn.instances) {
+                for (const instance of txn.instances.values()) {
                     delete instance._oldValues;
                     Object.defineProperty(instance, "_txn", STALE_INSTANCE_DESCRIPTOR);
                     Object.freeze(instance);
                 }
                 // Destroy the transaction object, to make sure things crash if they are used after
                 // this point, and to help the GC reclaim memory.
-                txn.id = txn.instances = txn.instancesByPk = undefined as any;
+                txn.id = txn.instances = undefined as any;
             }
 
             const commitResult = lowlevel.commitTransaction(txnId);

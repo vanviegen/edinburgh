@@ -7,6 +7,8 @@ import { transact, currentTxn, type Transaction } from "./edinburgh.js";
 import { PrimaryKey, NonPrimaryIndex, IndexRangeIterator, UniqueIndex, SecondaryIndex, FindOptions, VersionInfo } from "./indexes.js";
 import { addErrorPath, dbGet, hashBytes, hashFunction } from "./utils.js";
 
+let nextFakePkHash = -1;
+
 
 const PREVENT_PERSIST_DESCRIPTOR = {
     get() {
@@ -200,7 +202,7 @@ export class ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
         }
 
         const keyHash = hashBytes(key);
-        const cached = txn.instancesByPk.get(keyHash) as Model<FIELDS> | undefined;
+        const cached = txn.instances.get(keyHash) as Model<FIELDS> | undefined;
         if (cached) {
             if (loadNow && loadNow !== true) {
                 Object.defineProperties(cached, this._resetDescriptors);
@@ -219,8 +221,10 @@ export class ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
             }
         }
 
-        const model = new (this as any)(undefined, txn) as Model<FIELDS>;
+        const model = Object.create(this.prototype) as Model<FIELDS>;
+        model._txn = txn;
         model._oldValues = {};
+        txn.instances.set(keyHash, model);
 
         if (keyParts) {
             let i = 0;
@@ -241,8 +245,6 @@ export class ModelClass<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
         } else {
             Object.defineProperties(model, this._lazyDescriptors);
         }
-
-        txn.instancesByPk.set(keyHash, model);
         return model;
     }
 
@@ -425,7 +427,7 @@ export function defineModel<
     Object.setPrototypeOf(cls.prototype, ModelBase.prototype);
     const MockModel = function(this: any, initial?: Record<string, any>, txn: Transaction = currentTxn()) {
         this._txn = txn;
-        txn.instances.add(this);
+        txn.instances.set(nextFakePkHash--, this);
         if (initial) Object.assign(this, initial);
     } as any;
 
@@ -591,9 +593,10 @@ export abstract class ModelBase {
      * @internal
      * - _oldValues===undefined: New instance, not yet saved.
      * - _oldValues===null: Instance is to be deleted.
+     * - _oldValues===false: Instance excluded from persistence (preventPersist).
      * - _oldValues is an object: Loaded (possibly only partial, still lazy) from disk, _oldValues contains (partial) old values
      */
-    _oldValues: Record<string, any> | undefined | null;
+    _oldValues: Record<string, any> | undefined | null | false;
     _primaryKey: Uint8Array | undefined;
     _primaryKeyHash: number | undefined;
     _txn!: Transaction;
@@ -624,7 +627,7 @@ export abstract class ModelBase {
     preCommit?(): void;
 
     _setLoadedField(fieldName: string, value: any) {
-        const oldValues = this._oldValues!;
+        const oldValues = this._oldValues! as Record<string, any>;
         if (oldValues.hasOwnProperty(fieldName)) return; // Already loaded earlier (as part of index key?)
 
         this[fieldName as keyof ModelBase] = value;
@@ -653,6 +656,7 @@ export abstract class ModelBase {
     getPrimaryKey(): Uint8Array {
         let key = this._primaryKey;
         if (key === undefined) {
+            if (this._oldValues === false) throw new DatabaseError("Operation not allowed after preventPersist()", "NO_PERSIST");
             key = this.constructor._serializePK(this).toUint8Array();
             this._setPrimaryKey(key);
         }
@@ -680,6 +684,8 @@ export abstract class ModelBase {
 
     _write(txn: Transaction): undefined | Change {
         const oldValues = this._oldValues;
+
+        if (oldValues === false) return; // preventPersist() was called
 
         if (oldValues === null) { // Delete instance
             const pk = this._primaryKey;
@@ -766,7 +772,10 @@ export abstract class ModelBase {
      * ```
      */
     preventPersist() {
-        this._txn.instances.delete(this);
+        if (this._oldValues === undefined && this._primaryKey !== undefined) {
+            throw new DatabaseError("Cannot preventPersist() after PK has been used", "INVALID");
+        }
+        this._oldValues = false;
         // Have access to '_txn' throw a descriptive error:
         Object.defineProperty(this, "_txn", PREVENT_PERSIST_DESCRIPTOR);
         return this;
@@ -784,7 +793,7 @@ export abstract class ModelBase {
      * ```
      */
     delete() {
-        if (this._oldValues === undefined) throw new DatabaseError("Cannot delete unsaved instance", "NOT_SAVED");
+        if (this._oldValues === undefined) throw new DatabaseError("Cannot delete unsaved instance", "INVALID");
         this._oldValues = null;
     }
 

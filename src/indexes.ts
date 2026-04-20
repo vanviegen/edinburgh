@@ -10,7 +10,7 @@ type IndexItem = {
     _restoreLazyFields?(): void;
 };
 type PrimaryKeyItem = IndexItem & {
-    _oldValues: Record<string, any> | undefined | null;
+    _oldValues: Record<string, any> | undefined | null | false;
     _primaryKey: Uint8Array | undefined;
     _txn: Transaction;
     _setPrimaryKey(key: Uint8Array, hash?: number): void;

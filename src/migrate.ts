@@ -224,7 +224,6 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
             const failures: Record<string, number> = {};
 
             await forEachRow(oldDef.id, (txn, keyBuf) => {
-                let instance;
                 try {
                     // Deserialize old key
                     const keyPack = new DataPack(keyBuf);
@@ -239,7 +238,7 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
                     if (migrateFn) migrateFn(record);
 
                     // _write validates, checks duplicates, writes primary + secondaries
-                    instance = new (model as any)(record, txn);
+                    let instance = new (model as any)(record, txn);
                     instance._write(txn);
                     dbDel(txn.id, keyBuf);
                     converted++;
@@ -250,7 +249,7 @@ export async function runMigration(options: MigrationOptions = {}): Promise<Migr
                         failures['error'] = (failures['error'] || 0) + 1;
                     }
                 } finally {
-                    if (instance) txn.instances.delete(instance);
+                    txn.instances.clear(); // We've already handled the _write() ourselves
                 }
             });
 
