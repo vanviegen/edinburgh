@@ -5,7 +5,7 @@
     "": {
       "name": "edinburgh",
       "dependencies": {
-        "olmdb": "^0.4.1",
+        "olmdb": "^0.4.2",
       },
       "devDependencies": {
         "@types/bun": "^1.2.16",
@@ -210,8 +210,6 @@
 
     "exponential-backoff": ["exponential-backoff@3.1.3", "", {}, "sha512-ZgEeZXj30q+I0EN+CbSSpIyPaJ5HVQD18Z1m+u1FXbAeT94mr1zw50q4q6jiiC447Nl/YTcIYSAftiGqetwXCA=="],
 
-    "fast-deep-copy": ["fast-deep-copy@1.0.1", "", {}, "sha512-x1pYV5SJ+VQ2lulFw+4qz/f5JHYKa+vIZYmNkzIQSVpW66aVD2tAyRX37gwj+sC/KK72BuMJVk5YKLBTT18ZQA=="],
-
     "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" }, "optionalPeers": ["picomatch"] }, "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg=="],
 
     "foreground-child": ["foreground-child@3.3.1", "", { "dependencies": { "cross-spawn": "^7.0.6", "signal-exit": "^4.0.1" } }, "sha512-gIXjKqtFuWEgzFRJA9WCQeSJLZDjgJUOMCMzxtvFq/37KojM1BFGufqsCy0r4qSQmYLsZYMeyRqzIWOMup03sw=="],
@@ -278,7 +276,7 @@
 
     "nopt": ["nopt@8.1.0", "", { "dependencies": { "abbrev": "^3.0.0" }, "bin": { "nopt": "bin/nopt.js" } }, "sha512-ieGu42u/Qsa4TFktmaKEwM6MQH0pOWnaB3htzh0JRtx84+Mebc0cbZYN5bC+6WTZ4+77xrL9Pn5m7CV6VIkV7A=="],
 
-    "olmdb": ["olmdb@0.4.1", "", { "dependencies": { "node-gyp": "^11.2.0", "readme-tsdoc": "^1.1.4" } }, "sha512-hLoreDvIUfCH5eE1T8gCtL5f5jSJEqcf7uP5JliFuBPnso4xoiPR18eaw9IBD1iW6XIAExpnvoji2F+9+taqaQ=="],
+    "olmdb": ["olmdb@0.4.2", "", { "dependencies": { "node-gyp": "^11.2.0", "readme-tsdoc": "^1.1.4" } }, "sha512-CjH3nfrChiibtfFpvBGRtfL+s8OHWNdYP3WAtcK48lQZbdLAvEtal5WtYUeyI28jKmxswP7d4aEZYQw5M5tezg=="],
 
     "p-map": ["p-map@7.0.4", "", {}, "sha512-tkAQEw8ysMzmkhgw8k+1U/iPhWNhykKnSk4Rd5zLoPJCuJaGRPo6YposrZgaxHKzDHdDWWZvE/Sk7hsL2X/CpQ=="],
 
@@ -391,8 +389,6 @@
     "minipass-pipeline/minipass": ["minipass@3.3.6", "", { "dependencies": { "yallist": "^4.0.0" } }, "sha512-DxiNidxSEK+tHG6zOIklvNOwm3hvCrbUrdtzY74U6HKTJxvIDfOUL5W5P2Ghd3DTkhhKPYGqeNUIh5qcM4YBfw=="],
 
     "minipass-sized/minipass": ["minipass@3.3.6", "", { "dependencies": { "yallist": "^4.0.0" } }, "sha512-DxiNidxSEK+tHG6zOIklvNOwm3hvCrbUrdtzY74U6HKTJxvIDfOUL5W5P2Ghd3DTkhhKPYGqeNUIh5qcM4YBfw=="],
-
-    "olmdb/readme-tsdoc": ["readme-tsdoc@1.1.4", "", { "dependencies": { "fast-deep-copy": "^1.0.1", "typescript": "^5.0.0" }, "bin": { "readme-tsdoc": "src/cli.js" } }, "sha512-GS+7QN9TPsMYWGLI+E8A6/068ZZPQXxqIfeWTuHCNN6+tuMvERdS1TQaStAh85tQxm8DGVP5f4OdFnkk3+dNwA=="],
 
     "string-width-cjs/emoji-regex": ["emoji-regex@8.0.0", "", {}, "sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A=="],
 

@@ -183,30 +183,36 @@ export async function transact<T>(fn: () => T): Promise<T> {
             } catch (e: any) {
                 try { lowlevel.abortTransaction(txnId); } catch {}
                 throw e;
-            } finally {
-                // Make the instances read-only to make it clear that their transaction has ended.
-                for (const instance of txn.instances.values()) {
-                    delete instance._oldValues;
-                    Object.defineProperty(instance, "_txn", STALE_INSTANCE_DESCRIPTOR);
-                    Object.freeze(instance);
-                }
-                // Destroy the transaction object, to make sure things crash if they are used after
-                // this point, and to help the GC reclaim memory.
-                txn.id = txn.instances = undefined as any;
             }
 
-            const commitResult = lowlevel.commitTransaction(txnId);
-            const commitSeq = typeof commitResult === 'number' ? commitResult : await commitResult;
-
-            if (commitSeq > 0) {
-                // Success
-                if (onSaveItems?.size) {
+            if (onSaveItems?.size) {
+                // Perform writes, and start a new transaction at or past the point-in-time of our commit
+                const commitResult = lowlevel.commitTransaction(txnId, true);
+                if (typeof commitResult === 'object') {
+                    const commitSeq = await commitResult;
+                    if (commitSeq <= 0) continue; // Race condition - retry
+                    // Run the callback within our new transaction context, so it can fetch linked lazy fields if needed
                     onSaveCallback!(commitSeq, onSaveItems);
                 }
-                return result as T;
+                // else: only reads
             }
 
-            // Race condition - retry
+            // Make the instances read-only to make it clear that their transaction has ended.
+            for (const instance of txn.instances.values()) {
+                delete instance._oldValues;
+                Object.defineProperty(instance, "_txn", STALE_INSTANCE_DESCRIPTOR);
+                Object.freeze(instance);
+            }
+
+            // Destroy the transaction object, to make sure things crash if they are used after
+            // this point, and to help the GC reclaim memory.
+            txn.id = txn.instances = undefined as any;
+
+
+            // Commit the transaction and actually end it
+            if ((await lowlevel.commitTransaction(txnId)) <= 0) continue; // Race condition - retry
+
+            return result as T;
         }
         throw new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION");
     // } catch (e: Error | any) {
@@ -236,6 +242,9 @@ let onSaveCallback: ((commitId: number, items: Map<Model<unknown>, Change>) => v
  * `transact()` commit that has changes, with the following arguments:
  *   - A sequential number. Higher numbers have been committed after lower numbers.
  *   - A map of model instances to their changes. The change can be "created", "deleted", or an object containing the old values.
+ * 
+ * The callback is called within a new transaction context, allowing lazy-loads to happen. However, any
+ * changes made to Edinburgh models will not be saved.
  */
 export function setOnSaveCallback(callback: ((commitId: number, items: Map<Model<unknown>, Change>) => void) | undefined) {
     onSaveCallback = callback;
