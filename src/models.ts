@@ -1,7 +1,7 @@
 import * as lowlevel from "olmdb/lowlevel";
 import { DatabaseError } from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
-import { deserializeType, serializeType, TypeWrapper, identifier } from "./types.js";
+import { deserializeType, serializeType, TypeWrapper, identifier, type FieldQueryArg, type FieldValue } from "./types.js";
 import { transact, currentTxn, type Transaction } from "./edinburgh.js";
 
 import { PrimaryKey, NonPrimaryIndex, IndexRangeIterator, UniqueIndex, SecondaryIndex, FindOptions, VersionInfo } from "./indexes.js";
@@ -49,7 +49,7 @@ export interface FieldConfig<T> {
  * });
  * ```
  */
-export function field<T>(type: TypeWrapper<T>, options: Partial<FieldConfig<T>> = {}): T {
+export function field<TYPE extends TypeWrapper<any>>(type: TYPE, options: Partial<FieldConfig<FieldValue<TYPE>>> = {}): FieldValue<TYPE> {
     // Return the config object, but TypeScript sees it as type T
     options.type = type;
     return options as any;
@@ -68,16 +68,16 @@ type FieldsOf<T> = T extends new () => infer I ? I : never;
 
 type PKArgs<FIELDS, PK> =
     PK extends readonly (keyof FIELDS & string)[]
-        ? { [I in keyof PK]: PK[I] extends keyof FIELDS ? FIELDS[PK[I]] : never }
+        ? { [I in keyof PK]: PK[I] extends keyof FIELDS ? FieldQueryArg<FIELDS[PK[I]]> : never }
         : PK extends keyof FIELDS & string
-            ? [FIELDS[PK]]
+            ? [FieldQueryArg<FIELDS[PK]>]
             : [string];
 
 type IndexArgs<FIELDS, SPEC> =
     SPEC extends readonly (keyof FIELDS & string)[]
-        ? { [I in keyof SPEC]: SPEC[I] extends keyof FIELDS ? FIELDS[SPEC[I]] : never }
+        ? { [I in keyof SPEC]: SPEC[I] extends keyof FIELDS ? FieldQueryArg<FIELDS[SPEC[I]]> : never }
     : SPEC extends keyof FIELDS & string
-        ? [FIELDS[SPEC]]
+        ? [FieldQueryArg<FIELDS[SPEC]>]
     : SPEC extends (instance: any) => infer R
         ? R extends (infer V)[] ? [V] : [R]
     : never;
@@ -209,7 +209,7 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
             key = args;
         } else {
             key = this._argsToKeyBytes(args, false).toUint8Array();
-            keyParts = args;
+            keyParts = this._pkToArray(key);
         }
 
         const keyHash = hashBytes(key);
@@ -269,6 +269,10 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
 
     /**
      * Load a model by primary key inside the current transaction.
+        *
+        * For `link(...)` primary-key fields, each argument may be the linked model
+        * instance or the linked model's primary key. Composite linked primary keys
+        * are passed as a tuple in that argument slot.
      *
      * @returns The matching model, or `undefined` if no row exists.
      */
@@ -278,6 +282,8 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
 
     /**
      * Load a model by primary key without fetching its non-key fields immediately.
+        *
+        * Link-valued primary-key fields accept the same shorthand as `get()`.
      *
      * Accessing a lazy field later will load the remaining fields transparently.
      */
@@ -321,7 +327,9 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
      * Look up a model through a named unique index.
      *
      * @param name The name from the model's `unique` definition.
-     * @param args The unique-index key values.
+        * @param args The unique-index key values. For `link(...)` fields, pass
+        * either the linked model instance or the linked model's primary key. If the
+        * linked model uses a composite primary key, pass the full tuple in that slot.
      * @returns The matching model instance, if any.
      */
     getBy<K extends string & keyof UNIQUE>(name: K, ...args: IndexArgs<FIELDS, UNIQUE[K]>): Model<FIELDS> | undefined {
@@ -332,7 +340,8 @@ class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX =
      * Query rows through a named unique or secondary index.
      *
      * This mirrors `find()`, but targets a named entry from the model's `unique`
-     * or `index` registration.
+        * or `index` registration. Link-valued index fields accept either the linked
+        * model instance or the linked model's primary key tuple/value.
      */
     findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>, 'first'>): Model<FIELDS> | undefined;
     findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>, 'single'>): Model<FIELDS>;

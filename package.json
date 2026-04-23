@@ -1,6 +1,6 @@
 {
   "name": "edinburgh",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "author": "Frank van Viegen",
   "devDependencies": {
     "@types/bun": "^1.2.16",
@@ -56,6 +56,6 @@
   ],
   "type": "module",
   "dependencies": {
-    "olmdb": "^0.4.2"
+    "olmdb": "^0.5.0"
   }
 }

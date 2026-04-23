@@ -119,6 +119,24 @@ function noNeedToRunThis() {
     // @ts-expect-error - iterator rows are typed, so number methods do not include toUpperCase
     simpleRows.map(row => row.value.toUpperCase());
 
+    // @ts-expect-error - email should be a string
+    User.findBy("email", 3);
+    // @ts-expect-error - no such index
+    User.findBy("no-such-index", 3);
+
+    Post.getBy("author", new User(), "Post Title");
+    // @ts-expect-error - wrong type for author
+    Post.getBy("author", Post.get("deadbeef"), "Post Title");
+    // Allow by PK
+    Post.getBy("author", "deadbeef", "Post Title");
+    Post.getBy("author", ["deadbeef"], "Post Title");
+    // @ts-expect-error - wrong PK types
+    Post.getBy("author", 3, "Post Title");
+    // @ts-expect-error - wrong PK types
+    Post.getBy("author", ["deadbeef", 3], "Post Title");
+    // @ts-expect-error - wrong PK types
+    Post.getBy("author", [], "Post Title");
+
     const userRows = User.findBy("email", {from: "a@test.com"});
     userRows.map(row => row.email.toUpperCase());
     // @ts-expect-error - iterator rows are typed, so unknown properties are rejected
@@ -676,6 +694,71 @@ test("Link relationships and bidirectional references", async () => {
         expect(post).toBeDefined();
         expectErrorCode("LAZY_FAIL", () => post!.author.name); // Broken link should throw
         post!.preventPersist();
+    });
+});
+
+test("Link lookups accept primary key shorthands", async () => {
+    const LinkedPrimaryKeyLookup = E.defineModel("LinkedPrimaryKeyLookup", class {
+        author = E.field(E.link(User), {description: "Linked author"});
+        slug = E.field(E.string, {description: "Lookup slug"});
+        body = E.field(E.string, {description: "Stored body"});
+    }, {
+        pk: ["author", "slug"] as const,
+    });
+
+    const CompositeLinkTarget = E.defineModel("CompositeLinkTarget", class {
+        section = E.field(E.orderedString, {description: "Section"});
+        page = E.field(E.orderedString, {description: "Page"});
+        label = E.field(E.string, {description: "Display label"});
+    }, {
+        pk: ["section", "page"] as const,
+    });
+
+    const CompositeLinkLookup = E.defineModel("CompositeLinkLookup", class {
+        id = E.field(E.identifier, {description: "Lookup row id"});
+        target = E.field(E.link(CompositeLinkTarget), {description: "Composite-key target"});
+        slug = E.field(E.string, {description: "Lookup slug"});
+    }, {
+        pk: "id",
+        unique: { targetSlug: ["target", "slug"] },
+    });
+
+    let userId: string;
+
+    await E.transact(() => {
+        const user = new User({email: "link-pk@test.com", name: "Link PK"});
+        userId = user.id;
+
+        new Post({title: "Link PK Post", content: "By shorthand", author: user});
+        new LinkedPrimaryKeyLookup({author: user, slug: "intro", body: "Linked PK body"});
+
+        const target = new CompositeLinkTarget({section: "docs", page: "intro", label: "Introduction"});
+        new CompositeLinkLookup({target, slug: "overview"});
+    });
+
+    await E.transact(() => {
+        expect(Post.getBy("author", userId, "Link PK Post")!.content).toBe("By shorthand");
+        expect(Post.getBy("author", [userId], "Link PK Post")!.title).toBe("Link PK Post");
+
+        const foundByScalarPk = Post.findBy("author", {is: [userId, "Link PK Post"], fetch: 'single'});
+        expect(foundByScalarPk.author.id).toBe(userId);
+
+        const foundByArrayPk = Post.findBy("author", {is: [[userId], "Link PK Post"], fetch: 'single'});
+        expect(foundByArrayPk.title).toBe("Link PK Post");
+
+        const linkedByPk = LinkedPrimaryKeyLookup.get(userId, "intro")!;
+        expect(linkedByPk.body).toBe("Linked PK body");
+        expect(linkedByPk.author.id).toBe(userId);
+
+        const linkedByArrayPk = LinkedPrimaryKeyLookup.get([userId], "intro")!;
+        expect(linkedByArrayPk.body).toBe("Linked PK body");
+        expect(linkedByArrayPk.author.id).toBe(userId);
+
+        const compositeByUnique = CompositeLinkLookup.getBy("targetSlug", ["docs", "intro"], "overview")!;
+        expect(compositeByUnique.target.label).toBe("Introduction");
+
+        const compositeByFind = CompositeLinkLookup.findBy("targetSlug", {is: [["docs", "intro"], "overview"], fetch: 'single'});
+        expect(compositeByFind.target.page).toBe("intro");
     });
 });
 

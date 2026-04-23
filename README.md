@@ -192,6 +192,22 @@ await E.transact(() => {
 });
 ```
 
+If a primary key or named index includes a `link(...)` field, lookup helpers either accept the linked row's instance object or its primary key. For linked models with composite primary keys, pass the full tuple in that slot:
+
+```typescript
+await E.transact(() => {
+  // So instead of..
+  const post1 = Post.getBy("author", Author.get(user.id), "Hello World");
+  // We can do..
+  const post2 = Post.getBy("author", user.id, "Hello World");
+  // Or..
+  const post3 = Post.getBy("author", [user.id], "Hello World");
+
+  // For an index that includes a link with a composite primary key..
+  const page = Comment.getBy("target", ["docs", "intro"], "overview");
+});
+```
+
 #### Range Queries
 
 Primary-key queries use `.find()`. Named unique and secondary indexes use `.findBy(name, ...)`:
@@ -593,7 +609,7 @@ Prefer the `ModelClass` type alias for annotations and the result of
 
 **Type:** `typeof ModelClassRuntime`
 
-### AnyModelClass · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L111)
+### AnyModelClass · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L113)
 
 A model constructor with its generic information erased.
 
@@ -841,7 +857,7 @@ for tests, local resets, or tooling that needs a completely empty database.
 
 **Signature:** `() => Promise<void>`
 
-### field · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L76)
+### field · [function](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L77)
 
 Create a field definition for a model property.
 
@@ -849,16 +865,16 @@ This function uses TypeScript magic to return the field configuration object
 while appearing to return the actual field value type to the type system.
 This allows for both runtime introspection and compile-time type safety.
 
-**Signature:** `<T>(type: TypeWrapper<T>, options?: Partial<FieldConfig<T>>) => T`
+**Signature:** `<TYPE extends TypeWrapper<any>>(type: TYPE, options?: Partial<FieldConfig<FieldValue<TYPE>>>) => FieldValue<TYPE>`
 
 **Type Parameters:**
 
-- `T` - The field type.
+- `TYPE extends TypeWrapper<any>` - The field type.
 
 **Parameters:**
 
-- `type: TypeWrapper<T>` - The type wrapper for this field.
-- `options: Partial<FieldConfig<T>>` (optional) - Additional field configuration options.
+- `type: TYPE` - The type wrapper for this field.
+- `options: Partial<FieldConfig<FieldValue<TYPE>>>` (optional) - Additional field configuration options.
 
 **Returns:** The field value (typed as T, but actually returns FieldConfig<T>).
 
@@ -1060,7 +1076,7 @@ const countType = E.literal(42);
 
 Create a link type wrapper for model relationships.
 
-**Signature:** `{ <const T extends new (...args: any[]) => Model<any>>(TargetModel: T): TypeWrapper<InstanceType<T>>; <const T extends new (...args: any[]) => Model<any>>(TargetModel: () => T): TypeWrapper<...>; }`
+**Signature:** `{ <const T extends new (...args: any[]) => Model<any>>(TargetModel: T): TypeWrapper<InstanceType<T>> & QueryArgCarrier<InstanceType<T> | LinkPrimaryKeyInput<LinkTargetPKArgs<T>>>; <const T extends new (...args: any[]) => Model<any>>(TargetModel: () => T): TypeWrapper<...>; }`
 
 **Type Parameters:**
 
@@ -1090,7 +1106,7 @@ const Book = E.defineModel("Book", class {
 
 **Signature:** `() => void`
 
-### FindOptions · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L115)
+### FindOptions · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L141)
 
 Range-query options accepted by `find()`, `findBy()`, `batchProcess()`, and `batchProcessBy()`.
 
@@ -1098,7 +1114,10 @@ Supports exact-match lookups via `is`, inclusive bounds via `from` / `to`,
 exclusive bounds via `after` / `before`, and reverse scans.
 
 For single-field indexes, values can be passed directly. For composite indexes,
-pass tuples or partial tuples for prefix matching.
+pass tuples or partial tuples for prefix matching. If an index field is a
+`link(...)`, you may pass either the linked model instance or the linked
+model's primary key. Composite linked primary keys are passed as tuples in
+that slot.
 
 **Type:** `(
     (
@@ -1128,7 +1147,7 @@ pass tuples or partial tuples for prefix matching.
     & (FETCH extends undefined ? { fetch?: undefined } : { fetch: FETCH })
 )`
 
-### IndexRangeIterator · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L73)
+### IndexRangeIterator · [class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L90)
 
 Iterator for range queries on indexes.
 Handles common iteration logic for both primary and unique indexes.
@@ -1138,27 +1157,27 @@ Extends built-in Iterator to provide map/filter/reduce/toArray/etc.
 
 - `ITEM`
 
-#### indexRangeIterator.[Symbol.iterator] · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L78)
+#### indexRangeIterator.[Symbol.iterator] · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L100)
 
 **Signature:** `() => this`
 
-#### indexRangeIterator.next · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L80)
+#### indexRangeIterator.next · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L102)
 
 **Signature:** `() => IteratorResult<ITEM, any>`
 
-#### indexRangeIterator.count · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L102)
+#### indexRangeIterator.count · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L110)
 
 **Signature:** `() => number`
 
-#### indexRangeIterator.fetch · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L105)
+#### indexRangeIterator.fetch · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L112)
 
 **Signature:** `() => ITEM`
 
-### Change · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L85)
+### Change · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L90)
 
 **Type:** `Record<any, any> | "created" | "deleted"`
 
-### FieldConfig · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L37)
+### FieldConfig · [interface](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L40)
 
 Configuration interface for model fields.
 
@@ -1172,13 +1191,13 @@ The type wrapper that defines how this field is serialized/validated.
 
 **Type:** `TypeWrapper<T>`
 
-#### fieldConfig.description · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L47)
+#### fieldConfig.description · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L48)
 
 Optional human-readable description of the field.
 
 **Type:** `string`
 
-#### fieldConfig.default · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L49)
+#### fieldConfig.default · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L50)
 
 Optional default value or function that generates default values.
 
@@ -1276,7 +1295,7 @@ Check if indexing should be skipped for this field value.
 
 **Signature:** `() => AnyModelClass`
 
-### DatabaseError · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L174)
+### DatabaseError · [constant](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L182)
 
 The DatabaseError class is used to represent errors that occur during database operations.
 It extends the built-in Error class and has a machine readable error code string property.

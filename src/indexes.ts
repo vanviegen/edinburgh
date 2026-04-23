@@ -22,6 +22,17 @@ type IndexArgTypes<ITEM, F extends readonly (keyof ITEM & string)[]> = {
     [I in keyof F]: ITEM[F[I]]
 };
 
+function serializeIndexArg(fieldType: TypeWrapper<any>, arg: any, pack: DataPack) {
+    const linkedModel = fieldType.getLinkedModel();
+    if (!linkedModel || arg instanceof linkedModel) {
+        fieldType.serialize(arg, pack);
+        return;
+    }
+
+    // Link lookups may pass the target row's primary key instead of a loaded instance.
+    pack.write(linkedModel._argsToKeyBytes(Array.isArray(arg) ? arg : [arg], false).toUint8Array());
+}
+
 const MAX_INDEX_ID_PREFIX = -1;
 const INDEX_ID_PREFIX = -2;
 const VERSION_INFO_PREFIX = -3;
@@ -88,7 +99,10 @@ type ArrayOrOnlyItem<ARG_TYPES extends readonly any[]> = ARG_TYPES extends reado
  * exclusive bounds via `after` / `before`, and reverse scans.
  *
  * For single-field indexes, values can be passed directly. For composite indexes,
- * pass tuples or partial tuples for prefix matching.
+ * pass tuples or partial tuples for prefix matching. If an index field is a
+ * `link(...)`, you may pass either the linked model instance or the linked
+ * model's primary key. Composite linked primary keys are passed as tuples in
+ * that slot.
  *
  * @template ARG_TYPES - Tuple of index argument types.
  * @template FETCH - Optional fetch mode used by overloads that return one row.
@@ -182,7 +196,7 @@ export abstract class BaseIndex<ITEM, const F extends readonly (keyof ITEM & str
             let index = 0;
             for (const fieldType of this._indexFields.values()) {
                 if (index >= args.length) break;
-                fieldType.serialize(args[index++], bytes);
+                serializeIndexArg(fieldType, args[index++], bytes);
             }
         }
         return bytes;

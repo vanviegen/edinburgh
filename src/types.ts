@@ -87,6 +87,35 @@ export interface TypeWrapper<T> {
     default?(model: any): T;
 }
 
+// Hidden type-only metadata used to widen lookup arguments without widening assignment types.
+export declare const QUERY_ARG: unique symbol;
+
+export type LinkTargetPKArgs<T extends new (...args: any) => any> =
+    T extends { get(...args: infer PKA): any } ? PKA : never;
+
+export type LinkPrimaryKeyInput<PKA extends readonly any[]> =
+    PKA extends readonly [infer ONLY]
+        ? ONLY | PKA
+        : PKA;
+
+type QueryArgCarrier<QUERY> = {
+    readonly [QUERY_ARG]?: QUERY;
+};
+
+type QueryAnnotated<T, QUERY> = T & QueryArgCarrier<QUERY>;
+
+export type FieldValue<TYPE extends TypeWrapper<any>> =
+    TYPE extends TypeWrapper<infer T>
+        ? TYPE extends { readonly [QUERY_ARG]?: infer QUERY }
+            ? QueryAnnotated<T, Exclude<QUERY, undefined>>
+            : T
+        : never;
+
+export type FieldQueryArg<T> =
+    T extends { readonly [QUERY_ARG]?: infer QUERY }
+        ? Exclude<QUERY, undefined>
+        : T;
+
 
 class StringType extends TypeWrapper<string> {
     kind = 'string';
@@ -620,7 +649,7 @@ export class LinkType<T extends new (...args: any[]) => Model<any>> extends Type
     }
 
     getLinkedModel(): AnyModelClass {
-        if (!('getLazy' in this.TargetModel)) this.TargetModel = (this.TargetModel as unknown as () => T)();
+        if (!('getLazy' in (this.TargetModel as any))) this.TargetModel = (this.TargetModel as unknown as () => T)();
         return this.TargetModel as any;
     }
     
@@ -795,7 +824,9 @@ export function record<const T>(inner: TypeWrapper<T>): TypeWrapper<Record<strin
 * }, { pk: "id" });
 * ```
 */
-export function link<const T extends new (...args: any[]) => Model<any>>(TargetModel: T): TypeWrapper<InstanceType<T>>;
+export function link<const T extends new (...args: any[]) => Model<any>>(
+    TargetModel: T,
+): TypeWrapper<InstanceType<T>> & QueryArgCarrier<InstanceType<T> | LinkPrimaryKeyInput<LinkTargetPKArgs<T>>>;
 export function link<const T extends new (...args: any[]) => Model<any>>(TargetModel: () => T): TypeWrapper<InstanceType<T>>;
 export function link(TargetModel: any): TypeWrapper<any> {
     return new LinkType(TargetModel);
