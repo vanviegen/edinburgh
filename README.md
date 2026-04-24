@@ -609,13 +609,13 @@ Prefer the `ModelClass` type alias for annotations and the result of
 
 **Type:** `typeof ModelClassRuntime`
 
-### AnyModelClass · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L113)
+### AnyModelClass · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L132)
 
 A model constructor with its generic information erased.
 
 Useful when accepting or storing arbitrary registered model classes.
 
-**Type:** `ModelClass<new () => any, readonly any[], any, any>`
+**Type:** `ModelClass<object, any, any, readonly any[], any, any>`
 
 ### ModelBase · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L252)
 
@@ -831,14 +831,14 @@ Register a model class with the Edinburgh ORM system.
 Converts a plain class into a fully-featured model with database persistence,
 typed fields, primary key access, and optional secondary and unique indexes.
 
-**Signature:** `<T extends new () => any, const PK extends (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[], const UNIQUE extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>, const INDEX extends Record<string, (keyof FieldsOf<T> & string) | ...`
+**Signature:** `<T extends new () => any, const PK extends (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[], const UNIQUE extends Record<string, IndexSpec<T>>, const INDEX extends Record<string, IndexSpec<T>>>(tableName: string, cls: T, opts?: { ...; }) => ModelClass<...>`
 
 **Type Parameters:**
 
 - `T extends new () => any`
 - `PK extends (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[]`
-- `UNIQUE extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>`
-- `INDEX extends Record<string, (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[] | ((instance: any) => any)>`
+- `UNIQUE extends Record<string, IndexSpec<T>>`
+- `INDEX extends Record<string, IndexSpec<T>>`
 
 **Parameters:**
 
@@ -1173,7 +1173,7 @@ Extends built-in Iterator to provide map/filter/reduce/toArray/etc.
 
 **Signature:** `() => ITEM`
 
-### Change · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L90)
+### Change · [type](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L93)
 
 **Type:** `Record<any, any> | "created" | "deleted"`
 
@@ -1197,19 +1197,19 @@ Optional human-readable description of the field.
 
 **Type:** `string`
 
-#### fieldConfig.default · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L50)
+#### fieldConfig.default · [member](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L51)
 
 Optional default value or function that generates default values.
 
 **Type:** `T | ((model: Record<string, any>) => T)`
 
-### TypeWrapper · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L33)
+### TypeWrapper · [abstract class](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L36)
 
 **Type Parameters:**
 
 - `T` - The TypeScript type this wrapper represents.
 
-#### typeWrapper.kind · [abstract property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L47)
+#### typeWrapper.kind · [abstract property](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L48)
 
 A string identifier for this type, used during serialization
 
@@ -1236,7 +1236,7 @@ Deserialize a value from a Pack into an object property.
 
 - `pack: DataPack` - The Pack instance to read from.
 
-#### typeWrapper.getError · [abstract method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L64)
+#### typeWrapper.getError · [abstract method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L66)
 
 Validate a value.
 
@@ -1258,7 +1258,7 @@ Serialize type metadata to a Pack (for schema serialization).
 
 - `pack: DataPack` - The Pack instance to write to.
 
-#### typeWrapper.containsNull · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L77)
+#### typeWrapper.containsNull · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L78)
 
 Check if indexing should be skipped for this field value.
 
@@ -1270,11 +1270,11 @@ Check if indexing should be skipped for this field value.
 
 **Returns:** true if indexing should be skipped.
 
-#### typeWrapper.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L78)
+#### typeWrapper.toString · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L79)
 
 **Signature:** `() => string`
 
-#### typeWrapper.clone · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L81)
+#### typeWrapper.clone · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L83)
 
 **Signature:** `(value: T) => T`
 
@@ -1282,7 +1282,7 @@ Check if indexing should be skipped for this field value.
 
 - `value: T`
 
-#### typeWrapper.equals · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L85)
+#### typeWrapper.equals · [method](https://github.com/vanviegen/edinburgh/blob/main/src/edinburgh.ts#L86)
 
 **Signature:** `(value1: T, value2: T) => boolean`
 

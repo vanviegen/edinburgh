@@ -148,6 +148,21 @@ function noNeedToRunThis() {
     p2!.blah;
     // @ts-expect-error
     Person.get(3);
+
+    E.defineModel("TypedComputedIndexCompileOnly", class {
+        id = E.field(E.identifier);
+        score = E.field(E.number);
+    }, {
+        pk: "id",
+        index: {
+            scoreBucket: row => {
+                row.score.toFixed();
+                // @ts-expect-error - computed index callbacks should see typed model fields
+                row.notARealField;
+                return [Math.floor(row.score / 10)];
+            },
+        },
+    });
 }
 
 let lastOnSaveItems: {model: Record<string,any>, change: Change}[] | undefined;
@@ -2100,7 +2115,7 @@ test("computed unique index: basic CRUD and get", async () => {
         lastName = E.field(E.string);
     }, {
         pk: "id",
-        unique: { fullName: (e: any) => [`${e.firstName} ${e.lastName}`] },
+        unique: { fullName: e => [`${e.firstName} ${e.lastName}`] },
     });
 
     await E.transact(() => {
@@ -2129,7 +2144,7 @@ test("computed unique index: unique constraint violation", async () => {
         b = E.field(E.string);
     }, {
         pk: "id",
-        unique: { aB: (u: any) => [`${u.a}:${u.b}`] },
+        unique: { aB: u => [`${u.a}:${u.b}`] },
     });
 
     await E.transact(() => {
@@ -2150,7 +2165,7 @@ test("computed secondary index: basic find", async () => {
         category = E.field(E.string);
     }, {
         pk: "id",
-        index: { priceBucket: (p: any) => [Math.floor(p.price / 100)] },
+        index: { priceBucket: p => [Math.floor(p.price / 100)] },
     });
 
     await E.transact(() => {
@@ -2188,7 +2203,7 @@ test("computed index: undefined return skips indexing (partial index)", async ()
     }, {
         pk: "id",
         index: {
-            activePriority: (m: any) =>
+            activePriority: m =>
                 m.status === "active" ? [m.priority] : [],
         },
     });
@@ -2217,7 +2232,7 @@ test("computed index: updates re-index on any field change", async () => {
         y = E.field(E.number);
     }, {
         pk: "id",
-        index: { sum: (u: any) => [u.x + u.y] },
+        index: { sum: u => [u.x + u.y] },
     });
 
     let savedId: string;
@@ -2250,7 +2265,7 @@ test("computed index: delete removes index entries", async () => {
         tag = E.field(E.string);
     }, {
         pk: "id",
-        index: { tag: (d: any) => [d.tag] },
+        index: { tag: d => [d.tag] },
     });
 
     await E.transact(() => {

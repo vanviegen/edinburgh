@@ -2,7 +2,7 @@ import DataPack from "./datapack.js";
 import { DatabaseError } from "olmdb/lowlevel";
 import { currentTxn } from "./edinburgh.js";
 import { Model, modelRegistry } from "./models.js";
-import type { AnyModelClass } from "./models.js";
+import type { AnyModelClass, ModelBase as ModelInstanceBase } from "./models.js";
 import { assert, addErrorPath, dbGet } from "./utils.js";
 
 
@@ -110,6 +110,15 @@ export type FieldValue<TYPE extends TypeWrapper<any>> =
             ? QueryAnnotated<T, Exclude<QUERY, undefined>>
             : T
         : never;
+
+export type StripQueryArg<T> =
+    T extends ModelInstanceBase & { readonly [QUERY_ARG]?: any }
+        ? Model<{
+            [K in Exclude<keyof T, keyof ModelInstanceBase | typeof QUERY_ARG>]: T[K]
+        }>
+        : T extends { readonly [QUERY_ARG]?: any }
+            ? { [K in keyof T as K extends typeof QUERY_ARG ? never : K]: T[K] }
+            : T;
 
 export type FieldQueryArg<T> =
     T extends { readonly [QUERY_ARG]?: infer QUERY }
@@ -657,8 +666,8 @@ export class LinkType<T extends new (...args: any[]) => Model<any>> extends Type
         pack.write(model.getPrimaryKey());
     }
     
-    deserialize(pack: DataPack) {
-        return this.getLinkedModel()._get(currentTxn(), pack.readUint8Array(), false);
+    deserialize(pack: DataPack): InstanceType<T> {
+        return this.getLinkedModel()._get(currentTxn(), pack.readUint8Array(), false) as InstanceType<T>;
     }
     
     getError(value: InstanceType<T>) {
