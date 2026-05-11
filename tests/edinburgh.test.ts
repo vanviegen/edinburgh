@@ -406,6 +406,35 @@ test("Parallel transactions", async () => {
     });
 });
 
+test("Raced writes with onSave do not leak reopened transactions", async () => {
+    const Counter = E.defineModel("Counter", class {
+        id = E.field(E.string);
+        value = E.field(E.number);
+    }, {
+        pk: "id",
+    });
+
+    E.setMaxRetryCount(100);
+    try {
+        await E.transact(() => {
+            new Counter({id: "counter", value: 0});
+        });
+
+        await Promise.all(Array.from({length: 20}, () => E.transact(async () => {
+            const counter = Counter.get("counter")!;
+            const current = counter.value;
+            await new Promise(resolve => setTimeout(resolve, 5));
+            counter.value = current + 1;
+        })));
+
+        await E.transact(() => {
+            expect(Counter.get("counter")!.value).toBe(20);
+        });
+    } finally {
+        E.setMaxRetryCount(6);
+    }
+});
+
 test("Type system comprehensive validation", async () => {
     const TypeTest = E.defineModel("TypeTest", class {
         id = E.field(E.identifier);

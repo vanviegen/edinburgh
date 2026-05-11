@@ -190,9 +190,17 @@ export async function transact<T>(fn: () => T): Promise<T> {
                 const commitResult = lowlevel.commitTransaction(txnId, true);
                 if (typeof commitResult === 'object') {
                     const commitSeq = await commitResult;
-                    if (commitSeq <= 0) continue; // Race condition - retry
+                    if (commitSeq <= 0) {
+                        lowlevel.abortTransaction(txnId);
+                        continue; // Race condition - retry
+                    }
                     // Run the callback within our new transaction context, so it can fetch linked lazy fields if needed
-                    onSaveCallback!(commitSeq, onSaveItems);
+                    try {
+                        onSaveCallback!(commitSeq, onSaveItems);
+                    } catch (e) {
+                        lowlevel.abortTransaction(txnId);
+                        throw e;
+                    }
                 }
                 // else: only reads
             }
@@ -243,8 +251,8 @@ let onSaveCallback: ((commitId: number, items: Map<Model<unknown>, Change>) => v
  *   - A sequential number. Higher numbers have been committed after lower numbers.
  *   - A map of model instances to their changes. The change can be "created", "deleted", or an object containing the old values.
  * 
- * The callback is called within a new transaction context, allowing lazy-loads to happen. However, any
- * changes made to Edinburgh models will not be saved.
+ * The callback is called within a new transaction context at or after the committed state, so lazy-loads
+ * and additional writes are allowed.
  */
 export function setOnSaveCallback(callback: ((commitId: number, items: Map<Model<unknown>, Change>) => void) | undefined) {
     onSaveCallback = callback;
