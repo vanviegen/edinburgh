@@ -1,7 +1,7 @@
 import * as lowlevel from "olmdb/lowlevel";
 import { DatabaseError } from "olmdb/lowlevel";
 import DataPack from "./datapack.js";
-import { deserializeType, serializeType, TypeWrapper, identifier, type FieldQueryArg, type FieldValue, type StripQueryArg } from "./types.js";
+import { deserializeType, serializeType, TypeWrapper, identifier, type FieldQueryArg, type FieldValue } from "./types.js";
 import { transact, currentTxn, type Transaction } from "./edinburgh.js";
 
 import { PrimaryKey, NonPrimaryIndex, IndexRangeIterator, UniqueIndex, SecondaryIndex, FindOptions, VersionInfo } from "./indexes.js";
@@ -65,34 +65,33 @@ function isObjectEmpty(obj: object) {
 export type Change = Record<any, any> | "created" | "deleted";
 
 type FieldsOf<T> = T extends new () => infer I ? I : never;
+type ModelFields<T extends new () => any> = FieldsOf<T>;
 
-type PublicFields<FIELDS> = {
-    [K in keyof FIELDS]: StripQueryArg<FIELDS[K]>;
-};
+export interface ModelLookup<PKA extends readonly any[] = readonly any[]> {
+    get(...args: PKA): any;
+}
 
-type QueryFields<FIELDS> = {
-    [K in keyof FIELDS]: FieldQueryArg<FIELDS[K]>;
-};
+type ModelInstance<FIELDS, PKA extends readonly any[] = readonly any[]> = Model<FIELDS, ModelLookup<PKA>>;
 
-type PublicModelOf<T extends new () => any> = Model<PublicFields<FieldsOf<T>>>;
+type PublicModelOf<T extends new () => any> = Model<ModelFields<T>>;
 
 type IndexSpec<T extends new () => any> =
-    | (keyof FieldsOf<T> & string)
-    | readonly (keyof FieldsOf<T> & string)[]
+    | (keyof ModelFields<T> & string)
+    | readonly (keyof ModelFields<T> & string)[]
     | ((instance: PublicModelOf<T>) => any);
 
-type PKArgs<QUERY_FIELDS, PK> =
-    PK extends readonly (keyof QUERY_FIELDS & string)[]
-        ? { [I in keyof PK]: PK[I] extends keyof QUERY_FIELDS ? QUERY_FIELDS[PK[I]] : never }
-        : PK extends keyof QUERY_FIELDS & string
-            ? [QUERY_FIELDS[PK]]
+type PKArgs<FIELDS, PK> =
+    PK extends readonly (keyof FIELDS & string)[]
+        ? { [I in keyof PK]: PK[I] extends keyof FIELDS ? FieldQueryArg<FIELDS[PK[I]]> : never }
+        : PK extends keyof FIELDS & string
+            ? [FieldQueryArg<FIELDS[PK]>]
             : [string];
 
-type IndexArgs<QUERY_FIELDS, SPEC> =
-    SPEC extends readonly (keyof QUERY_FIELDS & string)[]
-        ? { [I in keyof SPEC]: SPEC[I] extends keyof QUERY_FIELDS ? QUERY_FIELDS[SPEC[I]] : never }
-    : SPEC extends keyof QUERY_FIELDS & string
-        ? [QUERY_FIELDS[SPEC]]
+type IndexArgs<FIELDS, SPEC> =
+    SPEC extends readonly (keyof FIELDS & string)[]
+        ? { [I in keyof SPEC]: SPEC[I] extends keyof FIELDS ? FieldQueryArg<FIELDS[SPEC[I]]> : never }
+    : SPEC extends keyof FIELDS & string
+        ? [FieldQueryArg<FIELDS[SPEC]>]
     : SPEC extends (instance: any) => infer R
         ? R extends (infer V)[] ? [V] : [R]
     : never;
@@ -111,11 +110,11 @@ type PublicIndexSpecs<SPECS> = {
  *
  * Useful when accepting or storing arbitrary registered model classes.
  */
-export type AnyModelClass = ModelClass<object, any, any, readonly any[], any, any>;
+export type AnyModelClass = ModelClass<object, any, readonly any[], any, any>;
 
 type StaticMembers<T extends new () => any> = Pick<T, Exclude<keyof T, 'prototype'>>;
 
-type SecondaryRegistry<FIELDS> = Record<string, NonPrimaryIndex<Model<FIELDS>, readonly (keyof FIELDS & string)[], readonly any[]>>;
+type SecondaryRegistry<FIELDS, PKA extends readonly any[]> = Record<string, NonPrimaryIndex<ModelInstance<FIELDS, PKA>, readonly (keyof FIELDS & string)[], readonly any[]>>;
 
 function copyStaticMembersFromClassChain(target: object, source: Function) {
     for (let current: any = source; current && current !== Function.prototype; current = Object.getPrototypeOf(current)) {
@@ -133,15 +132,15 @@ export const pendingModelInits = new Set<AnyModelClass>();
 
 // These static members are attached dynamically in defineModel(), so 'declare' tells TypeScript
 // they exist at runtime without emitting duplicate class fields that would shadow those assignments.
-class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> extends PrimaryKey<Model<PUBLIC_FIELDS>, readonly (keyof PUBLIC_FIELDS & string)[], PKA> {
+class ModelClassRuntime<FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> extends PrimaryKey<ModelInstance<FIELDS, PKA>, readonly (keyof FIELDS & string)[], PKA> {
     // Runtime table identifier used for index naming and diagnostics.
     declare tableName: string;
     // Field schema map used for validation and serialization.
     declare fields: Record<string | symbol | number, FieldConfig<unknown>>;
     // Registered unique/secondary indexes for this model.
-    declare _secondaries?: SecondaryRegistry<PUBLIC_FIELDS>;
+    declare _secondaries?: SecondaryRegistry<FIELDS, PKA>;
     // Cached list of non-primary fields used for value serialization.
-    _nonKeyFields!: (keyof PUBLIC_FIELDS & string)[];
+    _nonKeyFields!: (keyof FIELDS & string)[];
     // Lazy getter/setter descriptors installed on unloaded non-key fields.
     _lazyDescriptors: Record<string | symbol | number, PropertyDescriptor> = {};
     // Writable descriptors temporarily installed before hydrating value fields.
@@ -186,11 +185,11 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
                 this._lazyDescriptors[fieldName] = {
                     configurable: true,
                     enumerable: true,
-                    get(this: Model<PUBLIC_FIELDS>) {
+                    get(this: ModelInstance<FIELDS, PKA>) {
                         this.constructor._lazyLoad(this);
                         return (this as any)[fieldName];
                     },
-                    set(this: Model<PUBLIC_FIELDS>, value: any) {
+                    set(this: ModelInstance<FIELDS, PKA>, value: any) {
                         this.constructor._lazyLoad(this);
                         (this as any)[fieldName] = value;
                     },
@@ -226,9 +225,9 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
         return index;
     }
 
-    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: false | Uint8Array): Model<PUBLIC_FIELDS>;
-    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: true): Model<PUBLIC_FIELDS> | undefined;
-    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: boolean | Uint8Array): Model<PUBLIC_FIELDS> | undefined {
+    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: false | Uint8Array): ModelInstance<FIELDS, PKA>;
+    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: true): ModelInstance<FIELDS, PKA> | undefined;
+    _get(txn: Transaction, args: PKA | Uint8Array, loadNow: boolean | Uint8Array): ModelInstance<FIELDS, PKA> | undefined {
         let key: Uint8Array;
         let keyParts: readonly any[] | undefined;
         if (args instanceof Uint8Array) {
@@ -239,7 +238,7 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
         }
 
         const keyHash = hashBytes(key);
-        const cached = txn.instances.get(keyHash) as Model<PUBLIC_FIELDS> | undefined;
+        const cached = txn.instances.get(keyHash) as ModelInstance<FIELDS, PKA> | undefined;
         if (cached) {
             if (loadNow && loadNow !== true) {
                 Object.defineProperties(cached, this._resetDescriptors);
@@ -258,7 +257,7 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
             }
         }
 
-        const model = Object.create((this as any).prototype) as Model<PUBLIC_FIELDS>;
+        const model = Object.create((this as any).prototype) as ModelInstance<FIELDS, PKA>;
         model._txn = txn;
         model._oldValues = {};
         txn.instances.set(keyHash, model);
@@ -285,7 +284,7 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
         return model;
     }
 
-    _lazyLoad(model: Model<PUBLIC_FIELDS>) {
+    _lazyLoad(model: ModelInstance<FIELDS, PKA>) {
         const key = model._primaryKey!;
         const valueBuffer = dbGet(model._txn.id, key);
         if (!valueBuffer) throw new DatabaseError(`Lazy-loaded ${this.tableName}#${key} does not exist`, 'LAZY_FAIL');
@@ -302,7 +301,7 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
      *
      * @returns The matching model, or `undefined` if no row exists.
      */
-    get(...args: PKA): Model<PUBLIC_FIELDS> | undefined {
+    get(...args: PKA): ModelInstance<FIELDS, PKA> | undefined {
         return this._get(currentTxn(), args, true);
     }
 
@@ -313,11 +312,11 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
      *
      * Accessing a lazy field later will load the remaining fields transparently.
      */
-    getLazy(...args: PKA): Model<PUBLIC_FIELDS> {
+    getLazy(...args: PKA): ModelInstance<FIELDS, PKA> {
         return this._get(currentTxn(), args, false);
     }
 
-    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): Model<PUBLIC_FIELDS> {
+    _pairToInstance(txn: Transaction, keyBuffer: ArrayBuffer, valueBuffer: ArrayBuffer): ModelInstance<FIELDS, PKA> {
         return this._get(txn, new Uint8Array(keyBuffer), new Uint8Array(valueBuffer))!;
     }
 
@@ -329,7 +328,7 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
      * @param obj Partial model data that **must** include every primary key field.
       * @returns The loaded-and-updated or newly created instance.
      */
-    replaceInto(obj: Partial<PUBLIC_FIELDS>): Model<PUBLIC_FIELDS> {
+    replaceInto(obj: Partial<FIELDS>): ModelInstance<FIELDS, PKA> {
         const keyArgs: any[] = [];
         for (const fieldName of this._indexFields.keys()) {
             if (!(fieldName in (obj as any))) {
@@ -337,7 +336,7 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
             }
             keyArgs.push((obj as any)[fieldName]);
         }
-        const existing = this.get(...keyArgs as any) as Model<PUBLIC_FIELDS> | undefined;
+        const existing = this.get(...keyArgs as any) as ModelInstance<FIELDS, PKA> | undefined;
         if (existing) {
             for (const key in obj as any) {
                 if (!this._indexFields.has(key as any)) {
@@ -358,7 +357,7 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
         * linked model uses a composite primary key, pass the full tuple in that slot.
      * @returns The matching model instance, if any.
      */
-    getBy<K extends string & keyof UNIQUE>(name: K, ...args: IndexArgs<QUERY_FIELDS, UNIQUE[K]>): Model<PUBLIC_FIELDS> | undefined {
+    getBy<K extends string & keyof UNIQUE>(name: K, ...args: IndexArgs<FIELDS, UNIQUE[K]>): ModelInstance<FIELDS, PKA> | undefined {
         return (this._getSecondary(name) as any).getPK(...args);
     }
 
@@ -369,9 +368,9 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
         * or `index` registration. Link-valued index fields accept either the linked
         * model instance or the linked model's primary key tuple/value.
      */
-    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<QUERY_FIELDS, (UNIQUE & INDEX)[K]>, 'first'>): Model<PUBLIC_FIELDS> | undefined;
-    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<QUERY_FIELDS, (UNIQUE & INDEX)[K]>, 'single'>): Model<PUBLIC_FIELDS>;
-    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts?: FindOptions<IndexArgs<QUERY_FIELDS, (UNIQUE & INDEX)[K]>>): IndexRangeIterator<Model<PUBLIC_FIELDS>>;
+    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>, 'first'>): ModelInstance<FIELDS, PKA> | undefined;
+    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>, 'single'>): ModelInstance<FIELDS, PKA>;
+    findBy<K extends string & keyof (UNIQUE & INDEX)>(name: K, opts?: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>>): IndexRangeIterator<ModelInstance<FIELDS, PKA>>;
     findBy(name: string, opts?: any): any {
         return this._getSecondary(name).find(opts);
     }
@@ -383,13 +382,13 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
      */
     batchProcessBy<K extends string & keyof (UNIQUE & INDEX)>(
         name: K,
-        opts: FindOptions<IndexArgs<QUERY_FIELDS, (UNIQUE & INDEX)[K]>> & { limitSeconds?: number; limitRows?: number },
-        callback: (row: Model<PUBLIC_FIELDS>) => any,
+        opts: FindOptions<IndexArgs<FIELDS, (UNIQUE & INDEX)[K]>> & { limitSeconds?: number; limitRows?: number },
+        callback: (row: ModelInstance<FIELDS, PKA>) => any,
     ): Promise<void> {
         return this._getSecondary(name).batchProcess(opts, callback as any);
     }
 
-    _loadValueFields(model: Model<PUBLIC_FIELDS>, valueArray: Uint8Array) {
+    _loadValueFields(model: ModelInstance<FIELDS, PKA>, valueArray: Uint8Array) {
         const valuePack = new DataPack(valueArray);
         const version = valuePack.readNumber();
 
@@ -425,7 +424,7 @@ class ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[],
         return info;
     }
 
-    _migrateValueFields(model: Model<PUBLIC_FIELDS>, version: number, valuePack: DataPack) {
+    _migrateValueFields(model: ModelInstance<FIELDS, PKA>, version: number, valuePack: DataPack) {
         const versionInfo = this._loadVersionInfo(model._txn.id, version);
         const record: Record<string, any> = {};
         for (const [name] of this._indexFields.entries()) record[name] = (model as any)[name];
@@ -473,23 +472,23 @@ export const ModelClass = ModelClassRuntime;
  * helpers like `get()` and `getLazy()`, range-query helpers like `find()`, and
  * named-index helpers like `getBy()` and `findBy()`.
  *
- * @template T - The original class passed to `defineModel()`.
+ * @template FIELDS - The user-defined fields of the model instance.
  * @template PKA - Tuple of primary-key argument types.
  * @template UNIQUE - Named unique-index specifications.
  * @template INDEX - Named secondary-index specifications.
  */
-export type ModelClass<STATICS, PUBLIC_FIELDS, QUERY_FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> =
+export type ModelClass<STATICS, FIELDS, PKA extends readonly any[], UNIQUE = {}, INDEX = {}> =
     STATICS
-    & ModelClassRuntime<PUBLIC_FIELDS, QUERY_FIELDS, PKA, UNIQUE, INDEX>
+    & ModelClassRuntime<FIELDS, PKA, UNIQUE, INDEX>
     & {
-        new (initial?: Partial<PUBLIC_FIELDS>, txn?: Transaction): Model<PUBLIC_FIELDS>;
+        new (initial?: Partial<FIELDS>, txn?: Transaction): ModelInstance<FIELDS, PKA>;
     };
 
 /**
  * Minimal instance-side model shape used for typing the constructor property.
  */
-export interface ModelBase {
-    constructor: AnyModelClass;
+export interface ModelBase<LOOKUP extends ModelLookup = ModelLookup> {
+    constructor: LOOKUP & AnyModelClass;
 }
 
 /**
@@ -509,7 +508,7 @@ export interface ModelBase {
  */
 export function defineModel<
     T extends new () => any,
-    const PK extends (keyof FieldsOf<T> & string) | readonly (keyof FieldsOf<T> & string)[],
+    const PK extends (keyof ModelFields<T> & string) | readonly (keyof ModelFields<T> & string)[],
     const UNIQUE extends Record<string, IndexSpec<T>>,
     const INDEX extends Record<string, IndexSpec<T>>,
 >(
@@ -518,9 +517,8 @@ export function defineModel<
     opts?: { pk?: PK, unique?: UNIQUE, index?: INDEX, override?: boolean }
 ): ModelClass<
     StaticMembers<T>,
-    PublicFields<FieldsOf<T>>,
-    QueryFields<FieldsOf<T>>,
-    PKArgs<QueryFields<FieldsOf<T>>, PK>,
+    ModelFields<T>,
+    PKArgs<ModelFields<T>, PK>,
     PublicIndexSpecs<UNIQUE>,
     PublicIndexSpecs<INDEX>
 > {
@@ -1010,5 +1008,5 @@ export async function deleteEverything(): Promise<void> {
  * A model instance, including its user-defined fields.
  * @template FIELDS - The fields defined on this model.
  */
-export type Model<FIELDS> = FIELDS & ModelBase;
+export type Model<FIELDS, LOOKUP extends ModelLookup = ModelLookup> = FIELDS & ModelBase<LOOKUP>;
 export const Model = ModelBase;

@@ -90,7 +90,7 @@ export interface TypeWrapper<T> {
 // Hidden type-only metadata used to widen lookup arguments without widening assignment types.
 export declare const QUERY_ARG: unique symbol;
 
-export type LinkTargetPKArgs<T extends new (...args: any) => any> =
+export type LinkTargetPKArgs<T extends { get(...args: any): any }> =
     T extends { get(...args: infer PKA): any } ? PKA : never;
 
 export type LinkPrimaryKeyInput<PKA extends readonly any[]> =
@@ -102,26 +102,15 @@ type QueryArgCarrier<QUERY> = {
     readonly [QUERY_ARG]?: QUERY;
 };
 
-type QueryAnnotated<T, QUERY> = T & QueryArgCarrier<QUERY>;
-
 export type FieldValue<TYPE extends TypeWrapper<any>> =
     TYPE extends TypeWrapper<infer T>
-        ? TYPE extends { readonly [QUERY_ARG]?: infer QUERY }
-            ? QueryAnnotated<T, Exclude<QUERY, undefined>>
-            : T
+        ? T
         : never;
 
-export type StripQueryArg<T> =
-    T extends ModelInstanceBase & { readonly [QUERY_ARG]?: any }
-        ? Model<{
-            [K in Exclude<keyof T, keyof ModelInstanceBase | typeof QUERY_ARG>]: T[K]
-        }>
-        : T extends { readonly [QUERY_ARG]?: any }
-            ? { [K in keyof T as K extends typeof QUERY_ARG ? never : K]: T[K] }
-            : T;
-
 export type FieldQueryArg<T> =
-    T extends { readonly [QUERY_ARG]?: infer QUERY }
+    T extends ModelInstanceBase<infer LOOKUP>
+        ? T | LinkPrimaryKeyInput<LinkTargetPKArgs<LOOKUP>>
+        : T extends { readonly [QUERY_ARG]?: infer QUERY }
         ? Exclude<QUERY, undefined>
         : T;
 
@@ -835,7 +824,7 @@ export function record<const T>(inner: TypeWrapper<T>): TypeWrapper<Record<strin
 */
 export function link<const T extends new (...args: any[]) => Model<any>>(
     TargetModel: T,
-): TypeWrapper<InstanceType<T>> & QueryArgCarrier<InstanceType<T> | LinkPrimaryKeyInput<LinkTargetPKArgs<T>>>;
+): TypeWrapper<InstanceType<T>>;
 export function link<const T extends new (...args: any[]) => Model<any>>(TargetModel: () => T): TypeWrapper<InstanceType<T>>;
 export function link(TargetModel: any): TypeWrapper<any> {
     return new LinkType(TargetModel);

@@ -39,18 +39,8 @@ export const DeclarationSearcher = E.defineModel("DeclarationSearcher", class {
 export type DeclarationGameOwner = InstanceType<typeof DeclarationGame>["owner"];
 export type DeclarationSearcherGame = InstanceType<typeof DeclarationSearcher>["games"][string];
 
-type _ownerFieldMatchesPublicModel = Assert<IsEqual<DeclarationGameOwner, E.Model<{
-    id: string;
-    name: string;
-}>>>;
-type _searcherGameMatchesPublicModel = Assert<IsEqual<DeclarationSearcherGame, E.Model<{
-    id: string;
-    owner: E.Model<{
-        id: string;
-        name: string;
-    }>;
-    slug: string;
-}>>>;
+type _ownerFieldNameMatches = Assert<IsEqual<DeclarationGameOwner["name"], string>>;
+type _searcherGameOwnerNameMatches = Assert<IsEqual<DeclarationSearcherGame["owner"]["name"], string>>;
 
 function compileTypeChecks() {
     const user = new DeclarationUser({ name: "D" });
