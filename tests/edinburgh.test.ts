@@ -220,6 +220,33 @@ test("Checks for validity", async () => {
     });
 })
 
+test("onSave callback can lazy-load linked fields", async () => {
+    const callbacks: string[] = [];
+    E.setOnSaveCallback((commitId, items) => {
+        lastOnSaveCommitId = commitId;
+        lastOnSaveItems = [...items].map(([model, change]) => ({ model, change }));
+        for (const [model] of items) {
+            if (model instanceof Data) {
+                callbacks.push(model.owner?.name ?? '');
+            }
+        }
+    });
+
+    await E.transact(() => {
+        const owner = new Person({ name: 'Owner', cars: [] });
+        new Data({ createdAt: 1, owner, subjects: [owner] });
+    });
+
+    callbacks.length = 0;
+
+    await E.transact(() => {
+        const row = Data.find({ fetch: 'single' });
+        row.createdAt = 2;
+    });
+
+    expect(callbacks).toEqual(['Owner']);
+});
+
 test("Sets defaults", async () => {
 
     const Defaults = E.defineModel("Defaults", class {

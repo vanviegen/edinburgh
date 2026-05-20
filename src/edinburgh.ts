@@ -10,6 +10,7 @@ export {
     type ModelClass,
     type AnyModelClass,
     type ModelBase,
+    type ModelLookup,
     defineModel,
     deleteEverything,
     field,
@@ -158,6 +159,7 @@ export async function transact<T>(fn: () => T): Promise<T> {
             const txn: Transaction = { id: txnId, instances: new Map() };
             const onSaveItems: Map<Model<unknown>, Change> | undefined = onSaveCallback ? new Map() : undefined;
 
+            let retry = false;
             let result: T | undefined;
             try {
                 await txnStorage.run(txn, async function() {
@@ -179,31 +181,33 @@ export async function transact<T>(fn: () => T): Promise<T> {
                             onSaveItems.set(instance, change);
                         }
                     }
+
+                    if (onSaveItems?.size) {
+                        // Perform writes, and start a new transaction at or past the point-in-time of our commit
+                        const commitResult = lowlevel.commitTransaction(txnId, true);
+                        if (typeof commitResult === 'object') {
+                            const commitSeq = await commitResult;
+                            if (commitSeq <= 0) {
+                                try { lowlevel.abortTransaction(txnId); } catch {}
+                                retry = true;
+                                return;
+                            }
+                            // Run the callback within our renewed transaction context, so it can fetch linked lazy fields if needed
+                            try {
+                                onSaveCallback!(commitSeq, onSaveItems);
+                            } catch (e) {
+                                throw e;
+                            }
+                        }
+                        // else: only reads
+                    }
                 });
             } catch (e: any) {
                 try { lowlevel.abortTransaction(txnId); } catch {}
                 throw e;
             }
 
-            if (onSaveItems?.size) {
-                // Perform writes, and start a new transaction at or past the point-in-time of our commit
-                const commitResult = lowlevel.commitTransaction(txnId, true);
-                if (typeof commitResult === 'object') {
-                    const commitSeq = await commitResult;
-                    if (commitSeq <= 0) {
-                        lowlevel.abortTransaction(txnId);
-                        continue; // Race condition - retry
-                    }
-                    // Run the callback within our new transaction context, so it can fetch linked lazy fields if needed
-                    try {
-                        onSaveCallback!(commitSeq, onSaveItems);
-                    } catch (e) {
-                        lowlevel.abortTransaction(txnId);
-                        throw e;
-                    }
-                }
-                // else: only reads
-            }
+            if (retry) continue;
 
             // Make the instances read-only to make it clear that their transaction has ended.
             for (const instance of txn.instances.values()) {
